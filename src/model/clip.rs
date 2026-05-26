@@ -394,7 +394,7 @@ pub struct AngleSwitch {
     pub angle_index: usize,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClipColorLabel {
     None,
@@ -406,6 +406,90 @@ pub enum ClipColorLabel {
     Blue,
     Purple,
     Magenta,
+}
+
+impl ClipColorLabel {
+    /// All labels except `None`, in display order (for the legend UI and for
+    /// iterating the palette in tests).
+    pub const PALETTE: [ClipColorLabel; 8] = [
+        ClipColorLabel::Red,
+        ClipColorLabel::Orange,
+        ClipColorLabel::Yellow,
+        ClipColorLabel::Green,
+        ClipColorLabel::Teal,
+        ClipColorLabel::Blue,
+        ClipColorLabel::Purple,
+        ClipColorLabel::Magenta,
+    ];
+
+    /// Snake-case string used by MCP + FCPXML serialization.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ClipColorLabel::None => "none",
+            ClipColorLabel::Red => "red",
+            ClipColorLabel::Orange => "orange",
+            ClipColorLabel::Yellow => "yellow",
+            ClipColorLabel::Green => "green",
+            ClipColorLabel::Teal => "teal",
+            ClipColorLabel::Blue => "blue",
+            ClipColorLabel::Purple => "purple",
+            ClipColorLabel::Magenta => "magenta",
+        }
+    }
+
+    /// Parse a snake-case label string. Returns `None` for unknown input
+    /// (callers distinguish this from the `ClipColorLabel::None` variant,
+    /// which round-trips through `"none"`).
+    pub fn from_str(s: &str) -> Option<ClipColorLabel> {
+        match s {
+            "none" => Some(ClipColorLabel::None),
+            "red" => Some(ClipColorLabel::Red),
+            "orange" => Some(ClipColorLabel::Orange),
+            "yellow" => Some(ClipColorLabel::Yellow),
+            "green" => Some(ClipColorLabel::Green),
+            "teal" => Some(ClipColorLabel::Teal),
+            "blue" => Some(ClipColorLabel::Blue),
+            "purple" => Some(ClipColorLabel::Purple),
+            "magenta" => Some(ClipColorLabel::Magenta),
+            _ => None,
+        }
+    }
+
+    /// Default English-language display name shown in the legend when the
+    /// user has not provided a project-specific override.
+    pub fn default_display_name(self) -> &'static str {
+        match self {
+            ClipColorLabel::None => "None",
+            ClipColorLabel::Red => "Red",
+            ClipColorLabel::Orange => "Orange",
+            ClipColorLabel::Yellow => "Yellow",
+            ClipColorLabel::Green => "Green",
+            ClipColorLabel::Teal => "Teal",
+            ClipColorLabel::Blue => "Blue",
+            ClipColorLabel::Purple => "Purple",
+            ClipColorLabel::Magenta => "Magenta",
+        }
+    }
+
+    /// Canonical `(r, g, b)` triple (each 0.0–1.0) for this label. Used by
+    /// the timeline clip renderer and the color-tag legend popover so the
+    /// two swatches stay aligned.
+    pub fn swatch_rgb(self) -> (f64, f64, f64) {
+        match self {
+            // `None` is rendered as mid-gray when a caller asks for a
+            // swatch (the legend never shows it, but callers that want to
+            // use this helper uniformly won't crash).
+            ClipColorLabel::None => (0.45, 0.45, 0.47),
+            ClipColorLabel::Red => (0.78, 0.27, 0.27),
+            ClipColorLabel::Orange => (0.83, 0.49, 0.20),
+            ClipColorLabel::Yellow => (0.78, 0.68, 0.20),
+            ClipColorLabel::Green => (0.28, 0.66, 0.33),
+            ClipColorLabel::Teal => (0.20, 0.63, 0.60),
+            ClipColorLabel::Blue => (0.22, 0.48, 0.85),
+            ClipColorLabel::Purple => (0.53, 0.38, 0.80),
+            ClipColorLabel::Magenta => (0.78, 0.35, 0.68),
+        }
+    }
 }
 
 impl Default for ClipColorLabel {
@@ -500,6 +584,54 @@ impl AudioChannelMode {
     }
 
     pub const ALL: [AudioChannelMode; 4] = [Self::Stereo, Self::Left, Self::Right, Self::MonoMix];
+}
+
+/// Probe-time metadata for one audio stream in a source file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AudioSourceStreamInfo {
+    /// Zero-based ordinal among the source file's audio streams.
+    #[serde(default)]
+    pub stream_index: u32,
+    /// Number of channels in this audio stream.
+    #[serde(default)]
+    pub channels: u32,
+    /// ffprobe/GStreamer channel layout label when available (e.g. "stereo", "5.1").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub channel_layout: Option<String>,
+    /// Sample rate in Hz when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_rate_hz: Option<u32>,
+    /// Human language tag when present on the stream.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+    /// Stream title/name tag when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+impl AudioSourceStreamInfo {
+    pub fn label(&self) -> String {
+        let mut parts = vec![format!("Stream {}", self.stream_index + 1)];
+        if let Some(layout) = self
+            .channel_layout
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            parts.push(layout.to_string());
+        } else if self.channels > 0 {
+            parts.push(format!("{} ch", self.channels));
+        }
+        if let Some(rate) = self.sample_rate_hz {
+            parts.push(format!("{rate} Hz"));
+        }
+        if let Some(language) = self.language.as_deref().filter(|s| !s.trim().is_empty()) {
+            parts.push(language.to_string());
+        }
+        if let Some(title) = self.title.as_deref().filter(|s| !s.trim().is_empty()) {
+            parts.push(title.to_string());
+        }
+        parts.join(" - ")
+    }
 }
 
 /// Source of speech-region intervals used by the voice-isolation gate.
@@ -1783,6 +1915,18 @@ pub struct Clip {
     /// Audio channel routing: Stereo (default), Left Only, Right Only, or Mono Mix.
     #[serde(default)]
     pub audio_channel_mode: AudioChannelMode,
+    /// Probe-time source audio streams for this clip's source media.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub audio_source_streams: Vec<AudioSourceStreamInfo>,
+    /// Selected source audio stream (zero-based ordinal among audio streams).
+    #[serde(default)]
+    pub audio_source_stream_index: u32,
+    /// Selected channel offset inside the chosen source stream.
+    ///
+    /// `0` targets channels 1/2, `2` targets 3/4, etc. Mono modes use the
+    /// selected side inside that pair.
+    #[serde(default)]
+    pub audio_source_channel_offset: u32,
     /// Optional rotation keyframes over clip-local timeline.
     #[serde(default)]
     pub rotate_keyframes: Vec<NumericKeyframe>,
@@ -2465,6 +2609,9 @@ impl Clip {
             pitch_shift_semitones: 0.0,
             pitch_preserve: false,
             audio_channel_mode: AudioChannelMode::default(),
+            audio_source_streams: Vec::new(),
+            audio_source_stream_index: 0,
+            audio_source_channel_offset: 0,
             rotate_keyframes: Vec::new(),
             crop_left_keyframes: Vec::new(),
             crop_right_keyframes: Vec::new(),
@@ -3031,6 +3178,22 @@ impl Clip {
             self.speed.max(0.01)
         };
         (timeline_delta_ns as f64 * speed) as i64
+    }
+
+    /// Convert a source-space delta back to timeline-space using the same mean
+    /// speed approximation as [`timeline_to_source_delta`].
+    pub fn source_to_timeline_delta(&self, source_delta_ns: i64) -> i64 {
+        let speed = if !self.speed_keyframes.is_empty() {
+            let dur = self.duration();
+            if dur > 0 {
+                self.integrated_source_distance_for_local_timeline_ns(dur) / dur as f64
+            } else {
+                self.speed.max(0.01)
+            }
+        } else {
+            self.speed.max(0.01)
+        };
+        (source_delta_ns as f64 / speed) as i64
     }
 
     /// Convert a timeline-space duration to source-space using the clip's speed.
@@ -3891,6 +4054,45 @@ impl Clip {
             windowed.retain_subtitles_in_local_range(left_trim, range_end);
         }
         Some(windowed)
+    }
+
+    pub fn selected_audio_source_stream(&self) -> Option<&AudioSourceStreamInfo> {
+        self.audio_source_streams
+            .iter()
+            .find(|stream| stream.stream_index == self.audio_source_stream_index)
+            .or_else(|| self.audio_source_streams.first())
+    }
+
+    pub fn selected_audio_stream_channel_count(&self) -> u32 {
+        self.selected_audio_source_stream()
+            .map(|stream| stream.channels.max(1))
+            .unwrap_or(2)
+    }
+
+    pub fn clamped_audio_source_stream_index(&self) -> u32 {
+        self.selected_audio_source_stream()
+            .map(|stream| stream.stream_index)
+            .unwrap_or(0)
+    }
+
+    pub fn clamped_audio_source_channel_offset(&self) -> u32 {
+        let channels = self.selected_audio_stream_channel_count();
+        if channels <= 1 {
+            0
+        } else {
+            self.audio_source_channel_offset
+                .min(channels.saturating_sub(1))
+        }
+    }
+
+    pub fn selected_audio_channel_indices(&self) -> (u32, Option<u32>) {
+        let channels = self.selected_audio_stream_channel_count();
+        if channels <= 1 {
+            return (0, None);
+        }
+        let left = self.clamped_audio_source_channel_offset();
+        let right = (left + 1 < channels).then_some(left + 1);
+        (left, right)
     }
 }
 
@@ -4924,6 +5126,17 @@ mod tests {
         assert_eq!(
             clip.timeline_to_source_delta(-1_000_000_000),
             -2_000_000_000
+        );
+    }
+
+    #[test]
+    fn test_source_to_timeline_delta_speed_2() {
+        let mut clip = make_test_clip(10_000_000_000, 0);
+        clip.speed = 2.0;
+        assert_eq!(clip.source_to_timeline_delta(2_000_000_000), 1_000_000_000);
+        assert_eq!(
+            clip.source_to_timeline_delta(-2_000_000_000),
+            -1_000_000_000
         );
     }
 

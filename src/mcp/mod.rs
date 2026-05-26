@@ -132,6 +132,10 @@ pub enum McpCommand {
         enabled: bool,
         reply: SyncSender<Value>,
     },
+    SetHwEncoderMode {
+        mode: String,
+        reply: SyncSender<Value>,
+    },
     SetPlaybackPriority {
         priority: String,
         reply: SyncSender<Value>,
@@ -320,6 +324,21 @@ pub enum McpCommand {
         title: String,
         reply: SyncSender<Value>,
     },
+    /// Set the project-scoped display name for a clip color label (e.g.
+    /// Red → "B-roll"). An empty / whitespace-only `name` removes the
+    /// override so the legend falls back to the default English name.
+    /// `label` is the snake-case variant string
+    /// (`red`/`orange`/`yellow`/`green`/`teal`/`blue`/`purple`/`magenta`).
+    SetColorLabelName {
+        label: String,
+        name: String,
+        reply: SyncSender<Value>,
+    },
+    /// Return the project's color-tag legend as a JSON map of
+    /// `{ "label": "custom name" }` plus a `defaults` map for every color.
+    GetColorLabelNames {
+        reply: SyncSender<Value>,
+    },
     OpenFcpxml {
         path: String,
         reply: SyncSender<Value>,
@@ -417,6 +436,18 @@ pub enum McpCommand {
     },
     RelinkMedia {
         root_path: String,
+        reply: SyncSender<Value>,
+    },
+    ReplaceClipSource {
+        clip_id: String,
+        new_path: String,
+        old_width: Option<u32>,
+        old_height: Option<u32>,
+        reply: SyncSender<Value>,
+    },
+    ReplaceLibrarySource {
+        item_id: String,
+        new_path: String,
         reply: SyncSender<Value>,
     },
     CreateBin {
@@ -713,6 +744,11 @@ pub enum McpCommand {
     },
     CaptureReferenceStill {
         label: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    CaptureExportCompareStill {
+        label: Option<String>,
+        reference_still_id: Option<String>,
         reply: SyncSender<Value>,
     },
     ListReferenceStills {

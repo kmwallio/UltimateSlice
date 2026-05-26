@@ -1,5 +1,6 @@
 pub mod audio_effects_browser;
 pub mod clip_property;
+pub mod color_legend;
 pub mod color_scopes;
 pub mod color_wheel;
 pub mod colors;
@@ -30,4 +31,5 @@ pub mod toolbar;
 pub mod transcript_panel;
 pub mod transform_overlay;
 pub mod welcome;
+pub mod welcome_project_peek;
 pub mod window;

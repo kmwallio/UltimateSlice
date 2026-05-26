@@ -2,13 +2,15 @@ use crate::media::adjustment_scope::AdjustmentScopeShape;
 use crate::media::color_math;
 use crate::media::cube_lut::CubeLut;
 use crate::media::player::PlayerState;
-use crate::model::clip::{Clip as ModelClip, ClipMask, MaskShape, NumericKeyframe};
+use crate::model::clip::{
+    AudioSourceStreamInfo, Clip as ModelClip, ClipMask, MaskShape, NumericKeyframe,
+};
 use crate::model::transition::{
     canonicalize_transition_kind, transition_kind_from_xfade_name, transition_xfade_name_for_kind,
     TransitionAlignment, TransitionOverlapWindow,
 };
 use crate::ui_state::{
-    clamp_prerender_crf, CrossfadeCurve, PlaybackPriority, PrerenderEncodingPreset,
+    clamp_prerender_crf, CrossfadeCurve, HwEncoderMode, PlaybackPriority, PrerenderEncodingPreset,
     DEFAULT_PRERENDER_CRF,
 };
 /// A "program monitor" player that composites the assembled timeline.
@@ -80,7 +82,7 @@ use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -255,22 +257,61 @@ fn remove_prerender_segment_files(output_path: &Path) {
 /// Normalize mixer-bound clip audio so camera AAC (e.g. 16 kHz mono Ring MP4s)
 /// negotiates cleanly with the fixed preview mix format.
 /// Insert a mono capsfilter between `audioconvert` and the rest of the audio
-/// chain to extract a single channel (Left/Right) or downmix (MonoMix).
-/// The downstream stereo capsfilter then upmixes mono to both speakers.
-/// Returns the element on success (caller must sync state), or None for Stereo.
+fn build_preview_audio_mix_matrix(
+    mode: crate::model::clip::AudioChannelMode,
+    input_channels: u32,
+    channel_offset: u32,
+) -> Option<Vec<Vec<f32>>> {
+    use crate::model::clip::AudioChannelMode;
+
+    let input_channels = input_channels.max(1) as usize;
+    let left_idx = channel_offset.min((input_channels - 1) as u32) as usize;
+    let right_idx = ((left_idx + 1) < input_channels).then_some(left_idx + 1);
+
+    if matches!(mode, AudioChannelMode::Stereo) && input_channels <= 2 && left_idx == 0 {
+        return None;
+    }
+
+    let mut left_row = vec![0.0f32; input_channels];
+    let mut right_row = vec![0.0f32; input_channels];
+    match mode {
+        AudioChannelMode::Stereo => {
+            left_row[left_idx] = 1.0;
+            right_row[right_idx.unwrap_or(left_idx)] = 1.0;
+        }
+        AudioChannelMode::Left => {
+            left_row[left_idx] = 1.0;
+            right_row[left_idx] = 1.0;
+        }
+        AudioChannelMode::Right => {
+            let right_idx = right_idx.unwrap_or(left_idx);
+            left_row[right_idx] = 1.0;
+            right_row[right_idx] = 1.0;
+        }
+        AudioChannelMode::MonoMix => {
+            if let Some(right_idx) = right_idx {
+                left_row[left_idx] = 0.5;
+                left_row[right_idx] = 0.5;
+                right_row[left_idx] = 0.5;
+                right_row[right_idx] = 0.5;
+            } else {
+                left_row[left_idx] = 1.0;
+                right_row[left_idx] = 1.0;
+            }
+        }
+    }
+    Some(vec![left_row, right_row])
+}
+
 /// Set `mix-matrix` on an `audioconvert` element for channel extraction.
-/// Left: both outputs get input left. Right: both get input right.
-/// MonoMix: both get 0.5*L + 0.5*R.  Stereo: no-op.
 fn apply_channel_mode_to_audioconvert(
     audio_conv: &gst::Element,
     mode: crate::model::clip::AudioChannelMode,
+    input_channels: u32,
+    channel_offset: u32,
 ) {
-    use crate::model::clip::AudioChannelMode;
-    let matrix: Vec<Vec<f32>> = match mode {
-        AudioChannelMode::Stereo => return,
-        AudioChannelMode::Left => vec![vec![1.0, 0.0], vec![1.0, 0.0]],
-        AudioChannelMode::Right => vec![vec![0.0, 1.0], vec![0.0, 1.0]],
-        AudioChannelMode::MonoMix => vec![vec![0.5, 0.5], vec![0.5, 0.5]],
+    let Some(matrix) = build_preview_audio_mix_matrix(mode, input_channels, channel_offset) else {
+        return;
     };
     if audio_conv.find_property("mix-matrix").is_some() {
         let gst_matrix: Vec<glib::SendValue> = matrix
@@ -299,6 +340,8 @@ fn attach_preview_audio_normalizer(
         pipeline,
         audio_conv,
         crate::model::clip::AudioChannelMode::Stereo,
+        2,
+        0,
         log_context,
     )
 }
@@ -307,6 +350,8 @@ fn attach_preview_audio_normalizer_with_channel_mode(
     pipeline: &gst::Pipeline,
     audio_conv: &gst::Element,
     channel_mode: crate::model::clip::AudioChannelMode,
+    input_channels: u32,
+    channel_offset: u32,
     log_context: &str,
 ) -> Option<(gst::Element, gst::Element, gst::Pad)> {
     let resample = match gst::ElementFactory::make("audioresample").build() {
@@ -341,7 +386,7 @@ fn attach_preview_audio_normalizer_with_channel_mode(
     // Apply channel extraction (Left/Right/MonoMix) via the audioconvert
     // mix-matrix.  The matrix maps input channels to output stereo so that
     // both speakers carry the selected channel(s).
-    apply_channel_mode_to_audioconvert(audio_conv, channel_mode);
+    apply_channel_mode_to_audioconvert(audio_conv, channel_mode, input_channels, channel_offset);
 
     let Some(conv_src) = audio_conv.static_pad("src") else {
         log::warn!("{log_context}: audioconvert src pad missing");
@@ -711,6 +756,12 @@ pub struct ProgramClip {
     pub pan_keyframes: Vec<NumericKeyframe>,
     /// Audio channel extraction/downmix mode.
     pub audio_channel_mode: crate::model::clip::AudioChannelMode,
+    /// Probe-time source audio streams for the source media.
+    pub audio_source_streams: Vec<AudioSourceStreamInfo>,
+    /// Selected source audio stream (zero-based ordinal among audio streams).
+    pub audio_source_stream_index: u32,
+    /// Selected channel offset within the chosen source stream.
+    pub audio_source_channel_offset: u32,
     /// 3-band parametric EQ settings.
     pub eq_bands: [crate::model::clip::EqBand; 3],
     pub eq_low_gain_keyframes: Vec<NumericKeyframe>,
@@ -884,6 +935,35 @@ pub struct ProgramClip {
 impl ProgramClip {
     pub fn source_duration_ns(&self) -> u64 {
         self.source_out_ns.saturating_sub(self.source_in_ns)
+    }
+
+    pub fn selected_audio_source_stream(&self) -> Option<&AudioSourceStreamInfo> {
+        self.audio_source_streams
+            .iter()
+            .find(|stream| stream.stream_index == self.audio_source_stream_index)
+            .or_else(|| self.audio_source_streams.first())
+    }
+
+    pub fn selected_audio_stream_channel_count(&self) -> u32 {
+        self.selected_audio_source_stream()
+            .map(|stream| stream.channels.max(1))
+            .unwrap_or(2)
+    }
+
+    pub fn clamped_audio_source_stream_index(&self) -> u32 {
+        self.selected_audio_source_stream()
+            .map(|stream| stream.stream_index)
+            .unwrap_or(0)
+    }
+
+    pub fn clamped_audio_source_channel_offset(&self) -> u32 {
+        let channels = self.selected_audio_stream_channel_count();
+        if channels <= 1 {
+            0
+        } else {
+            self.audio_source_channel_offset
+                .min(channels.saturating_sub(1))
+        }
     }
 
     pub fn local_timeline_position_ns(&self, timeline_pos_ns: u64) -> u64 {
@@ -1707,6 +1787,9 @@ pub struct ProgramPlayer {
     background_prerender: bool,
     prerender_preset: PrerenderEncodingPreset,
     prerender_crf: u32,
+    /// Hardware encoder family to try for background prerender segments before
+    /// falling back to libx264. Mirrors the proxy cache control surface.
+    hw_encoder_mode: HwEncoderMode,
     crossfade_enabled: bool,
     crossfade_curve: CrossfadeCurve,
     crossfade_duration_ns: u64,
@@ -2528,6 +2611,7 @@ impl ProgramPlayer {
         let (prerender_result_tx, prerender_result_rx) = mpsc::channel::<PrerenderJobResult>();
         let prerender_cache_root = default_prerender_cache_root();
         let _ = std::fs::create_dir_all(&prerender_cache_root);
+        Self::apply_display_drop_late_policy(display_queue.as_ref(), &display_sink_ref, false);
 
         Ok((
             Self {
@@ -2560,6 +2644,7 @@ impl ProgramPlayer {
                 background_prerender: false,
                 prerender_preset: PrerenderEncodingPreset::default(),
                 prerender_crf: DEFAULT_PRERENDER_CRF,
+                hw_encoder_mode: HwEncoderMode::default(),
                 crossfade_enabled: false,
                 crossfade_curve: CrossfadeCurve::default(),
                 crossfade_duration_ns: 200_000_000,
@@ -2721,6 +2806,18 @@ impl ProgramPlayer {
         }
         self.prerender_preset = preset;
         self.prerender_crf = crf;
+        self.prewarmed_boundary_ns = None;
+    }
+
+    /// Update the hardware encoder family used for background prerender. The
+    /// next prerender bake will use the new mode; in-flight bakes finish under
+    /// their existing settings. We also reset the prewarm cursor so previously
+    /// scheduled boundaries get re-evaluated against the new cache signature.
+    pub fn set_hw_encoder_mode(&mut self, mode: HwEncoderMode) {
+        if self.hw_encoder_mode == mode {
+            return;
+        }
+        self.hw_encoder_mode = mode;
         self.prewarmed_boundary_ns = None;
     }
 
@@ -2943,6 +3040,10 @@ impl ProgramPlayer {
         }
     }
 
+    pub fn snapshot_bg_removal_paths(&self) -> HashMap<String, String> {
+        self.bg_removal_paths.clone()
+    }
+
     /// Hand off a freshly snapshotted voice-enhance cache key → output
     /// path map. The Program Monitor swaps in the prerendered file at
     /// `resolve_source_path_for_clip` time for any clip whose
@@ -2969,6 +3070,10 @@ impl ProgramPlayer {
             // sees zeroed baked-scope fields on those clips.
             self.neutralize_baked_effects_for_sidecar_clips();
         }
+    }
+
+    pub fn snapshot_render_replace_paths(&self) -> HashMap<String, String> {
+        self.render_replace_paths.clone()
     }
 
     /// Walk `self.clips` + `self.audio_clips` and zero out the baked-scope
@@ -3021,12 +3126,7 @@ impl ProgramPlayer {
             );
             let sidecar_ready = paths
                 .get(&key)
-                .map(|p| {
-                    std::fs::metadata(p)
-                        .ok()
-                        .filter(|m| m.len() > 0)
-                        .is_some()
-                })
+                .map(|p| std::fs::metadata(p).ok().filter(|m| m.len() > 0).is_some())
                 .unwrap_or(false);
             if !sidecar_ready {
                 return;
@@ -3148,6 +3248,10 @@ impl ProgramPlayer {
             self.prewarmed_boundary_ns = None;
             self.invalidate_short_frame_cache("frame-interp-paths-updated");
         }
+    }
+
+    pub fn snapshot_frame_interp_paths(&self) -> HashMap<String, String> {
+        self.frame_interp_paths.clone()
     }
 
     pub fn project_health_prerender_cache_root(&self) -> &Path {
@@ -8131,6 +8235,13 @@ impl ProgramPlayer {
         self.preview_divisor.hash(&mut hasher);
         self.prerender_preset.as_str().hash(&mut hasher);
         self.prerender_crf.hash(&mut hasher);
+        // Encoder identity participates in the signature so that switching
+        // hardware mode (e.g. Auto → Off, or Vaapi → Nvenc) does not reuse
+        // segments encoded under a different codec/quality envelope.
+        crate::media::hwaccel::encoder_signature(crate::media::hwaccel::pick_h264_encoder(
+            self.hw_encoder_mode,
+        ))
+        .hash(&mut hasher);
         self.proxy_enabled.hash(&mut hasher);
         self.proxy_scale_divisor.hash(&mut hasher);
         for &idx in active {
@@ -8328,6 +8439,7 @@ impl ProgramPlayer {
         let generation = self.prerender_generation;
         let prerender_preset = self.prerender_preset.clone();
         let prerender_crf = self.prerender_crf;
+        let hw_encoder_mode = self.hw_encoder_mode;
         std::thread::spawn(move || {
             let output_path_buf = PathBuf::from(&output_path);
             let mut success = Self::render_prerender_segment_video_file(
@@ -8342,6 +8454,7 @@ impl ProgramPlayer {
                 transition_offset_ns,
                 prerender_preset,
                 prerender_crf,
+                hw_encoder_mode,
             );
             if success
                 && Self::write_prerender_manifest_for_path(&output_path_buf, &manifest_for_job)
@@ -8740,22 +8853,11 @@ impl ProgramPlayer {
             return;
         }
         self.playback_drop_late_active = should_drop_late;
-        if let Some(ref q) = self.display_queue {
-            if should_drop_late {
-                q.set_property_from_str("leaky", "downstream");
-                q.set_property("max-size-buffers", 1u32);
-            } else {
-                q.set_property_from_str("leaky", "no");
-                q.set_property("max-size-buffers", 3u32);
-            }
-        }
-        if self.display_sink.find_property("qos").is_some() {
-            self.display_sink.set_property("qos", should_drop_late);
-        }
-        if self.display_sink.find_property("max-lateness").is_some() {
-            let max_lateness: i64 = if should_drop_late { 40_000_000 } else { -1 };
-            self.display_sink.set_property("max-lateness", max_lateness);
-        }
+        Self::apply_display_drop_late_policy(
+            self.display_queue.as_ref(),
+            &self.display_sink,
+            should_drop_late,
+        );
         log::info!(
             "update_drop_late_policy: active={} slots={}",
             should_drop_late,
@@ -8783,6 +8885,53 @@ impl ProgramPlayer {
             should_drop_late,
             self.slots.len()
         );
+    }
+
+    fn display_queue_leaky_mode(should_drop_late: bool) -> &'static str {
+        if should_drop_late {
+            "downstream"
+        } else {
+            "no"
+        }
+    }
+
+    fn display_queue_max_buffers(should_drop_late: bool) -> u32 {
+        if should_drop_late {
+            1
+        } else {
+            3
+        }
+    }
+
+    fn display_sink_max_lateness(should_drop_late: bool) -> i64 {
+        if should_drop_late {
+            40_000_000
+        } else {
+            -1
+        }
+    }
+
+    fn apply_display_drop_late_policy(
+        display_queue: Option<&gst::Element>,
+        display_sink: &gst::Element,
+        should_drop_late: bool,
+    ) {
+        if let Some(q) = display_queue {
+            q.set_property_from_str("leaky", Self::display_queue_leaky_mode(should_drop_late));
+            q.set_property(
+                "max-size-buffers",
+                Self::display_queue_max_buffers(should_drop_late),
+            );
+        }
+        if display_sink.find_property("qos").is_some() {
+            display_sink.set_property("qos", should_drop_late);
+        }
+        if display_sink.find_property("max-lateness").is_some() {
+            display_sink.set_property(
+                "max-lateness",
+                Self::display_sink_max_lateness(should_drop_late),
+            );
+        }
     }
 
     fn should_prioritize_ui_responsiveness(&self) -> bool {
@@ -11635,6 +11784,8 @@ impl ProgramPlayer {
                             &self.pipeline,
                             &ac_elem,
                             clip.audio_channel_mode,
+                            clip.selected_audio_stream_channel_count(),
+                            clip.clamped_audio_source_channel_offset(),
                             "build_audio_only_slot",
                         ) {
                         ar = Some(resample);
@@ -12236,6 +12387,7 @@ impl ProgramPlayer {
         transition_offset_ns: u64,
         prerender_preset: PrerenderEncodingPreset,
         prerender_crf: u32,
+        hw_encoder_mode: HwEncoderMode,
     ) -> bool {
         let Ok(ffmpeg) = crate::media::export::find_ffmpeg() else {
             return false;
@@ -12255,6 +12407,24 @@ impl ProgramPlayer {
             .arg("-loglevel")
             .arg("error")
             .arg("-nostats");
+        // HW decode hint: applied per-input *before* `-ss`/`-i`. Decoded
+        // frames flow back to CPU memory by default (no
+        // `-hwaccel_output_format`), so the existing CPU-side prerender
+        // filter graph (color/LUT/blur/...) consumes them unchanged. The
+        // ffmpeg encoder selected later (libx264 or h264_nvenc) is
+        // independent of which hwaccel decodes the input. Skipped on
+        // lavfi sources (titles) where there's nothing to decode.
+        //
+        // SKIP `-hwaccel vaapi` regardless of encoder — same Intel-iGPU
+        // empirical finding as the proxy path: VA-API HEVC 10-bit decode
+        // goes through a hybrid CPU+GPU path that loses to libavcodec on
+        // a multi-core CPU once the lut3d/color filters force a CPU
+        // roundtrip. CUDA / QSV decode hints are still emitted.
+        let prerender_decode_hwaccel =
+            match crate::media::hwaccel::pick_decode_hwaccel(hw_encoder_mode) {
+                Some("vaapi") => None,
+                other => other,
+            };
         for (clip, path, source_ns, _, _) in inputs {
             if clip.is_title {
                 // Title clips use a lavfi color source instead of a file.
@@ -12262,6 +12432,9 @@ impl ProgramPlayer {
                     Self::prerender_title_clip_lavfi_color(clip, out_w, out_h, fps, duration_s);
                 cmd.arg("-f").arg("lavfi").arg("-i").arg(lavfi);
             } else {
+                if let Some(method) = prerender_decode_hwaccel {
+                    cmd.arg("-hwaccel").arg(method);
+                }
                 let source_s = *source_ns as f64 / 1_000_000_000.0;
                 let clip_max_s = clip.source_duration_ns() as f64 / 1_000_000_000.0;
                 let t = duration_s.min(clip_max_s).max(0.05);
@@ -12606,11 +12779,42 @@ impl ProgramPlayer {
                 ));
             }
         }
-        let filter = nodes.join(";");
+        let mut filter = nodes.join(";");
+        // Prerender HW encoder selection. VA-API export taught us how to
+        // splice a `format=nv12,hwupload` step at the end of the filter
+        // graph so VA-API encoders see GPU surfaces; the same trick works
+        // here. NVENC stays a drop-in encoder swap. Filter mutation
+        // happens *before* the `-filter_complex` arg gets the string.
+        let prerender_hw = crate::media::hwaccel::pick_h264_encoder(hw_encoder_mode);
+        let map_label = if matches!(
+            prerender_hw,
+            Some(crate::media::hwaccel::HwEncoderFamily::Vaapi)
+        ) {
+            // Reuse the export-path helper so both pipelines stay
+            // syntactically identical for the upload step.
+            let (new_filter, new_label) =
+                crate::media::export::append_vaapi_upload(filter, &last_label);
+            filter = new_filter;
+            new_label
+        } else {
+            last_label.clone()
+        };
+        // VA-API also needs `-vaapi_device` set as a *global* arg
+        // (before any output args). Inject it at the cmd before
+        // we tack on the filter+map+encoder block. Safe to do here
+        // because we haven't appended any output args yet.
+        if matches!(
+            prerender_hw,
+            Some(crate::media::hwaccel::HwEncoderFamily::Vaapi)
+        ) {
+            if let Some(node) = crate::media::hwaccel::detect().vaapi_render_node.as_ref() {
+                cmd.arg("-vaapi_device").arg(node);
+            }
+        }
         cmd.arg("-filter_complex")
             .arg(filter)
             .arg("-map")
-            .arg(format!("[{last_label}]"));
+            .arg(format!("[{map_label}]"));
         if audio_labels.is_empty() {
             cmd.arg("-an");
         } else {
@@ -12621,17 +12825,14 @@ impl ProgramPlayer {
                 .arg("-b:a")
                 .arg("192k");
         }
-        cmd.arg("-t")
-            .arg(format!("{duration_s:.6}"))
-            .arg("-c:v")
-            .arg("libx264")
-            .arg("-preset")
-            .arg(prerender_preset.as_str())
-            .arg("-crf")
-            .arg(prerender_crf.to_string())
-            .arg("-pix_fmt")
-            .arg("yuv420p")
-            .arg("-f")
+        cmd.arg("-t").arg(format!("{duration_s:.6}"));
+        Self::apply_prerender_video_encoder(
+            &mut cmd,
+            prerender_hw,
+            &prerender_preset,
+            prerender_crf,
+        );
+        cmd.arg("-f")
             .arg("mp4")
             .arg("-movflags")
             .arg("+faststart")
@@ -12674,6 +12875,57 @@ impl ProgramPlayer {
             return false;
         }
         true
+    }
+
+    /// Append the `-c:v` and related video-encoder args to a prerender
+    /// ffmpeg command. NVENC swaps in cleanly because it accepts CPU-side
+    /// frames; libx264 is the software fallback. VA-API is now also
+    /// handled — the dispatch site appends `format=nv12,hwupload` to the
+    /// filter graph + declares `-vaapi_device` before this runs, so by
+    /// the time the encoder is selected the GPU surface is ready.
+    fn apply_prerender_video_encoder(
+        cmd: &mut Command,
+        family: Option<crate::media::hwaccel::HwEncoderFamily>,
+        prerender_preset: &PrerenderEncodingPreset,
+        prerender_crf: u32,
+    ) {
+        match family {
+            Some(crate::media::hwaccel::HwEncoderFamily::Nvenc) => {
+                cmd.arg("-c:v")
+                    .arg("h264_nvenc")
+                    .arg("-preset")
+                    .arg("p1")
+                    .arg("-tune")
+                    .arg("ll")
+                    .arg("-rc")
+                    .arg("constqp")
+                    .arg("-cq")
+                    .arg(prerender_crf.to_string())
+                    .arg("-pix_fmt")
+                    .arg("yuv420p");
+            }
+            Some(crate::media::hwaccel::HwEncoderFamily::Vaapi) => {
+                cmd.arg("-c:v")
+                    .arg("h264_vaapi")
+                    // QP and CRF share a 0–51 lower-is-better scale so we
+                    // pass the prerender CRF directly. No `-pix_fmt`
+                    // override — the filter chain ends with
+                    // `format=nv12,hwupload` so the encoder receives the
+                    // expected VAAPI surface.
+                    .arg("-qp")
+                    .arg(prerender_crf.to_string());
+            }
+            None => {
+                cmd.arg("-c:v")
+                    .arg("libx264")
+                    .arg("-preset")
+                    .arg(prerender_preset.as_str())
+                    .arg("-crf")
+                    .arg(prerender_crf.to_string())
+                    .arg("-pix_fmt")
+                    .arg("yuv420p");
+            }
+        }
     }
 
     /// Generate the lavfi color source string for a prerendered title clip.
@@ -13237,6 +13489,8 @@ impl ProgramPlayer {
                             &self.pipeline,
                             &ac_elem,
                             clip.audio_channel_mode,
+                            clip.selected_audio_stream_channel_count(),
+                            clip.clamped_audio_source_channel_offset(),
                             "build_slot_for_clip",
                         ) {
                         ar = Some(resample);
@@ -15105,9 +15359,7 @@ impl ProgramPlayer {
                         // `dropped` directly from the structure because the
                         // `Qos::stats()` wrapper wraps the count in a
                         // `GenericFormattedValue` that is version-sensitive.
-                        let dropped = msg
-                            .structure()
-                            .and_then(|s| s.get::<u64>("dropped").ok());
+                        let dropped = msg.structure().and_then(|s| s.get::<u64>("dropped").ok());
                         let src_name = msg
                             .src()
                             .and_then(|src| src.clone().downcast::<gst::Element>().ok())
@@ -15503,11 +15755,19 @@ impl ProgramPlayer {
                 continue;
             }
             let ch_mode = clip_ref.map(|c| c.audio_channel_mode).unwrap_or_default();
+            let input_channels = clip_ref
+                .map(|c| c.selected_audio_stream_channel_count())
+                .unwrap_or(2);
+            let channel_offset = clip_ref
+                .map(|c| c.clamped_audio_source_channel_offset())
+                .unwrap_or(0);
             let mut link_src_pad = if let Some((resample, capsfilter, normalized_src)) =
                 attach_preview_audio_normalizer_with_channel_mode(
                     &pipeline,
                     &ac,
                     ch_mode,
+                    input_channels,
+                    channel_offset,
                     "audio_multi_pipeline",
                 ) {
                 audio_resample = Some(resample);
@@ -15621,11 +15881,20 @@ impl ProgramPlayer {
             }
 
             let ac_for_cb = ac.clone();
+            let selected_stream_index = clip_ref
+                .map(|clip| clip.clamped_audio_source_stream_index())
+                .unwrap_or(0);
+            let audio_pad_ordinal = Arc::new(AtomicU32::new(0));
+            let audio_pad_ordinal_for_cb = audio_pad_ordinal.clone();
             decoder.connect_pad_added(move |_, pad| {
                 let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
                 if let Some(caps) = caps {
                     if let Some(s) = caps.structure(0) {
                         if s.name().starts_with("audio/") {
+                            let ordinal = audio_pad_ordinal_for_cb.fetch_add(1, Ordering::Relaxed);
+                            if ordinal != selected_stream_index {
+                                return;
+                            }
                             if let Some(sink) = ac_for_cb.static_pad("sink") {
                                 if !sink.is_linked() {
                                     let _ = pad.link(&sink);
@@ -16066,7 +16335,7 @@ mod tests {
     use crate::media::color_math;
     use crate::model::clip::{KeyframeInterpolation, MaskShape, NumericKeyframe};
     use crate::model::transition::TransitionAlignment;
-    use crate::ui_state::{PrerenderEncodingPreset, DEFAULT_PRERENDER_CRF};
+    use crate::ui_state::{HwEncoderMode, PrerenderEncodingPreset, DEFAULT_PRERENDER_CRF};
     use gstreamer as gst;
     use std::collections::hash_map::DefaultHasher;
     use std::collections::HashMap;
@@ -16183,6 +16452,13 @@ mod tests {
             3,
             false,
         ));
+    }
+
+    #[test]
+    fn conservative_display_drop_late_policy_disables_sink_drops() {
+        assert_eq!(ProgramPlayer::display_queue_leaky_mode(false), "no");
+        assert_eq!(ProgramPlayer::display_queue_max_buffers(false), 3);
+        assert_eq!(ProgramPlayer::display_sink_max_lateness(false), -1);
     }
 
     #[test]
@@ -16304,6 +16580,9 @@ mod tests {
             pan: 0.0,
             pan_keyframes: Vec::new(),
             audio_channel_mode: crate::model::clip::AudioChannelMode::default(),
+            audio_source_streams: Vec::new(),
+            audio_source_stream_index: 0,
+            audio_source_channel_offset: 0,
             eq_bands: crate::model::clip::default_eq_bands(),
             eq_low_gain_keyframes: Vec::new(),
             eq_mid_gain_keyframes: Vec::new(),
@@ -18183,6 +18462,7 @@ mod tests {
             0,
             PrerenderEncodingPreset::Veryfast,
             DEFAULT_PRERENDER_CRF,
+            HwEncoderMode::Off,
         );
 
         assert!(ok, "expected prerender render to succeed");

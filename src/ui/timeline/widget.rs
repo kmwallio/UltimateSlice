@@ -333,6 +333,38 @@ enum DragOp {
     },
 }
 
+const PRECISION_TRIM_HINT_TEXT: &str = "←/→ 1f  Shift+←/→ 5f  Enter commit  Esc cancel";
+const PRECISION_TRIM_LARGE_STEP_FRAMES: i64 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrecisionTrimMode {
+    RippleTrimIn,
+    RippleTrimOut,
+    Roll,
+    Slip,
+    Slide,
+}
+
+impl PrecisionTrimMode {
+    fn label(self) -> &'static str {
+        match self {
+            Self::RippleTrimIn => "Precision Ripple In",
+            Self::RippleTrimOut => "Precision Ripple Out",
+            Self::Roll => "Precision Roll",
+            Self::Slip => "Precision Slip",
+            Self::Slide => "Precision Slide",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PrecisionTrimSession {
+    mode: PrecisionTrimMode,
+    drag_op: DragOp,
+    original_current_ns: u64,
+    current_ns: u64,
+}
+
 #[derive(Debug, Clone)]
 struct TimelineClipboard {
     clip: Clip,
@@ -624,6 +656,11 @@ pub struct TimelineState {
     pub on_detect_scene_cuts: Option<Rc<dyn Fn(String, String, String, u64, u64, f64)>>,
     pub on_convert_ltc_to_timecode:
         Option<Rc<dyn Fn(String, LtcChannelSelection, Option<FrameRate>)>>,
+    /// Driven by the timeline clip context menu's "Replace Source File…"
+    /// entry. Receives the clip id; window.rs wires it to dispatch the
+    /// shared per-clip Replace Media driver (file picker → probe →
+    /// aspect-mismatch warning → undo command).
+    pub on_replace_clip_source: Option<Rc<dyn Fn(String)>>,
     pub on_generate_music: Option<Rc<dyn Fn(MusicGenerationTarget)>>,
     /// Lightweight status callback for the MusicGen region workflow.
     pub on_music_generation_status: Option<Rc<dyn Fn(String)>>,
@@ -637,6 +674,11 @@ pub struct TimelineState {
     pub show_timeline_preview: bool,
     /// When true, the timeline is loading a project and interaction is suppressed.
     pub loading: bool,
+    /// Path of the project currently being loaded. Drives the skeleton
+    /// loader label so users see "Loading <filename>…" rather than a
+    /// generic spinner. Cleared together with `loading` when the load
+    /// completes or fails.
+    pub loading_path: Option<String>,
     /// Per-track stereo audio peaks (dBFS) keyed by track index.
     pub track_audio_peak_db: Vec<[f64; 2]>,
     /// Show/hide per-track audio meters in track labels.
@@ -712,6 +754,15 @@ pub struct TimelineState {
     /// scroll, or playhead seek so a stale preview never lingers. Purely
     /// ephemeral view state — not persisted.
     pub hover_scrub: Option<HoverScrubPreview>,
+    /// Modal frame-by-frame precision trim session layered on top of the
+    /// existing trim tools. Stores the original drag-style snapshot plus the
+    /// current synthetic trim position until the user commits or cancels.
+    precision_trim_session: Option<PrecisionTrimSession>,
+    /// Callback fired from mid-trim drags with a `TrimPreview` payload,
+    /// and once at drag-end with `None` to clear the Program Monitor
+    /// precision overlay. Borrow-safety: clone out of the `TimelineState`
+    /// and drop the `RefMut` before invoking.
+    pub on_trim_preview: Option<Rc<dyn Fn(Option<TrimPreview>)>>,
 }
 
 /// Per-frame payload for the timeline hover-scrub floating preview. The
@@ -726,6 +777,195 @@ pub struct HoverScrubPreview {
     pub cursor_x: f64,
     pub cursor_y: f64,
     pub display_timecode: String,
+}
+
+/// Precision trim display payload fired from the timeline into the Program
+/// Monitor while the user is mid-drag on a trim/roll/slip/slide. The
+/// monitor draws one quadrant per entry in `slots`. `slots.len()` matches
+/// `kind` (2 for TwoUp, 4 for FourUp). A `None` slot means "no content
+/// for this quadrant" (e.g., clip at track edge with no neighbor) — the
+/// overlay renders a blank placeholder in that case.
+#[derive(Clone, Debug)]
+pub struct TrimPreview {
+    pub kind: TrimPreviewKind,
+    pub slots: Vec<Option<TrimPreviewFrame>>,
+    pub overlay_title: Option<String>,
+    pub overlay_subtitle: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrimPreviewKind {
+    TwoUp,
+    FourUp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TrimPreviewFrame {
+    /// Path used to request the frame from `ThumbnailCache`.
+    pub source_path: String,
+    /// Source-file time in nanoseconds.
+    pub source_time_ns: u64,
+    /// Short caption drawn under the quadrant (e.g. `"Out"`, `"In 00:00:01:07"`).
+    pub label: String,
+}
+
+impl TrimPreview {
+    pub fn two_up(left: Option<TrimPreviewFrame>, right: Option<TrimPreviewFrame>) -> Self {
+        Self {
+            kind: TrimPreviewKind::TwoUp,
+            slots: vec![left, right],
+            overlay_title: None,
+            overlay_subtitle: None,
+        }
+    }
+
+    pub fn four_up(
+        ll: Option<TrimPreviewFrame>,
+        l: Option<TrimPreviewFrame>,
+        r: Option<TrimPreviewFrame>,
+        rr: Option<TrimPreviewFrame>,
+    ) -> Self {
+        Self {
+            kind: TrimPreviewKind::FourUp,
+            slots: vec![ll, l, r, rr],
+            overlay_title: None,
+            overlay_subtitle: None,
+        }
+    }
+
+    pub fn with_overlay_text(mut self, title: String, subtitle: impl Into<String>) -> Self {
+        self.overlay_title = Some(title);
+        self.overlay_subtitle = Some(subtitle.into());
+        self
+    }
+}
+
+fn source_backed_clip_frame(
+    clip: &Clip,
+    source_time_ns: u64,
+    label: String,
+) -> Option<TrimPreviewFrame> {
+    // Compound / title / adjustment clips have no extractable source path.
+    if clip.source_path.is_empty() {
+        return None;
+    }
+    Some(TrimPreviewFrame {
+        source_path: clip.source_path.clone(),
+        source_time_ns,
+        label,
+    })
+}
+
+/// Frame representing the **last visible** source frame of `clip`
+/// (one frame before `source_out`, clamped to `source_in`). Captioned as
+/// "Out" plus the timecode.
+fn out_frame_for_clip(clip: &Clip, fr: &FrameRate, caption: &str) -> Option<TrimPreviewFrame> {
+    let frame_ns = frame_duration_ns(fr);
+    let t = clip.source_out.saturating_sub(frame_ns).max(clip.source_in);
+    source_backed_clip_frame(
+        clip,
+        t,
+        format!(
+            "{caption} {}",
+            crate::ui::timecode::format_ns_as_timecode(t, fr)
+        ),
+    )
+}
+
+/// Frame representing the **first visible** source frame of `clip`
+/// (at `source_in`). Captioned as "In" plus the timecode.
+fn in_frame_for_clip(clip: &Clip, fr: &FrameRate, caption: &str) -> Option<TrimPreviewFrame> {
+    let t = clip.source_in;
+    source_backed_clip_frame(
+        clip,
+        t,
+        format!(
+            "{caption} {}",
+            crate::ui::timecode::format_ns_as_timecode(t, fr)
+        ),
+    )
+}
+
+fn frame_duration_ns(fr: &FrameRate) -> u64 {
+    let num = fr.numerator.max(1) as f64;
+    let den = fr.denominator.max(1) as f64;
+    // frame dur seconds = den / num (e.g. 1001/30000 for 29.97)
+    let secs = den / num;
+    (secs * 1_000_000_000.0) as u64
+}
+
+/// Build a TwoUp preview for a Trim-In drag on `clip`.
+/// Left slot = left neighbor's out-frame (if any), right slot = new in-frame.
+pub fn build_trim_preview_for_trim_in(
+    clip: &Clip,
+    left_neighbor: Option<&Clip>,
+    fr: &FrameRate,
+) -> TrimPreview {
+    TrimPreview::two_up(
+        left_neighbor.and_then(|c| out_frame_for_clip(c, fr, "Prev out")),
+        in_frame_for_clip(clip, fr, "New in"),
+    )
+}
+
+/// Build a TwoUp preview for a Trim-Out drag on `clip`.
+/// Left slot = new out-frame, right slot = right neighbor's in-frame (if any).
+pub fn build_trim_preview_for_trim_out(
+    clip: &Clip,
+    right_neighbor: Option<&Clip>,
+    fr: &FrameRate,
+) -> TrimPreview {
+    TrimPreview::two_up(
+        out_frame_for_clip(clip, fr, "New out"),
+        right_neighbor.and_then(|c| in_frame_for_clip(c, fr, "Next in")),
+    )
+}
+
+/// Build a TwoUp preview for a Roll edit between `left_clip` and `right_clip`.
+pub fn build_trim_preview_for_roll(
+    left_clip: &Clip,
+    right_clip: &Clip,
+    fr: &FrameRate,
+) -> TrimPreview {
+    TrimPreview::two_up(
+        out_frame_for_clip(left_clip, fr, "New out"),
+        in_frame_for_clip(right_clip, fr, "New in"),
+    )
+}
+
+/// Build a FourUp preview for a Slip drag on `clip`. Slots:
+/// \[left_neighbor_out, clip_in, clip_out, right_neighbor_in\].
+pub fn build_trim_preview_for_slip(
+    clip: &Clip,
+    left_neighbor: Option<&Clip>,
+    right_neighbor: Option<&Clip>,
+    fr: &FrameRate,
+) -> TrimPreview {
+    TrimPreview::four_up(
+        left_neighbor.and_then(|c| out_frame_for_clip(c, fr, "Prev out")),
+        in_frame_for_clip(clip, fr, "In"),
+        out_frame_for_clip(clip, fr, "Out"),
+        right_neighbor.and_then(|c| in_frame_for_clip(c, fr, "Next in")),
+    )
+}
+
+/// Build a FourUp preview for a Slide drag on `clip`. Slots:
+/// \[left_neighbor_out, clip_in, clip_out, right_neighbor_in\]. Same layout
+/// as Slip — what's changing differs but the inspection frames are the same.
+pub fn build_trim_preview_for_slide(
+    clip: &Clip,
+    left_neighbor: Option<&Clip>,
+    right_neighbor: Option<&Clip>,
+    fr: &FrameRate,
+) -> TrimPreview {
+    build_trim_preview_for_slip(clip, left_neighbor, right_neighbor, fr)
+}
+
+fn format_precision_trim_frame_delta(delta_frames: i64) -> String {
+    if delta_frames > 0 {
+        format!("+{delta_frames}f")
+    } else {
+        format!("{delta_frames}f")
+    }
 }
 
 impl TimelineState {
@@ -755,6 +995,7 @@ impl TimelineState {
             on_remove_silent_parts: None,
             on_detect_scene_cuts: None,
             on_convert_ltc_to_timecode: None,
+            on_replace_clip_source: None,
             on_generate_music: None,
             on_music_generation_status: None,
             magnetic_mode: false,
@@ -762,6 +1003,7 @@ impl TimelineState {
             show_waveform_on_video: false,
             show_timeline_preview: true,
             loading: false,
+            loading_path: None,
             track_audio_peak_db: Vec::new(),
             show_track_audio_levels: true,
             clipboard: None,
@@ -790,6 +1032,8 @@ impl TimelineState {
             active_snap_hit: None,
             minimap_widget: None,
             hover_scrub: None,
+            precision_trim_session: None,
+            on_trim_preview: None,
         }
     }
 
@@ -900,8 +1144,7 @@ impl TimelineState {
             if let Some(track) = editing_tracks.get(track_idx) {
                 let hit = track.clips.iter().find(|clip| {
                     let cx = self.ns_to_x(clip.timeline_start);
-                    let cw = (clip.duration() as f64 / NS_PER_SECOND)
-                        * self.pixels_per_second;
+                    let cw = (clip.duration() as f64 / NS_PER_SECOND) * self.pixels_per_second;
                     x >= cx && x <= cx + cw
                 });
                 if let Some(clip) = hit {
@@ -916,18 +1159,15 @@ impl TimelineState {
                             .x_to_ns(x)
                             .saturating_sub(clip.timeline_start)
                             .min(clip.duration().saturating_sub(1));
-                        if let Some(sample) =
-                            timeline_thumbnail_sample_for_clip(clip, local_ns)
-                        {
+                        if let Some(sample) = timeline_thumbnail_sample_for_clip(clip, local_ns) {
                             let source_time_ns =
                                 crate::media::thumb_cache::quantize_hover_scrub_time_ns(
                                     sample.sample_time_ns,
                                 );
-                            let display_timecode =
-                                crate::ui::timecode::format_ns_as_timecode(
-                                    source_time_ns,
-                                    &proj.frame_rate,
-                                );
+                            let display_timecode = crate::ui::timecode::format_ns_as_timecode(
+                                source_time_ns,
+                                &proj.frame_rate,
+                            );
                             out = Some(HoverResolve {
                                 clip_id: clip.id.clone(),
                                 source_path: sample.source_path,
@@ -1018,6 +1258,1041 @@ impl TimelineState {
         if let Some(cb) = cb {
             cb();
         }
+    }
+
+    /// Fire `on_trim_preview` with no `TimelineState` borrow held.
+    ///
+    /// Same borrow-safety motivation as `notify_project_changed`: the
+    /// Program Monitor callback re-borrows shared state to queue_draw, so
+    /// invoking it while a `borrow_mut()` is live is a GTK4 hard abort.
+    /// Caller must release any outstanding `borrow_mut()` before calling.
+    pub fn notify_trim_preview(state: &Rc<RefCell<Self>>, preview: Option<TrimPreview>) {
+        let cb = state.borrow().on_trim_preview.clone();
+        if let Some(cb) = cb {
+            cb(preview);
+        }
+    }
+
+    /// Build a [`TrimPreview`] from the current project state for the given
+    /// `drag_op`. Returns `None` for drag ops that don't warrant a trim
+    /// display (move, reorder, marquee, etc.). Caller must hold only a
+    /// shared borrow on `TimelineState`.
+    fn build_trim_preview_from_drag_op(&self, drag_op: &DragOp) -> Option<TrimPreview> {
+        let proj = self.project.borrow();
+        let editing_tracks = self.resolve_editing_tracks(&proj);
+        let fr = proj.frame_rate.clone();
+        match drag_op {
+            DragOp::TrimIn {
+                clip_id, track_id, ..
+            } => {
+                let track = editing_tracks.iter().find(|t| &t.id == track_id)?;
+                let idx = track.clips.iter().position(|c| &c.id == clip_id)?;
+                let me = &track.clips[idx];
+                let left = (idx > 0).then(|| &track.clips[idx - 1]);
+                Some(build_trim_preview_for_trim_in(me, left, &fr))
+            }
+            DragOp::TrimOut {
+                clip_id, track_id, ..
+            } => {
+                let track = editing_tracks.iter().find(|t| &t.id == track_id)?;
+                let idx = track.clips.iter().position(|c| &c.id == clip_id)?;
+                let me = &track.clips[idx];
+                let right = track.clips.get(idx + 1);
+                Some(build_trim_preview_for_trim_out(me, right, &fr))
+            }
+            DragOp::Roll {
+                left_clip_id,
+                right_clip_id,
+                track_id,
+                ..
+            } => {
+                let track = editing_tracks.iter().find(|t| &t.id == track_id)?;
+                let left = track.clips.iter().find(|c| &c.id == left_clip_id)?;
+                let right = track.clips.iter().find(|c| &c.id == right_clip_id)?;
+                Some(build_trim_preview_for_roll(left, right, &fr))
+            }
+            DragOp::Slip {
+                clip_id, track_id, ..
+            } => {
+                let track = editing_tracks.iter().find(|t| &t.id == track_id)?;
+                let idx = track.clips.iter().position(|c| &c.id == clip_id)?;
+                let me = &track.clips[idx];
+                let left = (idx > 0).then(|| &track.clips[idx - 1]);
+                let right = track.clips.get(idx + 1);
+                Some(build_trim_preview_for_slip(me, left, right, &fr))
+            }
+            DragOp::Slide {
+                clip_id, track_id, ..
+            } => {
+                let track = editing_tracks.iter().find(|t| &t.id == track_id)?;
+                let idx = track.clips.iter().position(|c| &c.id == clip_id)?;
+                let me = &track.clips[idx];
+                let left = (idx > 0).then(|| &track.clips[idx - 1]);
+                let right = track.clips.get(idx + 1);
+                Some(build_trim_preview_for_slide(me, left, right, &fr))
+            }
+            _ => None,
+        }
+    }
+
+    fn build_precision_trim_session(&self) -> Option<PrecisionTrimSession> {
+        let selected_clip_id = self.selected_clip_id.as_ref()?;
+        let proj = self.project.borrow();
+        let editing_tracks = self.resolve_editing_tracks(&proj);
+        let (track, clip_idx) = editing_tracks.iter().find_map(|track| {
+            track
+                .clips
+                .iter()
+                .position(|clip| &clip.id == selected_clip_id)
+                .map(|idx| (track, idx))
+        })?;
+        let clip = track.clips.get(clip_idx)?;
+        match self.active_tool {
+            ActiveTool::Ripple => {
+                let trim_in_distance = self.playhead_ns.abs_diff(clip.timeline_start);
+                let trim_out_distance = self.playhead_ns.abs_diff(clip.timeline_end());
+                if trim_in_distance <= trim_out_distance {
+                    let current_ns = clip.timeline_start;
+                    Some(PrecisionTrimSession {
+                        mode: PrecisionTrimMode::RippleTrimIn,
+                        drag_op: DragOp::TrimIn {
+                            clip_id: clip.id.clone(),
+                            track_id: track.id.clone(),
+                            original_source_in: clip.source_in,
+                            original_timeline_start: clip.timeline_start,
+                            original_track_clips: track.clips.clone(),
+                        },
+                        original_current_ns: current_ns,
+                        current_ns,
+                    })
+                } else {
+                    let current_ns = clip.timeline_end();
+                    Some(PrecisionTrimSession {
+                        mode: PrecisionTrimMode::RippleTrimOut,
+                        drag_op: DragOp::TrimOut {
+                            clip_id: clip.id.clone(),
+                            track_id: track.id.clone(),
+                            original_source_out: clip.source_out,
+                            original_track_clips: track.clips.clone(),
+                        },
+                        original_current_ns: current_ns,
+                        current_ns,
+                    })
+                }
+            }
+            ActiveTool::Roll => {
+                let left_neighbor = (clip_idx > 0).then(|| &track.clips[clip_idx - 1]);
+                let right_neighbor = track.clips.get(clip_idx + 1);
+                if left_neighbor.is_none() && right_neighbor.is_none() {
+                    return None;
+                }
+                let use_left_boundary = match (left_neighbor.is_some(), right_neighbor.is_some()) {
+                    (true, false) => true,
+                    (false, true) => false,
+                    (true, true) => {
+                        self.playhead_ns.abs_diff(clip.timeline_start)
+                            <= self.playhead_ns.abs_diff(clip.timeline_end())
+                    }
+                    (false, false) => return None,
+                };
+                let (left_clip, right_clip) = if use_left_boundary {
+                    (left_neighbor?, clip)
+                } else {
+                    (clip, right_neighbor?)
+                };
+                let current_ns = right_clip.timeline_start;
+                Some(PrecisionTrimSession {
+                    mode: PrecisionTrimMode::Roll,
+                    drag_op: DragOp::Roll {
+                        left_clip_id: left_clip.id.clone(),
+                        right_clip_id: right_clip.id.clone(),
+                        track_id: track.id.clone(),
+                        original_left_out: left_clip.source_out,
+                        original_right_in: right_clip.source_in,
+                        original_right_start: right_clip.timeline_start,
+                    },
+                    original_current_ns: current_ns,
+                    current_ns,
+                })
+            }
+            ActiveTool::Slip => {
+                let current_ns = clip.timeline_start;
+                Some(PrecisionTrimSession {
+                    mode: PrecisionTrimMode::Slip,
+                    drag_op: DragOp::Slip {
+                        clip_id: clip.id.clone(),
+                        track_id: track.id.clone(),
+                        original_source_in: clip.source_in,
+                        original_source_out: clip.source_out,
+                        drag_start_ns: current_ns,
+                    },
+                    original_current_ns: current_ns,
+                    current_ns,
+                })
+            }
+            ActiveTool::Slide => {
+                let left_neighbor = (clip_idx > 0).then(|| &track.clips[clip_idx - 1]);
+                let right_neighbor = track.clips.get(clip_idx + 1);
+                if left_neighbor.is_none() && right_neighbor.is_none() {
+                    return None;
+                }
+                let current_ns = clip.timeline_start;
+                Some(PrecisionTrimSession {
+                    mode: PrecisionTrimMode::Slide,
+                    drag_op: DragOp::Slide {
+                        clip_id: clip.id.clone(),
+                        track_id: track.id.clone(),
+                        original_start: clip.timeline_start,
+                        drag_start_ns: current_ns,
+                        left_clip_id: left_neighbor.map(|c| c.id.clone()),
+                        original_left_out: left_neighbor.map(|c| c.source_out),
+                        right_clip_id: right_neighbor.map(|c| c.id.clone()),
+                        original_right_in: right_neighbor.map(|c| c.source_in),
+                        original_right_start: right_neighbor.map(|c| c.timeline_start),
+                    },
+                    original_current_ns: current_ns,
+                    current_ns,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn build_precision_trim_preview(&self, session: &PrecisionTrimSession) -> Option<TrimPreview> {
+        let frame_ns = {
+            let proj = self.project.borrow();
+            frame_duration_ns(&proj.frame_rate).max(1)
+        };
+        let frame_delta = ((i128::from(session.current_ns)
+            - i128::from(session.original_current_ns))
+            / i128::from(frame_ns)) as i64;
+        self.build_trim_preview_from_drag_op(&session.drag_op)
+            .map(|preview| {
+                preview.with_overlay_text(
+                    format!(
+                        "{} · {}",
+                        session.mode.label(),
+                        format_precision_trim_frame_delta(frame_delta)
+                    ),
+                    PRECISION_TRIM_HINT_TEXT,
+                )
+            })
+    }
+
+    fn measure_drag_op_current_ns(&self, drag_op: &DragOp) -> Option<u64> {
+        let proj = self.project.borrow();
+        let editing_tracks = self.resolve_editing_tracks(&proj);
+        match drag_op {
+            DragOp::TrimIn {
+                clip_id, track_id, ..
+            } => editing_tracks
+                .iter()
+                .find(|track| &track.id == track_id)
+                .and_then(|track| track.clips.iter().find(|clip| &clip.id == clip_id))
+                .map(|clip| clip.timeline_start),
+            DragOp::TrimOut {
+                clip_id, track_id, ..
+            } => editing_tracks
+                .iter()
+                .find(|track| &track.id == track_id)
+                .and_then(|track| track.clips.iter().find(|clip| &clip.id == clip_id))
+                .map(|clip| clip.timeline_end()),
+            DragOp::Roll {
+                right_clip_id,
+                track_id,
+                ..
+            } => editing_tracks
+                .iter()
+                .find(|track| &track.id == track_id)
+                .and_then(|track| track.clips.iter().find(|clip| &clip.id == right_clip_id))
+                .map(|clip| clip.timeline_start),
+            DragOp::Slip {
+                clip_id,
+                track_id,
+                original_source_in,
+                drag_start_ns,
+                ..
+            } => editing_tracks
+                .iter()
+                .find(|track| &track.id == track_id)
+                .and_then(|track| track.clips.iter().find(|clip| &clip.id == clip_id))
+                .map(|clip| {
+                    let source_delta = i128::from(clip.source_in) - i128::from(*original_source_in);
+                    let timeline_delta = clip.source_to_timeline_delta(source_delta as i64);
+                    (i128::from(*drag_start_ns) + i128::from(timeline_delta)).max(0) as u64
+                }),
+            DragOp::Slide {
+                clip_id,
+                track_id,
+                original_start,
+                drag_start_ns,
+                ..
+            } => editing_tracks
+                .iter()
+                .find(|track| &track.id == track_id)
+                .and_then(|track| track.clips.iter().find(|clip| &clip.id == clip_id))
+                .map(|clip| {
+                    (i128::from(*drag_start_ns) + i128::from(clip.timeline_start)
+                        - i128::from(*original_start))
+                    .max(0) as u64
+                }),
+            _ => None,
+        }
+    }
+
+    fn apply_precision_trim_drag_update(&mut self, drag_op: &DragOp, current_ns: u64, snap: bool) {
+        match drag_op {
+            DragOp::TrimIn {
+                clip_id,
+                track_id,
+                original_source_in,
+                original_timeline_start,
+                original_track_clips,
+            } => {
+                let drag_ns = current_ns as i64 - *original_timeline_start as i64;
+                let (snapped_start, hit) = if snap {
+                    let snap_ns =
+                        (SNAP_TOLERANCE_PX / self.pixels_per_second * NS_PER_SECOND) as i64;
+                    let eph = self.editing_playhead_ns();
+                    let at_root = self.compound_nav_stack.is_empty();
+                    let proj = self.project.borrow();
+                    let editing_tracks = self.resolve_editing_tracks(&proj);
+                    let mut cands: Vec<(u64, &'static str)> = Vec::new();
+                    cands.push((0, "start"));
+                    cands.push((eph, "playhead"));
+                    if at_root {
+                        for marker in &proj.markers {
+                            cands.push((marker.position_ns, "marker"));
+                        }
+                    }
+                    for track in editing_tracks.iter() {
+                        for clip in &track.clips {
+                            if &clip.id == clip_id {
+                                continue;
+                            }
+                            cands.push((clip.timeline_start, "clip start"));
+                            cands.push((clip.timeline_end(), "clip end"));
+                        }
+                    }
+                    let (snapped, hit) = snap_to_candidates(
+                        (*original_timeline_start as i64 + drag_ns).max(0),
+                        snap_ns,
+                        &cands,
+                    );
+                    (snapped.max(0) as u64, hit)
+                } else {
+                    (
+                        (*original_timeline_start as i64 + drag_ns).max(0) as u64,
+                        None,
+                    )
+                };
+                self.active_snap_hit = hit;
+
+                let snapped_drag = snapped_start as i64 - *original_timeline_start as i64;
+                let mut proj = self.project.borrow_mut();
+                if let Some(track) = proj.track_mut(track_id) {
+                    let mut new_ts = *original_timeline_start;
+                    if let Some(clip) = track.clips.iter_mut().find(|c| &c.id == clip_id) {
+                        let source_drag = clip.timeline_to_source_delta(snapped_drag);
+                        let new_source_in =
+                            (*original_source_in as i64 + source_drag).max(0) as u64;
+                        if new_source_in < clip.source_out.saturating_sub(1_000_000) {
+                            clip.source_in = new_source_in;
+                            clip.timeline_start =
+                                (*original_timeline_start as i64 + snapped_drag).max(0) as u64;
+                            new_ts = clip.timeline_start;
+                        }
+                    }
+
+                    if self.active_tool == ActiveTool::Ripple {
+                        let threshold = *original_timeline_start;
+                        let actual_delta = new_ts as i64 - *original_timeline_start as i64;
+                        for clip in &mut track.clips {
+                            if clip.id == *clip_id {
+                                continue;
+                            }
+                            if let Some(orig) =
+                                original_track_clips.iter().find(|orig| orig.id == clip.id)
+                            {
+                                if orig.timeline_start > threshold {
+                                    clip.timeline_start =
+                                        (orig.timeline_start as i64 + actual_delta).max(0) as u64;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            DragOp::TrimOut {
+                clip_id,
+                track_id,
+                original_track_clips,
+                ..
+            } => {
+                let (snapped_ns, hit) = if snap {
+                    let snap_ns =
+                        (SNAP_TOLERANCE_PX / self.pixels_per_second * NS_PER_SECOND) as i64;
+                    let eph = self.editing_playhead_ns();
+                    let at_root = self.compound_nav_stack.is_empty();
+                    let proj = self.project.borrow();
+                    let editing_tracks = self.resolve_editing_tracks(&proj);
+                    let mut cands: Vec<(u64, &'static str)> = Vec::new();
+                    cands.push((eph, "playhead"));
+                    if at_root {
+                        for marker in &proj.markers {
+                            cands.push((marker.position_ns, "marker"));
+                        }
+                    }
+                    for track in editing_tracks.iter() {
+                        for clip in &track.clips {
+                            if &clip.id == clip_id {
+                                continue;
+                            }
+                            cands.push((clip.timeline_start, "clip start"));
+                            cands.push((clip.timeline_end(), "clip end"));
+                        }
+                    }
+                    let (snapped, hit) = snap_to_candidates(current_ns as i64, snap_ns, &cands);
+                    (snapped.max(0) as u64, hit)
+                } else {
+                    (current_ns, None)
+                };
+                self.active_snap_hit = hit;
+
+                let mut proj = self.project.borrow_mut();
+                if let Some(track) = proj.track_mut(track_id) {
+                    if let Some(orig_clip) =
+                        original_track_clips.iter().find(|clip| &clip.id == clip_id)
+                    {
+                        let new_timeline_end = snapped_ns;
+                        let timeline_start = orig_clip.timeline_start;
+                        if new_timeline_end > timeline_start + 1_000_000 {
+                            let new_dur = new_timeline_end - timeline_start;
+                            let new_source_dur = orig_clip.timeline_to_source_dur(new_dur);
+                            let mut new_source_out = orig_clip.source_in + new_source_dur;
+                            if let Some(max) = orig_clip.max_source_out() {
+                                new_source_out = new_source_out.min(max);
+                            }
+
+                            if let Some(clip) =
+                                track.clips.iter_mut().find(|clip| &clip.id == clip_id)
+                            {
+                                clip.source_out = new_source_out;
+                            }
+
+                            if self.active_tool == ActiveTool::Ripple {
+                                let old_dur = orig_clip.duration();
+                                let delta = new_dur as i64 - old_dur as i64;
+                                let threshold = orig_clip.timeline_end();
+                                for clip in &mut track.clips {
+                                    if let Some(orig_other) =
+                                        original_track_clips.iter().find(|orig| orig.id == clip.id)
+                                    {
+                                        if orig_other.timeline_start >= threshold {
+                                            clip.timeline_start =
+                                                (orig_other.timeline_start as i64 + delta).max(0)
+                                                    as u64;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if let Some(clip) =
+                        track.clips.iter_mut().find(|clip| &clip.id == clip_id)
+                    {
+                        if snapped_ns > clip.source_in + 1_000_000 {
+                            let tl_offset = snapped_ns.saturating_sub(clip.timeline_start);
+                            let source_offset = clip.timeline_to_source_dur(tl_offset);
+                            clip.source_out = clip.source_in + source_offset;
+                            clip.clamp_source_out();
+                        }
+                    }
+                }
+            }
+            DragOp::Roll {
+                left_clip_id,
+                right_clip_id,
+                track_id,
+                original_right_in,
+                original_right_start,
+                ..
+            } => {
+                let drag_ns = current_ns as i64 - *original_right_start as i64;
+                let new_cut_pos = (*original_right_start as i64 + drag_ns).max(0) as u64;
+                let mut proj = self.project.borrow_mut();
+                if let Some(track) = proj.track_mut(track_id) {
+                    let left_start = track
+                        .clips
+                        .iter()
+                        .find(|clip| &clip.id == left_clip_id)
+                        .map(|clip| clip.timeline_start)
+                        .unwrap_or(0);
+                    if new_cut_pos > left_start + 1_000_000 {
+                        if let Some(left) =
+                            track.clips.iter_mut().find(|clip| &clip.id == left_clip_id)
+                        {
+                            let new_tl_dur = new_cut_pos - left.timeline_start;
+                            let new_source_dur = left.timeline_to_source_dur(new_tl_dur);
+                            left.source_out = left.source_in + new_source_dur;
+                            left.clamp_source_out();
+                        }
+                        if let Some(right) = track
+                            .clips
+                            .iter_mut()
+                            .find(|clip| &clip.id == right_clip_id)
+                        {
+                            let source_drag = right.timeline_to_source_delta(drag_ns);
+                            let new_right_in =
+                                (*original_right_in as i64 + source_drag).max(0) as u64;
+                            right.source_in = new_right_in;
+                            right.timeline_start = new_cut_pos;
+                        }
+                    }
+                }
+                self.active_snap_hit = None;
+            }
+            DragOp::Slip {
+                clip_id,
+                track_id,
+                original_source_in,
+                original_source_out,
+                drag_start_ns,
+            } => {
+                let tl_delta = current_ns as i64 - *drag_start_ns as i64;
+                let mut proj = self.project.borrow_mut();
+                if let Some(track) = proj.track_mut(track_id) {
+                    if let Some(clip) = track.clips.iter_mut().find(|clip| &clip.id == clip_id) {
+                        let source_delta = clip.timeline_to_source_delta(tl_delta);
+                        let mut new_source_in =
+                            (*original_source_in as i64 + source_delta).max(0) as u64;
+                        let mut new_source_out = (*original_source_out as i64 + source_delta)
+                            .max(new_source_in as i64 + 1_000_000)
+                            as u64;
+                        if let Some(max) = clip.max_source_out() {
+                            if new_source_out > max {
+                                let over = new_source_out - max;
+                                new_source_out = max;
+                                new_source_in = new_source_in.saturating_sub(over);
+                            }
+                        }
+                        clip.source_in = new_source_in;
+                        clip.source_out = new_source_out;
+                    }
+                }
+                self.active_snap_hit = None;
+            }
+            DragOp::Slide {
+                clip_id,
+                track_id,
+                original_start,
+                drag_start_ns,
+                left_clip_id,
+                original_left_out,
+                right_clip_id,
+                original_right_in,
+                original_right_start,
+            } => {
+                let requested_delta = i128::from(current_ns) - i128::from(*drag_start_ns);
+                let mut proj = self.project.borrow_mut();
+                if let Some(track) = proj.track_mut(track_id) {
+                    let left_bounds = if let (Some(left_id), Some(orig_out)) =
+                        (left_clip_id, original_left_out)
+                    {
+                        track
+                            .clips
+                            .iter()
+                            .find(|clip| &clip.id == left_id)
+                            .map(|clip| (*orig_out, clip.source_in))
+                    } else {
+                        None
+                    };
+                    let right_bounds = if let (Some(right_id), Some(orig_in), Some(_orig_start)) =
+                        (right_clip_id, original_right_in, original_right_start)
+                    {
+                        track
+                            .clips
+                            .iter()
+                            .find(|clip| &clip.id == right_id)
+                            .map(|clip| (*orig_in, clip.source_out))
+                    } else {
+                        None
+                    };
+
+                    let clamped_delta =
+                        clamp_slide_delta(requested_delta, left_bounds, right_bounds);
+                    let new_start = (i128::from(*original_start) + clamped_delta).max(0) as u64;
+
+                    if let Some(clip) = track.clips.iter_mut().find(|clip| &clip.id == clip_id) {
+                        clip.timeline_start = new_start;
+                    }
+
+                    if let (Some(left_id), Some((orig_out, left_in))) = (left_clip_id, left_bounds)
+                    {
+                        if let Some(left) = track.clips.iter_mut().find(|clip| &clip.id == left_id)
+                        {
+                            left.source_out = (i128::from(orig_out) + clamped_delta)
+                                .max(i128::from(left_in) + 1_000_000)
+                                as u64;
+                            left.clamp_source_out();
+                        }
+                    }
+
+                    if let (Some(right_id), Some((orig_in, right_out)), Some(orig_rs)) =
+                        (right_clip_id, right_bounds, original_right_start)
+                    {
+                        if let Some(right) =
+                            track.clips.iter_mut().find(|clip| &clip.id == right_id)
+                        {
+                            let max_in = i128::from(right_out).saturating_sub(1_000_000);
+                            right.source_in =
+                                (i128::from(orig_in) + clamped_delta).clamp(0, max_in) as u64;
+                            right.timeline_start =
+                                (i128::from(*orig_rs) + clamped_delta).max(0) as u64;
+                        }
+                    }
+                }
+                self.active_snap_hit = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn restore_precision_trim_drag_op(&mut self, drag_op: &DragOp) {
+        let mut proj = self.project.borrow_mut();
+        match drag_op {
+            DragOp::TrimIn {
+                track_id,
+                original_track_clips,
+                ..
+            }
+            | DragOp::TrimOut {
+                track_id,
+                original_track_clips,
+                ..
+            } => {
+                if let Some(track) = proj.track_mut(track_id) {
+                    track.clips = original_track_clips.clone();
+                    track.sort_clips();
+                }
+            }
+            DragOp::Roll {
+                left_clip_id,
+                right_clip_id,
+                track_id,
+                original_left_out,
+                original_right_in,
+                original_right_start,
+            } => {
+                if let Some(track) = proj.track_mut(track_id) {
+                    if let Some(left) = track.clips.iter_mut().find(|clip| &clip.id == left_clip_id)
+                    {
+                        left.source_out = *original_left_out;
+                    }
+                    if let Some(right) = track
+                        .clips
+                        .iter_mut()
+                        .find(|clip| &clip.id == right_clip_id)
+                    {
+                        right.source_in = *original_right_in;
+                        right.timeline_start = *original_right_start;
+                    }
+                }
+            }
+            DragOp::Slip {
+                clip_id,
+                track_id,
+                original_source_in,
+                original_source_out,
+                ..
+            } => {
+                if let Some(track) = proj.track_mut(track_id) {
+                    if let Some(clip) = track.clips.iter_mut().find(|clip| &clip.id == clip_id) {
+                        clip.source_in = *original_source_in;
+                        clip.source_out = *original_source_out;
+                    }
+                }
+            }
+            DragOp::Slide {
+                clip_id,
+                track_id,
+                original_start,
+                left_clip_id,
+                original_left_out,
+                right_clip_id,
+                original_right_in,
+                original_right_start,
+                ..
+            } => {
+                if let Some(track) = proj.track_mut(track_id) {
+                    if let Some(clip) = track.clips.iter_mut().find(|clip| &clip.id == clip_id) {
+                        clip.timeline_start = *original_start;
+                    }
+                    if let (Some(left_id), Some(left_out)) = (left_clip_id, original_left_out) {
+                        if let Some(left) = track.clips.iter_mut().find(|clip| &clip.id == left_id)
+                        {
+                            left.source_out = *left_out;
+                        }
+                    }
+                    if let (Some(right_id), Some(right_in), Some(right_start)) =
+                        (right_clip_id, original_right_in, original_right_start)
+                    {
+                        if let Some(right) =
+                            track.clips.iter_mut().find(|clip| &clip.id == right_id)
+                        {
+                            right.source_in = *right_in;
+                            right.timeline_start = *right_start;
+                        }
+                    }
+                    track.sort_clips();
+                }
+            }
+            _ => {}
+        }
+        self.active_snap_hit = None;
+    }
+
+    fn commit_precision_trim_drag_op(&mut self, drag_op: &DragOp, magnetic_mode: bool) -> bool {
+        match drag_op {
+            DragOp::TrimIn {
+                clip_id,
+                track_id,
+                original_source_in,
+                original_timeline_start,
+                original_track_clips,
+            } => {
+                if magnetic_mode {
+                    let mut new_clips = {
+                        let proj = self.project.borrow();
+                        proj.track_ref(track_id)
+                            .map(|track| track.clips.clone())
+                            .unwrap_or_default()
+                    };
+                    compact_gap_free_clips(&mut new_clips);
+                    if new_clips != *original_track_clips {
+                        let cmd = SetTrackClipsCommand {
+                            track_id: track_id.clone(),
+                            old_clips: original_track_clips.clone(),
+                            new_clips,
+                            label: "Trim clip (magnetic)".to_string(),
+                        };
+                        let project = self.project.clone();
+                        let mut proj = project.borrow_mut();
+                        self.history.execute(Box::new(cmd), &mut proj);
+                        return true;
+                    }
+                    false
+                } else {
+                    let (new_si, new_ts) = {
+                        let proj = self.project.borrow();
+                        proj.track_ref(track_id)
+                            .and_then(|track| track.clips.iter().find(|clip| &clip.id == clip_id))
+                            .map(|clip| (clip.source_in, clip.timeline_start))
+                            .unwrap_or((*original_source_in, *original_timeline_start))
+                    };
+
+                    if self.active_tool == ActiveTool::Ripple {
+                        if new_si != *original_source_in {
+                            let delta = new_ts as i64 - *original_timeline_start as i64;
+                            let cmd = crate::undo::RippleTrimInCommand {
+                                clip_id: clip_id.clone(),
+                                track_id: track_id.clone(),
+                                old_source_in: *original_source_in,
+                                new_source_in: new_si,
+                                old_timeline_start: *original_timeline_start,
+                                new_timeline_start: new_ts,
+                                delta,
+                            };
+                            self.history.undo_stack.push(Box::new(cmd));
+                            self.history.redo_stack.clear();
+                            self.project.borrow_mut().dirty = true;
+                            return true;
+                        }
+                    } else if new_si != *original_source_in {
+                        let cmd = TrimClipCommand {
+                            clip_id: clip_id.clone(),
+                            track_id: track_id.clone(),
+                            old_source_in: *original_source_in,
+                            new_source_in: new_si,
+                            old_timeline_start: *original_timeline_start,
+                            new_timeline_start: new_ts,
+                        };
+                        self.history.undo_stack.push(Box::new(cmd));
+                        self.history.redo_stack.clear();
+                        self.project.borrow_mut().dirty = true;
+                        return true;
+                    }
+                    false
+                }
+            }
+            DragOp::TrimOut {
+                clip_id,
+                track_id,
+                original_source_out,
+                original_track_clips,
+            } => {
+                if self.active_tool == ActiveTool::Ripple {
+                    let new_source_out = {
+                        let proj = self.project.borrow();
+                        proj.track_ref(track_id)
+                            .and_then(|track| track.clips.iter().find(|clip| &clip.id == clip_id))
+                            .map(|clip| clip.source_out)
+                    };
+                    if let Some(new_out) = new_source_out {
+                        if new_out != *original_source_out {
+                            let delta = if let Some(orig) =
+                                original_track_clips.iter().find(|clip| &clip.id == clip_id)
+                            {
+                                let old_dur = orig.duration();
+                                let new_dur = new_out - orig.source_in;
+                                new_dur as i64 - old_dur as i64
+                            } else {
+                                0
+                            };
+                            let cmd = crate::undo::RippleTrimOutCommand {
+                                clip_id: clip_id.clone(),
+                                track_id: track_id.clone(),
+                                old_source_out: *original_source_out,
+                                new_source_out: new_out,
+                                delta,
+                            };
+                            self.history.undo_stack.push(Box::new(cmd));
+                            self.history.redo_stack.clear();
+                            self.project.borrow_mut().dirty = true;
+                            return true;
+                        }
+                    }
+                    false
+                } else if magnetic_mode {
+                    let mut new_clips = {
+                        let proj = self.project.borrow();
+                        proj.track_ref(track_id)
+                            .map(|track| track.clips.clone())
+                            .unwrap_or_default()
+                    };
+                    compact_gap_free_clips(&mut new_clips);
+                    if new_clips != *original_track_clips {
+                        let cmd = SetTrackClipsCommand {
+                            track_id: track_id.clone(),
+                            old_clips: original_track_clips.clone(),
+                            new_clips,
+                            label: "Trim out-point (magnetic)".to_string(),
+                        };
+                        let project = self.project.clone();
+                        let mut proj = project.borrow_mut();
+                        self.history.execute(Box::new(cmd), &mut proj);
+                        return true;
+                    }
+                    false
+                } else {
+                    let new_so = {
+                        let proj = self.project.borrow();
+                        proj.track_ref(track_id)
+                            .and_then(|track| track.clips.iter().find(|clip| &clip.id == clip_id))
+                            .map(|clip| clip.source_out)
+                            .unwrap_or(*original_source_out)
+                    };
+                    if new_so != *original_source_out {
+                        let cmd = TrimOutCommand {
+                            clip_id: clip_id.clone(),
+                            track_id: track_id.clone(),
+                            old_source_out: *original_source_out,
+                            new_source_out: new_so,
+                        };
+                        self.history.undo_stack.push(Box::new(cmd));
+                        self.history.redo_stack.clear();
+                        self.project.borrow_mut().dirty = true;
+                        return true;
+                    }
+                    false
+                }
+            }
+            DragOp::Roll {
+                left_clip_id,
+                right_clip_id,
+                track_id,
+                original_left_out,
+                original_right_in,
+                original_right_start,
+            } => {
+                let (new_left_out, new_right_in, new_right_start) = {
+                    let proj = self.project.borrow();
+                    if let Some(track) = proj.track_ref(track_id) {
+                        let left_out = track
+                            .clips
+                            .iter()
+                            .find(|clip| &clip.id == left_clip_id)
+                            .map(|clip| clip.source_out)
+                            .unwrap_or(*original_left_out);
+                        let (right_in, right_start) = track
+                            .clips
+                            .iter()
+                            .find(|clip| &clip.id == right_clip_id)
+                            .map(|clip| (clip.source_in, clip.timeline_start))
+                            .unwrap_or((*original_right_in, *original_right_start));
+                        (left_out, right_in, right_start)
+                    } else {
+                        (
+                            *original_left_out,
+                            *original_right_in,
+                            *original_right_start,
+                        )
+                    }
+                };
+
+                if new_left_out != *original_left_out || new_right_in != *original_right_in {
+                    let cmd = crate::undo::RollEditCommand {
+                        left_clip_id: left_clip_id.clone(),
+                        right_clip_id: right_clip_id.clone(),
+                        track_id: track_id.clone(),
+                        old_left_out: *original_left_out,
+                        new_left_out,
+                        old_right_in: *original_right_in,
+                        new_right_in,
+                        old_right_start: *original_right_start,
+                        new_right_start,
+                    };
+                    self.history.undo_stack.push(Box::new(cmd));
+                    self.history.redo_stack.clear();
+                    self.project.borrow_mut().dirty = true;
+                    return true;
+                }
+                false
+            }
+            DragOp::Slip {
+                clip_id,
+                track_id,
+                original_source_in,
+                original_source_out,
+                ..
+            } => {
+                let (new_si, new_so) = {
+                    let proj = self.project.borrow();
+                    proj.track_ref(track_id)
+                        .and_then(|track| track.clips.iter().find(|clip| &clip.id == clip_id))
+                        .map(|clip| (clip.source_in, clip.source_out))
+                        .unwrap_or((*original_source_in, *original_source_out))
+                };
+                if new_si != *original_source_in {
+                    let cmd = crate::undo::SlipClipCommand {
+                        clip_id: clip_id.clone(),
+                        track_id: track_id.clone(),
+                        old_source_in: *original_source_in,
+                        old_source_out: *original_source_out,
+                        new_source_in: new_si,
+                        new_source_out: new_so,
+                    };
+                    self.history.undo_stack.push(Box::new(cmd));
+                    self.history.redo_stack.clear();
+                    self.project.borrow_mut().dirty = true;
+                    return true;
+                }
+                false
+            }
+            DragOp::Slide {
+                clip_id,
+                track_id,
+                original_start,
+                left_clip_id,
+                original_left_out,
+                right_clip_id,
+                original_right_in,
+                original_right_start,
+                ..
+            } => {
+                let proj = self.project.borrow();
+                let track = proj.track_ref(track_id);
+                let new_start = track
+                    .and_then(|track| track.clips.iter().find(|clip| &clip.id == clip_id))
+                    .map(|clip| clip.timeline_start)
+                    .unwrap_or(*original_start);
+                let new_left_out = left_clip_id.as_ref().and_then(|left_id| {
+                    track
+                        .and_then(|track| track.clips.iter().find(|clip| &clip.id == left_id))
+                        .map(|clip| clip.source_out)
+                });
+                let new_right_in = right_clip_id.as_ref().and_then(|right_id| {
+                    track
+                        .and_then(|track| track.clips.iter().find(|clip| &clip.id == right_id))
+                        .map(|clip| clip.source_in)
+                });
+                let new_right_start = right_clip_id.as_ref().and_then(|right_id| {
+                    track
+                        .and_then(|track| track.clips.iter().find(|clip| &clip.id == right_id))
+                        .map(|clip| clip.timeline_start)
+                });
+                drop(proj);
+                if new_start != *original_start {
+                    let cmd = crate::undo::SlideClipCommand {
+                        clip_id: clip_id.clone(),
+                        track_id: track_id.clone(),
+                        old_start: *original_start,
+                        new_start,
+                        left_clip_id: left_clip_id.clone(),
+                        old_left_out: *original_left_out,
+                        new_left_out,
+                        right_clip_id: right_clip_id.clone(),
+                        old_right_in: *original_right_in,
+                        new_right_in,
+                        old_right_start: *original_right_start,
+                        new_right_start,
+                    };
+                    self.history.undo_stack.push(Box::new(cmd));
+                    self.history.redo_stack.clear();
+                    self.project.borrow_mut().dirty = true;
+                    return true;
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn can_start_precision_trim_session(&self) -> bool {
+        self.build_precision_trim_session().is_some()
+    }
+
+    pub fn begin_precision_trim_session(&mut self) -> Option<TrimPreview> {
+        let session = self.build_precision_trim_session()?;
+        let preview = self.build_precision_trim_preview(&session);
+        self.active_snap_hit = None;
+        self.precision_trim_session = Some(session);
+        preview
+    }
+
+    pub fn nudge_precision_trim_session(&mut self, frame_delta: i64) -> Option<TrimPreview> {
+        let Some(mut session) = self.precision_trim_session.clone() else {
+            return None;
+        };
+        let frame_ns = {
+            let proj = self.project.borrow();
+            frame_duration_ns(&proj.frame_rate).max(1)
+        };
+        let requested_ns = (i128::from(session.current_ns)
+            + i128::from(frame_ns) * i128::from(frame_delta))
+        .max(0) as u64;
+        self.apply_precision_trim_drag_update(&session.drag_op, requested_ns, false);
+        session.current_ns = self
+            .measure_drag_op_current_ns(&session.drag_op)
+            .unwrap_or(requested_ns);
+        let preview = self.build_precision_trim_preview(&session);
+        self.precision_trim_session = Some(session);
+        preview
+    }
+
+    pub fn commit_precision_trim_session(&mut self) -> bool {
+        let Some(session) = self.precision_trim_session.take() else {
+            return false;
+        };
+        self.active_snap_hit = None;
+        self.commit_precision_trim_drag_op(&session.drag_op, self.magnetic_mode)
+    }
+
+    pub fn cancel_precision_trim_session(&mut self) -> bool {
+        let Some(session) = self.precision_trim_session.take() else {
+            return false;
+        };
+        self.restore_precision_trim_drag_op(&session.drag_op);
+        true
     }
 
     fn track_index_at_y(&self, y: f64) -> Option<usize> {
@@ -2170,8 +3445,7 @@ impl TimelineState {
                 .map(|(id, _, tc)| {
                     (
                         id.clone(),
-                        i128::from(anchor_timeline_start) + i128::from(*tc)
-                            - i128::from(anchor_tc),
+                        i128::from(anchor_timeline_start) + i128::from(*tc) - i128::from(anchor_tc),
                     )
                 })
                 .collect();
@@ -2402,6 +3676,7 @@ impl TimelineState {
         ClipContextMenuActionability {
             join_through_edit: self.can_join_selected_through_edit(),
             freeze_frame: self.can_create_freeze_frame_at_playhead(),
+            precision_trim: self.can_start_precision_trim_session(),
             link_selected: self.can_link_selected_clips(),
             unlink_selected: self.can_unlink_selected_clips(),
             sync_timecode_visible: sync_tc_visible,
@@ -4717,6 +5992,24 @@ impl TimelineState {
         None
     }
 
+    /// Tooltip text for the clip body at `(x, y)`. Includes the clip label
+    /// and, if the clip has a non-`None` color label, the legend's display
+    /// name for that color (custom override or default English name). Used
+    /// only when no badge / keyframe-marker tooltip applies.
+    fn clip_body_tooltip_text(&self, x: f64, y: f64) -> Option<String> {
+        let hit = self.hit_test(x, y)?;
+        if !matches!(hit.zone, HitZone::Body) {
+            return None;
+        }
+        let proj = self.project.borrow();
+        let clip = proj.clip_ref(&hit.clip_id)?;
+        if clip.color_label == crate::model::clip::ClipColorLabel::None {
+            return None;
+        }
+        let legend_name = proj.display_name_for_color_label(clip.color_label);
+        Some(format!("{}\nColor: {}", clip.label, legend_name))
+    }
+
     /// Find which clip and track are at a given (x, y) coordinate.
     /// Also returns whether x is near the in-edge or out-edge (for trimming).
     fn hit_test(&self, x: f64, y: f64) -> Option<HitResult> {
@@ -5356,6 +6649,7 @@ enum HitZone {
 struct ClipContextMenuActionability {
     join_through_edit: bool,
     freeze_frame: bool,
+    precision_trim: bool,
     link_selected: bool,
     unlink_selected: bool,
     /// True when the "Sync Selected Clips by Timecode" button should
@@ -5387,6 +6681,7 @@ impl ClipContextMenuActionability {
     fn any(self) -> bool {
         self.join_through_edit
             || self.freeze_frame
+            || self.precision_trim
             || self.link_selected
             || self.unlink_selected
             // Visible (not actionable) counts — the menu stays open so
@@ -5408,6 +6703,7 @@ impl ClipContextMenuActionability {
 fn apply_clip_context_menu_actionability(
     btn_join_through_edit: &gtk::Button,
     btn_freeze_frame: &gtk::Button,
+    btn_precision_trim: &gtk::Button,
     btn_link_selected: &gtk::Button,
     btn_unlink_selected: &gtk::Button,
     btn_align_grouped: &gtk::Button,
@@ -5428,6 +6724,7 @@ fn apply_clip_context_menu_actionability(
     };
     set_state(btn_join_through_edit, actionability.join_through_edit);
     set_state(btn_freeze_frame, actionability.freeze_frame);
+    set_state(btn_precision_trim, actionability.precision_trim);
     set_state(btn_link_selected, actionability.link_selected);
     set_state(btn_unlink_selected, actionability.unlink_selected);
     // Sync-by-timecode button is driven out-of-band: visible whenever
@@ -5483,6 +6780,10 @@ pub fn build_timeline(
                 return true;
             }
             if let Some(text) = st.keyframe_marker_tooltip_text(x as f64, y as f64) {
+                tooltip.set_text(Some(&text));
+                return true;
+            }
+            if let Some(text) = st.clip_body_tooltip_text(x as f64, y as f64) {
                 tooltip.set_text(Some(&text));
                 return true;
             }
@@ -5594,6 +6895,11 @@ pub fn build_timeline(
     btn_freeze_frame.set_tooltip_text(Some(
         "Create a freeze-frame clip from the selected clip (Shift+F)",
     ));
+    let btn_precision_trim = gtk::Button::with_label("Precision Trim…");
+    btn_precision_trim.add_css_class("flat");
+    btn_precision_trim.set_tooltip_text(Some(
+        "Open a frame-by-frame precision trim session for the active Ripple, Roll, Slip, or Slide tool (Enter)",
+    ));
     let btn_link_selected = gtk::Button::with_label("Link Selected Clips");
     btn_link_selected.add_css_class("flat");
     btn_link_selected.set_tooltip_text(Some("Link the current selection (Ctrl+L)"));
@@ -5627,6 +6933,7 @@ pub fn build_timeline(
     ));
     clip_context_box.append(&btn_join_through_edit);
     clip_context_box.append(&btn_freeze_frame);
+    clip_context_box.append(&btn_precision_trim);
     clip_context_box.append(&btn_link_selected);
     clip_context_box.append(&btn_unlink_selected);
     clip_context_box.append(&btn_align_grouped);
@@ -5645,6 +6952,14 @@ pub fn build_timeline(
         "Decode LTC from the selected clip and store it as source timecode metadata",
     ));
     clip_context_box.append(&btn_convert_ltc);
+    let btn_replace_source = gtk::Button::with_label("Replace Source File\u{2026}");
+    btn_replace_source.add_css_class("flat");
+    btn_replace_source.set_tooltip_text(Some(
+        "Swap this clip's source media for a different file (e.g. proxy → master). \
+         Other clips referencing the same source are not affected. Crop values rescale \
+         automatically if the new file has a different resolution.",
+    ));
+    clip_context_box.append(&btn_replace_source);
     let btn_split_stereo = gtk::Button::with_label("Split Stereo to Mono Tracks");
     btn_split_stereo.add_css_class("flat");
     btn_split_stereo.set_tooltip_text(Some(
@@ -5905,6 +7220,27 @@ pub fn build_timeline(
         let state = state.clone();
         let area_weak = area.downgrade();
         let pop_weak = clip_context_pop.downgrade();
+        btn_precision_trim.connect_clicked(move |_| {
+            let mut st = state.borrow_mut();
+            let preview = st.begin_precision_trim_session();
+            drop(st);
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            if let Some(a) = area_weak.upgrade() {
+                a.grab_focus();
+                a.queue_draw();
+            }
+            if let Some(preview) = preview {
+                TimelineState::notify_trim_preview(&state, Some(preview));
+            }
+        });
+    }
+
+    {
+        let state = state.clone();
+        let area_weak = area.downgrade();
+        let pop_weak = clip_context_pop.downgrade();
         btn_link_selected.connect_clicked(move |_| {
             let mut st = state.borrow_mut();
             let changed = st.link_selected_clips();
@@ -6023,6 +7359,51 @@ pub fn build_timeline(
                 pop.popdown();
             }
             open_convert_ltc_dialog(state.clone());
+        });
+    }
+
+    {
+        let state = state.clone();
+        let pop_weak = clip_context_pop.downgrade();
+        btn_replace_source.connect_clicked(move |_| {
+            if let Some(pop) = pop_weak.upgrade() {
+                pop.popdown();
+            }
+            // Resolve which clip to swap: primary selection if one,
+            // first of the multi-selection otherwise. Bail when the
+            // resolved clip has no source path or isn't a file-backed
+            // kind (titles / adjustments / compounds skip).
+            let st = state.borrow();
+            let clip_id = match st.selected_ids_or_primary().into_iter().next() {
+                Some(id) => id,
+                None => return,
+            };
+            let cb = match st.on_replace_clip_source.clone() {
+                Some(cb) => cb,
+                None => return,
+            };
+            let path_ok = {
+                let proj = st.project.borrow();
+                proj.tracks
+                    .iter()
+                    .flat_map(|t| t.clips.iter())
+                    .find(|c| c.id == clip_id)
+                    .map(|c| {
+                        !c.source_path.trim().is_empty()
+                            && !matches!(
+                                c.kind,
+                                crate::model::clip::ClipKind::Title
+                                    | crate::model::clip::ClipKind::Adjustment
+                                    | crate::model::clip::ClipKind::Compound
+                            )
+                    })
+                    .unwrap_or(false)
+            };
+            drop(st);
+            if !path_ok {
+                return;
+            }
+            cb(clip_id);
         });
     }
 
@@ -6483,6 +7864,7 @@ pub fn build_timeline(
         let track_context_track_idx = track_context_track_idx.clone();
         let btn_join_through_edit = btn_join_through_edit.clone();
         let btn_freeze_frame = btn_freeze_frame.clone();
+        let btn_precision_trim = btn_precision_trim.clone();
         let btn_link_selected = btn_link_selected.clone();
         let btn_unlink_selected = btn_unlink_selected.clone();
         let btn_align_grouped = btn_align_grouped.clone();
@@ -6505,6 +7887,14 @@ pub fn build_timeline(
             let mut st = state.borrow_mut();
             clip_context_pop.popdown();
             track_context_pop.popdown();
+            if st.cancel_precision_trim_session() {
+                drop(st);
+                TimelineState::notify_trim_preview(&state, None);
+                if let Some(a) = area_weak.upgrade() {
+                    a.queue_draw();
+                }
+                return;
+            }
 
             // Ruler clicks are handled by the dedicated ruler widget
             // (see `build_timeline_ruler`). The main timeline area
@@ -6834,6 +8224,7 @@ pub fn build_timeline(
                             if apply_clip_context_menu_actionability(
                                 &btn_join_through_edit,
                                 &btn_freeze_frame,
+                                &btn_precision_trim,
                                 &btn_link_selected,
                                 &btn_unlink_selected,
                                 &btn_align_grouped,
@@ -6894,6 +8285,14 @@ pub fn build_timeline(
                     return;
                 }
                 let mut st = state.borrow_mut();
+                if st.cancel_precision_trim_session() {
+                    drop(st);
+                    TimelineState::notify_trim_preview(&state, None);
+                    if let Some(a) = area_weak.upgrade() {
+                        a.queue_draw();
+                    }
+                    return;
+                }
                 // Ruler drag is handled by the ruler widget's own
                 // drag gesture — see build_timeline_ruler. The main
                 // timeline area's y=0 is below the ruler, so we
@@ -6911,7 +8310,11 @@ pub fn build_timeline(
                 }
                 if !matches!(
                     st.active_tool,
-                    ActiveTool::Select | ActiveTool::Ripple | ActiveTool::Slip | ActiveTool::Slide
+                    ActiveTool::Select
+                        | ActiveTool::Ripple
+                        | ActiveTool::Roll
+                        | ActiveTool::Slip
+                        | ActiveTool::Slide
                 ) {
                     return;
                 }
@@ -7568,9 +8971,9 @@ pub fn build_timeline(
                         }
                     }
                     DragOp::Roll {
-                        left_clip_id,
-                        right_clip_id,
-                        track_id,
+                        ref left_clip_id,
+                        ref right_clip_id,
+                        ref track_id,
                         original_left_out: _,
                         original_right_in,
                         original_right_start,
@@ -7580,12 +8983,12 @@ pub fn build_timeline(
                         let new_cut_pos = (original_right_start as i64 + drag_ns).max(0) as u64;
 
                         let mut proj = st.project.borrow_mut();
-                        if let Some(track) = proj.track_mut(&track_id) {
+                        if let Some(track) = proj.track_mut(track_id) {
                             // Find left start to ensure we don't go past it
                             let left_start = track
                                 .clips
                                 .iter()
-                                .find(|c| &c.id == &left_clip_id)
+                                .find(|c| &c.id == left_clip_id)
                                 .map(|c| c.timeline_start)
                                 .unwrap_or(0);
 
@@ -7593,7 +8996,7 @@ pub fn build_timeline(
                             if new_cut_pos > left_start + 1_000_000 {
                                 // Update Left
                                 if let Some(left) =
-                                    track.clips.iter_mut().find(|c| &c.id == &left_clip_id)
+                                    track.clips.iter_mut().find(|c| &c.id == left_clip_id)
                                 {
                                     let new_tl_dur = new_cut_pos - left.timeline_start;
                                     let new_source_dur = left.timeline_to_source_dur(new_tl_dur);
@@ -7602,7 +9005,7 @@ pub fn build_timeline(
                                 }
                                 // Update Right
                                 if let Some(right) =
-                                    track.clips.iter_mut().find(|c| &c.id == &right_clip_id)
+                                    track.clips.iter_mut().find(|c| &c.id == right_clip_id)
                                 {
                                     let source_drag = right.timeline_to_source_delta(drag_ns);
                                     let new_right_in =
@@ -7808,8 +9211,18 @@ pub fn build_timeline(
                     }
                 }
 
+                // Build a Precision Trim Display preview from the just-updated
+                // clip state and push it into the Program Monitor. `None` for
+                // non-trim drag ops — the Program Monitor treats that as an
+                // explicit "no overlay for this drag" signal and keeps any
+                // previously-cleared state.
+                let trim_preview = st.build_trim_preview_from_drag_op(&drag_op);
+                drop(st);
                 if let Some(a) = area_weak.upgrade() {
                     a.queue_draw();
+                }
+                if trim_preview.is_some() {
+                    TimelineState::notify_trim_preview(&state, trim_preview);
                 }
             }
         });
@@ -7821,6 +9234,16 @@ pub fn build_timeline(
                 let mut st = state.borrow_mut();
                 let music_generation_outcome = st.finish_music_generation_region_drag();
                 let drag_op = std::mem::replace(&mut st.drag_op, DragOp::None);
+                // Capture whether this drag was trim-related *before* the match
+                // arms below move non-Copy fields out of `drag_op`.
+                let trim_was_active = matches!(
+                    drag_op,
+                    DragOp::TrimIn { .. }
+                        | DragOp::TrimOut { .. }
+                        | DragOp::Roll { .. }
+                        | DragOp::Slip { .. }
+                        | DragOp::Slide { .. }
+                );
                 st.active_snap_hit = None;
                 let should_notify_project = match &drag_op {
                     DragOp::None => false,
@@ -8312,6 +9735,11 @@ pub fn build_timeline(
                 if should_notify_project {
                     TimelineState::notify_project_changed(&state);
                 }
+                if trim_was_active {
+                    // Clear the Program Monitor precision-trim overlay now
+                    // that the drag has committed.
+                    TimelineState::notify_trim_preview(&state, None);
+                }
                 if let Some(cb) = sel_cb {
                     cb(new_sel);
                 }
@@ -8372,6 +9800,53 @@ pub fn build_timeline(
             let mut notify_project = false;
             let mut notify_selection = false;
             let mut notify_tool: Option<ActiveTool> = None;
+
+            if st.precision_trim_session.is_some() {
+                let preview = match key {
+                    Key::Left => st.nudge_precision_trim_session(if shift {
+                        -PRECISION_TRIM_LARGE_STEP_FRAMES
+                    } else {
+                        -1
+                    }),
+                    Key::Right => st.nudge_precision_trim_session(if shift {
+                        PRECISION_TRIM_LARGE_STEP_FRAMES
+                    } else {
+                        1
+                    }),
+                    Key::Return | Key::KP_Enter => {
+                        notify_project = st.commit_precision_trim_session();
+                        drop(st);
+                        TimelineState::notify_trim_preview(&state, None);
+                        if let Some(a) = area_weak.upgrade() {
+                            a.queue_draw();
+                        }
+                        if notify_project {
+                            TimelineState::notify_project_changed(&state);
+                        }
+                        return glib::Propagation::Stop;
+                    }
+                    Key::Escape => {
+                        let _ = st.cancel_precision_trim_session();
+                        drop(st);
+                        TimelineState::notify_trim_preview(&state, None);
+                        if let Some(a) = area_weak.upgrade() {
+                            a.queue_draw();
+                        }
+                        return glib::Propagation::Stop;
+                    }
+                    _ => return glib::Propagation::Stop,
+                };
+                drop(st);
+                if let Some(preview) = preview {
+                    TimelineState::notify_trim_preview(&state, Some(preview));
+                } else {
+                    TimelineState::notify_trim_preview(&state, None);
+                }
+                if let Some(a) = area_weak.upgrade() {
+                    a.queue_draw();
+                }
+                return glib::Propagation::Stop;
+            }
 
             let handled = match key {
                 Key::z if ctrl && !shift => {
@@ -8637,6 +10112,21 @@ pub fn build_timeline(
                         cb();
                     }
                     return glib::Propagation::Stop;
+                }
+                Key::Return | Key::KP_Enter => {
+                    let preview = st.begin_precision_trim_session();
+                    let started = st.precision_trim_session.is_some();
+                    drop(st);
+                    if started {
+                        if let Some(preview) = preview {
+                            TimelineState::notify_trim_preview(&state, Some(preview));
+                        }
+                        if let Some(a) = area_weak.upgrade() {
+                            a.queue_draw();
+                        }
+                        return glib::Propagation::Stop;
+                    }
+                    return glib::Propagation::Proceed;
                 }
                 Key::b | Key::B if ctrl && shift => {
                     let changed = st.join_selected_through_edit();
@@ -9006,7 +10496,13 @@ pub fn build_timeline(
 
                     let cb = state.borrow().on_drop_clip.clone();
                     if let Some(cb) = cb {
-                        cb(source_path, duration_ns, item_id, track_idx, timeline_start_ns);
+                        cb(
+                            source_path,
+                            duration_ns,
+                            item_id,
+                            track_idx,
+                            timeline_start_ns,
+                        );
                     }
                     state.borrow_mut().hover_transition_pair = None;
                 }
@@ -9473,6 +10969,23 @@ fn draw_timeline(
     let (bg_r, bg_g, bg_b) = crate::ui::colors::COLOR_TIMELINE_BG;
     cr.set_source_rgb(bg_r, bg_g, bg_b);
     cr.paint().ok();
+
+    // Project-load skeleton: when a background parse is in flight, suppress
+    // every other draw (tracks, ruler, playhead, empty-state hint, drag
+    // previews) and show track-shaped placeholders plus "Loading <name>…"
+    // instead. The previous behavior flashed the "Drop media here" empty
+    // state for the few hundred ms of the parse, which was misleading.
+    if st.loading {
+        let loading_label_owned = st.loading_path.as_deref().map(|p| {
+            let filename = std::path::Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(p);
+            format!("Loading {filename}…")
+        });
+        draw_timeline_loading_state(cr, w, h, loading_label_owned.as_deref());
+        return;
+    }
 
     // Compound breadcrumb bar (when drilled into a compound clip)
     let overlay_top = if draw_ruler_overlay {
@@ -11636,14 +13149,11 @@ fn clip_fill_color(clip: &Clip, track_kind: TrackKind) -> (f64, f64, f64) {
                 TrackKind::Audio => (0.18, 0.65, 0.45),
             }
         }
-        crate::model::clip::ClipColorLabel::Red => (0.78, 0.27, 0.27),
-        crate::model::clip::ClipColorLabel::Orange => (0.83, 0.49, 0.20),
-        crate::model::clip::ClipColorLabel::Yellow => (0.78, 0.68, 0.20),
-        crate::model::clip::ClipColorLabel::Green => (0.28, 0.66, 0.33),
-        crate::model::clip::ClipColorLabel::Teal => (0.20, 0.63, 0.60),
-        crate::model::clip::ClipColorLabel::Blue => (0.22, 0.48, 0.85),
-        crate::model::clip::ClipColorLabel::Purple => (0.53, 0.38, 0.80),
-        crate::model::clip::ClipColorLabel::Magenta => (0.78, 0.35, 0.68),
+        // All other ClipColorLabel variants share their RGB with the
+        // status-bar Color Legend popover via `swatch_rgb`. Keeping a
+        // single source of truth means the timeline body and the legend
+        // swatch can never drift.
+        other => other.swatch_rgb(),
     }
 }
 
@@ -11695,6 +13205,80 @@ fn draw_timeline_empty_state(
     let _ = cr.show_text("Drag clips from Media Library or your file manager onto a track.");
     let _ = cr.move_to(box_x + 22.0, box_y + 78.0);
     let _ = cr.show_text("Import video, audio, or images in Media Library to get started.");
+    cr.restore().ok();
+}
+
+/// Skeleton-style placeholder painted while a project is parsing in the
+/// background. Replaces the "Drop media here" empty-state (which would
+/// otherwise flash briefly on every open) with track-shaped grey bars +
+/// a "Loading <filename>…" label so the user knows the gap is intentional.
+fn draw_timeline_loading_state(
+    cr: &gtk::cairo::Context,
+    width: f64,
+    height: f64,
+    loading_label: Option<&str>,
+) {
+    let avail_w = (width - TRACK_LABEL_WIDTH - 32.0).max(0.0);
+    if avail_w < 200.0 || height < 120.0 {
+        return;
+    }
+
+    let bar_x = TRACK_LABEL_WIDTH + 16.0;
+    let bar_w = avail_w;
+    // Five skeleton rows of varying height to suggest the typical
+    // mix of video (taller) and audio (shorter) tracks. Total height
+    // budget is centered vertically in whatever space we have.
+    let row_specs: [(f64, f64); 5] = [
+        (TRACK_HEIGHT, 0.34),
+        (TRACK_HEIGHT_SMALL, 0.28),
+        (TRACK_HEIGHT, 0.30),
+        (TRACK_HEIGHT_SMALL, 0.26),
+        (TRACK_HEIGHT_SMALL, 0.24),
+    ];
+    let gap = 8.0;
+    let total_h: f64 = row_specs.iter().map(|(h, _)| h).sum::<f64>() + gap * 4.0;
+    let mut y = ((height - total_h) / 2.0).max(40.0);
+
+    cr.save().ok();
+    for (row_h, alpha) in row_specs.iter().copied() {
+        rounded_rect(cr, bar_x, y, bar_w, row_h, 6.0);
+        cr.set_source_rgba(0.32, 0.36, 0.44, alpha);
+        cr.fill().ok();
+        // Subtle inner stripe to mimic a clip block within the track row.
+        let block_w = (bar_w * 0.62).min(bar_w - 24.0);
+        let block_h = (row_h - 14.0).max(8.0);
+        if block_w > 60.0 {
+            rounded_rect(
+                cr,
+                bar_x + 12.0,
+                y + 7.0,
+                block_w,
+                block_h,
+                4.0,
+            );
+            cr.set_source_rgba(0.48, 0.54, 0.66, alpha * 0.45);
+            cr.fill().ok();
+        }
+        y += row_h + gap;
+    }
+    cr.restore().ok();
+
+    // Centered status label below the skeleton.
+    let label = loading_label.unwrap_or("Loading project…");
+    cr.save().ok();
+    cr.select_font_face(
+        "sans",
+        gtk::cairo::FontSlant::Normal,
+        gtk::cairo::FontWeight::Bold,
+    );
+    cr.set_font_size(14.0);
+    cr.set_source_rgba(0.86, 0.90, 0.96, 0.92);
+    if let Ok(extents) = cr.text_extents(label) {
+        let label_x = (width - extents.width()) / 2.0 - extents.x_bearing();
+        let label_y = (y + 24.0).min(height - 20.0);
+        let _ = cr.move_to(label_x, label_y);
+        let _ = cr.show_text(label);
+    }
     cr.restore().ok();
 }
 
@@ -12077,6 +13661,18 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
         ("E", "Toggle Roll edit tool"),
         ("Y", "Toggle Slip edit tool"),
         ("U", "Toggle Slide edit tool"),
+        (
+            "Enter",
+            "Open or commit Precision Trim for the active Ripple/Roll/Slip/Slide tool",
+        ),
+        (
+            "← / → (Precision Trim)",
+            "Nudge the active Precision Trim session by 1 frame",
+        ),
+        (
+            "Shift+← / Shift+→ (Precision Trim)",
+            "Nudge the active Precision Trim session by 5 frames",
+        ),
         ("S", "Toggle solo for selected track"),
         ("F", "Match Frame (load source in Source Monitor)"),
         ("Shift+F", "Create freeze-frame clip from selected clip"),
@@ -12086,7 +13682,7 @@ pub fn show_shortcuts_dialog(parent: &gtk::Window) {
         ),
         (
             "Escape",
-            "Cancel armed MusicGen region draw, exit compound edit, or switch to Select tool",
+            "Cancel Precision Trim or armed MusicGen region draw, exit compound edit, or switch to Select tool",
         ),
         (
             "Delete / Bksp",
@@ -12271,7 +13867,9 @@ fn reorder_track_by_script(state: &std::rc::Rc<std::cell::RefCell<TimelineState>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::clip::{Clip, ClipKind, KeyframeInterpolation, NumericKeyframe};
+    use crate::model::clip::{
+        Clip, ClipColorLabel, ClipKind, KeyframeInterpolation, NumericKeyframe,
+    };
     use crate::model::project::Project;
     use crate::model::track::Track;
     use std::cell::RefCell;
@@ -12483,6 +14081,77 @@ mod tests {
                 "hit_test should resolve to clip A"
             );
         }
+    }
+
+    #[test]
+    fn clip_body_tooltip_text_includes_color_legend_name() {
+        let (st, _track_id, _ids) = timeline_state_with_video_clips(&[("A", 0)]);
+        {
+            let mut proj = st.project.borrow_mut();
+            // Make clip A wide enough for hit_test to land on its body, set
+            // a color label, and register a custom legend name.
+            for t in &mut proj.tracks {
+                for c in &mut t.clips {
+                    if c.id == "A" {
+                        c.source_out = c.source_in + 10_000_000_000;
+                        c.color_label = ClipColorLabel::Red;
+                        c.label = "Cool Cut".to_string();
+                    }
+                }
+            }
+            proj.set_color_label_name(ClipColorLabel::Red, "B-roll");
+        }
+        // Sample a y inside track 0's band and an x well inside clip A.
+        let probe_x = st.ns_to_x(2_000_000_000) + 4.0;
+        let probe_y = RULER_HEIGHT + 20.0;
+        let tip = st.clip_body_tooltip_text(probe_x, probe_y);
+        assert_eq!(
+            tip.as_deref(),
+            Some("Cool Cut\nColor: B-roll"),
+            "tooltip should surface custom legend name"
+        );
+    }
+
+    #[test]
+    fn clip_body_tooltip_text_falls_back_to_default_color_name() {
+        let (st, _track_id, _ids) = timeline_state_with_video_clips(&[("B", 0)]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for t in &mut proj.tracks {
+                for c in &mut t.clips {
+                    if c.id == "B" {
+                        c.source_out = c.source_in + 10_000_000_000;
+                        c.color_label = ClipColorLabel::Green;
+                    }
+                }
+            }
+        }
+        let probe_x = st.ns_to_x(2_000_000_000) + 4.0;
+        let probe_y = RULER_HEIGHT + 20.0;
+        let tip = st.clip_body_tooltip_text(probe_x, probe_y).unwrap();
+        assert!(tip.contains("Color: Green"), "got tooltip: {tip}");
+    }
+
+    #[test]
+    fn clip_body_tooltip_text_returns_none_for_unlabeled_clip() {
+        let (st, _track_id, _ids) = timeline_state_with_video_clips(&[("C", 0)]);
+        {
+            let mut proj = st.project.borrow_mut();
+            for t in &mut proj.tracks {
+                for c in &mut t.clips {
+                    if c.id == "C" {
+                        c.source_out = c.source_in + 10_000_000_000;
+                        // color_label stays ClipColorLabel::None.
+                    }
+                }
+            }
+        }
+        let probe_x = st.ns_to_x(2_000_000_000) + 4.0;
+        let probe_y = RULER_HEIGHT + 20.0;
+        assert!(
+            st.clip_body_tooltip_text(probe_x, probe_y).is_none(),
+            "unlabeled clip should not surface a color tooltip"
+        );
     }
 
     #[test]
@@ -13065,10 +14734,8 @@ mod tests {
         // Two clips on different tracks, NO shared group_id. The old
         // grouped-align helper would've refused; the new sync helper
         // aligns them.
-        let (mut st, track_a, track_b, ids_a, ids_b) = timeline_state_with_two_video_tracks(
-            &[("A", 0)],
-            &[("X", 3_000_000_000)],
-        );
+        let (mut st, track_a, track_b, ids_a, ids_b) =
+            timeline_state_with_two_video_tracks(&[("A", 0)], &[("X", 3_000_000_000)]);
         {
             let mut proj = st.project.borrow_mut();
             for track in &mut proj.tracks {
@@ -13161,10 +14828,8 @@ mod tests {
 
     #[test]
     fn sync_selected_clips_by_timecode_respects_primary_selected_as_anchor() {
-        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
-            ("A", 2_000_000_000),
-            ("B", 8_000_000_000),
-        ]);
+        let (mut st, track_id, ids) =
+            timeline_state_with_video_clips(&[("A", 2_000_000_000), ("B", 8_000_000_000)]);
         {
             let mut proj = st.project.borrow_mut();
             for track in &mut proj.tracks {
@@ -13205,10 +14870,8 @@ mod tests {
         // shift case: B has EARLIER TC than A, and A is primary. B
         // would want to sit at A.start - (A.tc - B.tc) = 0 - 5s →
         // negative. Clamp-to-zero shifts the whole set right by 5s.
-        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
-            ("A", 0),
-            ("B", 10_000_000_000),
-        ]);
+        let (mut st, track_id, ids) =
+            timeline_state_with_video_clips(&[("A", 0), ("B", 10_000_000_000)]);
         {
             let mut proj = st.project.borrow_mut();
             for track in &mut proj.tracks {
@@ -13244,10 +14907,8 @@ mod tests {
 
     #[test]
     fn can_sync_selected_clips_by_timecode_visible_but_not_actionable_when_tc_missing() {
-        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
-            ("A", 0),
-            ("B", 5_000_000_000),
-        ]);
+        let (mut st, track_id, ids) =
+            timeline_state_with_video_clips(&[("A", 0), ("B", 5_000_000_000)]);
         {
             let mut proj = st.project.borrow_mut();
             for track in &mut proj.tracks {
@@ -13344,10 +15005,8 @@ mod tests {
 
     #[test]
     fn sync_selected_clips_by_timecode_is_a_single_undo() {
-        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
-            ("A", 0),
-            ("B", 7_000_000_000),
-        ]);
+        let (mut st, track_id, ids) =
+            timeline_state_with_video_clips(&[("A", 0), ("B", 7_000_000_000)]);
         {
             let mut proj = st.project.borrow_mut();
             for track in &mut proj.tracks {
@@ -14730,5 +16389,259 @@ mod tests {
             2,
             "inner clip should have been split"
         );
+    }
+
+    fn sample_clip(id: &str, source_in: u64, source_out: u64, timeline_start: u64) -> Clip {
+        let mut clip = Clip::new(
+            format!("{id}.mp4"),
+            source_out - source_in,
+            timeline_start,
+            ClipKind::Video,
+        );
+        clip.id = id.to_string();
+        clip.source_in = source_in;
+        clip.source_out = source_out;
+        clip
+    }
+
+    fn sample_fr() -> FrameRate {
+        FrameRate {
+            numerator: 30,
+            denominator: 1,
+        }
+    }
+
+    #[test]
+    fn build_trim_preview_for_trim_in_populates_both_slots_with_neighbor() {
+        let fr = sample_fr();
+        let prev = sample_clip("A", 0, 3_000_000_000, 0);
+        let me = sample_clip("B", 1_000_000_000, 5_000_000_000, 3_000_000_000);
+        let preview = build_trim_preview_for_trim_in(&me, Some(&prev), &fr);
+        assert_eq!(preview.kind, TrimPreviewKind::TwoUp);
+        assert_eq!(preview.slots.len(), 2);
+        let left = preview.slots[0].as_ref().expect("prev out frame present");
+        assert_eq!(left.source_path, "A.mp4");
+        // Prev's out-frame is source_out - 1 frame (~33.3ms), clamped to source_in.
+        assert!(left.source_time_ns < 3_000_000_000);
+        let right = preview.slots[1].as_ref().expect("in frame present");
+        assert_eq!(right.source_path, "B.mp4");
+        assert_eq!(right.source_time_ns, 1_000_000_000);
+    }
+
+    #[test]
+    fn build_trim_preview_for_trim_in_without_neighbor_leaves_left_slot_empty() {
+        let fr = sample_fr();
+        let me = sample_clip("B", 0, 5_000_000_000, 0);
+        let preview = build_trim_preview_for_trim_in(&me, None, &fr);
+        assert!(preview.slots[0].is_none());
+        assert!(preview.slots[1].is_some());
+    }
+
+    #[test]
+    fn build_trim_preview_for_trim_out_without_right_neighbor_leaves_right_slot_empty() {
+        let fr = sample_fr();
+        let me = sample_clip("B", 0, 5_000_000_000, 0);
+        let preview = build_trim_preview_for_trim_out(&me, None, &fr);
+        assert_eq!(preview.kind, TrimPreviewKind::TwoUp);
+        assert!(preview.slots[0].is_some());
+        assert!(preview.slots[1].is_none());
+    }
+
+    #[test]
+    fn build_trim_preview_for_roll_shows_both_new_edit_points() {
+        let fr = sample_fr();
+        let left = sample_clip("L", 0, 3_000_000_000, 0);
+        let right = sample_clip("R", 2_000_000_000, 6_000_000_000, 3_000_000_000);
+        let preview = build_trim_preview_for_roll(&left, &right, &fr);
+        assert_eq!(preview.kind, TrimPreviewKind::TwoUp);
+        let left_f = preview.slots[0].as_ref().unwrap();
+        assert_eq!(left_f.source_path, "L.mp4");
+        assert!(left_f.label.contains("New out"));
+        let right_f = preview.slots[1].as_ref().unwrap();
+        assert_eq!(right_f.source_path, "R.mp4");
+        assert!(right_f.label.contains("New in"));
+    }
+
+    #[test]
+    fn build_trim_preview_for_slip_yields_four_slots() {
+        let fr = sample_fr();
+        let prev = sample_clip("A", 0, 3_000_000_000, 0);
+        let me = sample_clip("B", 1_000_000_000, 5_000_000_000, 3_000_000_000);
+        let next = sample_clip("C", 500_000_000, 8_000_000_000, 7_000_000_000);
+        let preview = build_trim_preview_for_slip(&me, Some(&prev), Some(&next), &fr);
+        assert_eq!(preview.kind, TrimPreviewKind::FourUp);
+        assert_eq!(preview.slots.len(), 4);
+        for slot in &preview.slots {
+            assert!(slot.is_some(), "all four slots should be populated");
+        }
+        assert_eq!(preview.slots[1].as_ref().unwrap().source_path, "B.mp4");
+        assert_eq!(preview.slots[2].as_ref().unwrap().source_path, "B.mp4");
+        // Middle two slots must read from the clip's current source_in/source_out,
+        // which is the whole point of the slip display.
+        assert_eq!(
+            preview.slots[1].as_ref().unwrap().source_time_ns,
+            1_000_000_000
+        );
+        let frame_ns = frame_duration_ns(&fr);
+        assert_eq!(
+            preview.slots[2].as_ref().unwrap().source_time_ns,
+            5_000_000_000 - frame_ns
+        );
+    }
+
+    #[test]
+    fn build_trim_preview_for_slide_mirrors_slip_layout() {
+        let fr = sample_fr();
+        let prev = sample_clip("A", 0, 3_000_000_000, 0);
+        let me = sample_clip("B", 1_000_000_000, 5_000_000_000, 3_000_000_000);
+        let next = sample_clip("C", 500_000_000, 8_000_000_000, 7_000_000_000);
+        let slip = build_trim_preview_for_slip(&me, Some(&prev), Some(&next), &fr);
+        let slide = build_trim_preview_for_slide(&me, Some(&prev), Some(&next), &fr);
+        assert_eq!(slide.kind, slip.kind);
+        assert_eq!(slide.slots, slip.slots);
+    }
+
+    #[test]
+    fn source_backed_clip_frame_skips_sourceless_clips() {
+        let fr = sample_fr();
+        let mut compound = Clip::new(String::new(), 5_000_000_000, 0, ClipKind::Compound);
+        compound.id = "CMP".to_string();
+        compound.source_in = 0;
+        compound.source_out = 5_000_000_000;
+        assert!(in_frame_for_clip(&compound, &fr, "In").is_none());
+        assert!(out_frame_for_clip(&compound, &fr, "Out").is_none());
+    }
+
+    #[test]
+    fn precision_roll_session_prefers_boundary_near_playhead() {
+        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
+            ("A", 0),
+            ("B", 1_000_000_000),
+            ("C", 2_000_000_000),
+        ]);
+        st.set_single_clip_selection(ids[1].clone(), track_id);
+        st.active_tool = ActiveTool::Roll;
+        st.playhead_ns = 1_950_000_000;
+
+        let session = st.build_precision_trim_session().expect("roll session");
+        assert_eq!(session.mode, PrecisionTrimMode::Roll);
+        match session.drag_op {
+            DragOp::Roll {
+                left_clip_id,
+                right_clip_id,
+                ..
+            } => {
+                assert_eq!(left_clip_id, "B");
+                assert_eq!(right_clip_id, "C");
+            }
+            other => panic!("expected roll session, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn precision_trim_preview_adds_overlay_text() {
+        let (mut st, track_id, ids) =
+            timeline_state_with_video_clips(&[("A", 0), ("B", 1_000_000_000)]);
+        st.set_single_clip_selection(ids[1].clone(), track_id);
+        st.active_tool = ActiveTool::Slip;
+
+        let preview = st.begin_precision_trim_session().expect("preview");
+        assert!(preview
+            .overlay_title
+            .as_deref()
+            .unwrap_or_default()
+            .contains("Precision Slip"));
+        assert_eq!(
+            preview.overlay_subtitle.as_deref(),
+            Some(PRECISION_TRIM_HINT_TEXT)
+        );
+    }
+
+    #[test]
+    fn precision_trim_cancel_restores_ripple_in_state() {
+        let (mut st, track_id, ids) = timeline_state_with_video_clips(&[
+            ("A", 0),
+            ("B", 1_000_000_000),
+            ("C", 2_000_000_000),
+        ]);
+        st.set_single_clip_selection(ids[1].clone(), track_id.clone());
+        st.active_tool = ActiveTool::Ripple;
+        st.playhead_ns = 1_000_000_000;
+
+        let _ = st.begin_precision_trim_session();
+        let _ = st.nudge_precision_trim_session(1);
+
+        {
+            let proj = st.project.borrow();
+            let track = proj.track_ref(&track_id).unwrap();
+            let clip_b = track.clips.iter().find(|clip| clip.id == "B").unwrap();
+            let clip_c = track.clips.iter().find(|clip| clip.id == "C").unwrap();
+            assert!(clip_b.source_in > 0);
+            assert!(clip_b.timeline_start > 1_000_000_000);
+            assert!(clip_c.timeline_start > 2_000_000_000);
+        }
+
+        assert!(st.cancel_precision_trim_session());
+
+        let proj = st.project.borrow();
+        let track = proj.track_ref(&track_id).unwrap();
+        let clip_b = track.clips.iter().find(|clip| clip.id == "B").unwrap();
+        let clip_c = track.clips.iter().find(|clip| clip.id == "C").unwrap();
+        assert_eq!(clip_b.source_in, 0);
+        assert_eq!(clip_b.timeline_start, 1_000_000_000);
+        assert_eq!(clip_c.timeline_start, 2_000_000_000);
+    }
+
+    #[test]
+    fn precision_slip_commit_pushes_single_undoable_edit() {
+        let (mut st, track_id, ids) =
+            timeline_state_with_video_clips(&[("A", 0), ("B", 1_000_000_000)]);
+        st.set_single_clip_selection(ids[1].clone(), track_id.clone());
+        st.active_tool = ActiveTool::Slip;
+
+        let _ = st.begin_precision_trim_session();
+        let _ = st.nudge_precision_trim_session(1);
+        assert!(st.commit_precision_trim_session());
+        assert_eq!(st.history.undo_stack.len(), 1);
+
+        {
+            let proj = st.project.borrow();
+            let track = proj.track_ref(&track_id).unwrap();
+            let clip_b = track.clips.iter().find(|clip| clip.id == "B").unwrap();
+            assert!(clip_b.source_in > 0);
+        }
+
+        assert!(st.undo());
+
+        let proj = st.project.borrow();
+        let track = proj.track_ref(&track_id).unwrap();
+        let clip_b = track.clips.iter().find(|clip| clip.id == "B").unwrap();
+        assert_eq!(clip_b.source_in, 0);
+        assert_eq!(clip_b.source_out, 1_000_000_000);
+    }
+
+    #[test]
+    fn precision_slip_clamp_does_not_accumulate_hidden_offset() {
+        let (mut st, track_id, ids) =
+            timeline_state_with_video_clips(&[("A", 0), ("B", 1_000_000_000)]);
+        {
+            let mut proj = st.project.borrow_mut();
+            let track = proj.track_mut(&track_id).unwrap();
+            let clip = track.clips.iter_mut().find(|clip| clip.id == "B").unwrap();
+            clip.source_in = 1_000_000_000;
+            clip.source_out = 2_000_000_000;
+            clip.media_duration_ns = Some(2_000_000_000);
+        }
+        st.set_single_clip_selection(ids[1].clone(), track_id.clone());
+        st.active_tool = ActiveTool::Slip;
+
+        let _ = st.begin_precision_trim_session();
+        let _ = st.nudge_precision_trim_session(1);
+        let _ = st.nudge_precision_trim_session(-1);
+
+        let proj = st.project.borrow();
+        let track = proj.track_ref(&track_id).unwrap();
+        let clip_b = track.clips.iter().find(|clip| clip.id == "B").unwrap();
+        assert!(clip_b.source_in < 1_000_000_000);
     }
 }

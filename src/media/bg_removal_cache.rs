@@ -282,9 +282,12 @@ pub fn cache_root_dir() -> PathBuf {
     dirs_cache_root()
 }
 
-pub const MODEL_FILENAME: &str = "modnet_photographic_portrait_matting.onnx";
-pub const MODEL_DOWNLOAD_URL: &str =
-    "https://drive.usercontent.google.com/download?id=1cgycTQlYXpTh26gB9FTnthE7AvruV8hd&export=download&confirm=t";
+/// Manifest entry that drives identity / URL / verification for the
+/// portrait-matting model. The downloader and Preferences UI both read
+/// from here so the file's name and source URL live in exactly one place.
+pub fn model_manifest() -> &'static crate::media::model_manifest::ModelManifestEntry {
+    &crate::media::model_manifest::PORTRAIT_MATTING
+}
 
 /// Return the preferred download destination directory for models
 /// (`$XDG_DATA_HOME/ultimateslice/models/`).
@@ -298,29 +301,24 @@ pub fn model_download_dir() -> PathBuf {
     base.join("ultimateslice").join("models")
 }
 
-/// Search standard locations for the MODNet ONNX model file.
+/// Search standard locations for the portrait-matting ONNX model file.
+///
+/// The filename comes from the manifest entry, so swapping in a different
+/// model later only requires updating the manifest.
 pub fn find_model_path() -> Option<String> {
+    let filename = model_manifest().filename;
     let candidates = [
         // Relative to executable.
         std::env::current_exe()
             .ok()
-            .and_then(|p| {
-                p.parent()
-                    .map(|d| d.join("data/models/modnet_photographic_portrait_matting.onnx"))
-            })
+            .and_then(|p| p.parent().map(|d| d.join("data/models").join(filename)))
             .unwrap_or_default(),
         // Relative to CWD (development).
-        PathBuf::from("data/models/modnet_photographic_portrait_matting.onnx"),
+        PathBuf::from("data/models").join(filename),
         // Flatpak data dir.
-        PathBuf::from("/app/share/ultimateslice/models/modnet_photographic_portrait_matting.onnx"),
+        PathBuf::from("/app/share/ultimateslice/models").join(filename),
         // XDG data home.
-        std::env::var("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| {
-                let home = std::env::var("HOME").unwrap_or_default();
-                PathBuf::from(home).join(".local/share")
-            })
-            .join("ultimateslice/models/modnet_photographic_portrait_matting.onnx"),
+        model_download_dir().join(filename),
     ];
     for path in &candidates {
         if path.exists() {

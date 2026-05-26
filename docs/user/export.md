@@ -17,6 +17,8 @@ Tracked clip transforms and first-mask attachments use the same motion data duri
 
 When an export queue job is actively running, the footer **Jobs** dropdown next to **Workspace** shows the current export with live progress, and the bottom status bar mirrors that continuous activity. Pending queue entries that have not started yet stay in the queue dialog rather than appearing as active jobs.
 
+**Export Project with Media…** writes the project XML plus a sibling `ProjectName.Library` folder containing every timeline-referenced backing file needed to reopen the packaged project elsewhere. That packaged-media walk now includes sources nested inside **compound clips**, **multicam angles**, **audition takes**, and any clip/per-angle **LUTs**, so moving the exported bundle to another drive does not leave those nested references behind.
+
 ## Export Dialog Options
 
 ### Video Codec
@@ -111,6 +113,12 @@ cleaned-up signal — quieter background, more even speech levels — and the
 ducked floor sounds natural instead of crunchy. If you have a clip with both
 features on, this is the right order; nothing to configure.
 
+If a clip's Inspector routing chooses a non-default **Source Stream** or
+**Source Pair**, export reads audio from that exact embedded stream/pair before
+the channel-routing stage. That means a 4-channel or 5.1 source no longer has
+to collapse to channels 1-2 first — you can, for example, target `Channels 3-4`
+and then apply **Stereo / Left / Right / Mono Mix** on top of that selection.
+
 The Realtime preview goes through the **same** filter chain via a background
 prerender (cached under `$XDG_CACHE_HOME/ultimateslice/voice_enhance/`), so
 what you hear in the Program Monitor is byte-identical to what the export
@@ -158,6 +166,11 @@ Options:
 
 The override has no effect on stereo exports; it only kicks in when the export
 channel layout is 5.1 or 7.1.
+
+Per-clip **Source Stream** / **Source Pair** selection happens *before* this
+track-level surround routing. In other words: the clip picks which source
+channels feed the track, then the track's existing role / surround-position
+rules decide where that stem lands in the final 5.1 or 7.1 mix.
 
 #### Automatic LFE bass tap
 

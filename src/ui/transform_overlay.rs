@@ -3099,11 +3099,17 @@ mod hit_test_tests {
         // be 10 (endpoint distance), not 0 (unclamped perpendicular would
         // project onto the line at x = −10 with perpendicular distance 0).
         let d = point_to_segment_distance(-10.0, 0.0, 0.0, 0.0, 100.0, 0.0);
-        assert!((d - 10.0).abs() < 1e-6, "left-of-segment endpoint clamp: {d}");
+        assert!(
+            (d - 10.0).abs() < 1e-6,
+            "left-of-segment endpoint clamp: {d}"
+        );
 
         // Query point to the right of the segment (150, 0): clamped to the
         // (100, 0) endpoint, distance 50.
         let d = point_to_segment_distance(150.0, 0.0, 0.0, 0.0, 100.0, 0.0);
-        assert!((d - 50.0).abs() < 1e-6, "right-of-segment endpoint clamp: {d}");
+        assert!(
+            (d - 50.0).abs() < 1e-6,
+            "right-of-segment endpoint clamp: {d}"
+        );
     }
 }

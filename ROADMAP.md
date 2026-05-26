@@ -18,6 +18,7 @@ Tracking docs:
 - [x] GApplication entry point with CSS loading
 - [x] GNOME HIG-compliant app icon (`data/io.github.ultimateslice.svg`) — camera-cake slice concept
 - [x] GitHub Actions workflows on push for native Cargo build/test and Flatpak manifest build
+- [x] Flatpak vendored-crate drift recovery: `cargo-sources.json` is regenerated whenever `Cargo.lock` changes so Flatpak CI's sandboxed `cargo --offline` step stays in sync with newly added Rust crates
 - [x] Non-deprecation warning cleanup pass for `cargo build --quiet` / `cargo test --quiet` (unused imports/vars/mut, `unused_must_use`, and targeted intentional dead-code allowances)
 - [x] Legacy GTK deprecation-warning suppression pass for existing Dialog/ComboBoxText UI paths with narrowly scoped `#[allow(deprecated)]` (no runtime behavior change)
 - [x] Runtime GTK slider warning cleanup: added a generic slider CSS reset (border/margin/padding/box-shadow none) plus explicit scale-thumb sizing to remove negative min-size warnings (`GtkGizmo ... slider ... -4`)
@@ -153,6 +154,7 @@ Tracking docs:
 - [x] Import fallback remaps missing `/Volumes/...` assets across common Linux external-drive mount paths (plus opened FCPXML mount root), including URI-decoded paths (e.g. `%20`), and still exports original imported source paths
 - [x] Export URI safety: writer now percent-encodes `media-rep@src` file paths (spaces/special characters) for standards-friendly `file://` references
 - [x] Packaged export external-drive path normalization: **Export Project with Media** rewrites Linux external mount roots (`/media`, `/run/media`, `/mnt`) to `/Volumes/<drive>/...` in saved XML for cross-platform portability
+- [x] Packaged export nested-media coverage: **Export Project with Media** now recursively collects and rewrites media referenced inside compound clips, multicam angles, audition takes, and nested LUT paths so packaged `.uspxml` bundles stay self-contained
 - [x] Strict packaged-export FCPXML mode: **Export Project with Media** now emits DTD-safe XML (no `xmlns:us`/`us:*` attrs, no passthrough unknown attrs/children, DTD-friendly `adjust-blend` and structured `adjust-crop` with `crop-rect`)
 - [x] Extension-based strict-save routing: normal Save now uses strict compatibility writer for `.fcpxml` outputs while `.uspxml` retains feature-rich round-trip output
 - [x] Strict export DTD + multitrack hardening: strict writer now emits lane-based track mapping for multi-track fallback routing and enforces DTD asset-clip intrinsic ordering (video params before audio params), with strict-mode sequence-marker suppression for validator compliance
@@ -273,7 +275,9 @@ Tracking docs:
 - [x] Select clips forward/backward from playhead for bulk operations
 - [x] Clip display options / adjustable per-track height, clip color labels
 - [x] Source-Record Track Patching (compact Source Monitor **Patch V / A** selectors with Auto / Off / explicit track routing, stable track-ID targeting across reorders, explicit A/V split placement, and stale-selection fallback to Auto)
-- [ ] Dynamic Trim Mode / Precision Editor (Interface for side-by-side fine-tuning of cuts)
+- [x] Dynamic Trim Mode / Precision Editor (Interface for side-by-side fine-tuning of cuts)
+  - [x] Frame-by-frame precision sessions for Ripple / Roll / Slip / Slide via `Enter` or clip **Precision Trim…** context action, with **Left/Right** 1-frame nudges, **Shift+Left/Right** 5-frame nudges, **Enter** commit, and **Escape** cancel
+  - [x] Program Monitor precision overlay promoted from drag-only preview to a modal editor view with persistent session title + frame-delta banner
 
 ### Motion Tracking Improvements
 - [x] **Multi-scale (Gaussian pyramid) search** in `src/media/tracking.rs`. The tracker now builds full/half/quarter-resolution levels, searches widely at the coarsest level, and refines locally at finer levels. This complements the existing motion-prediction + jump-cap path so sudden direction changes can recover without widening the normal full-resolution search radius.
@@ -390,6 +394,7 @@ Tracking docs:
            - [x] Tighter post-seek budgets after prewarm: reduce arrival wait when sidecar proved file decodable
            - [x] Skip preroll for already-settled decoders: avoid redundant blocking in wait_for_paused_preroll
            - [x] Fix Smooth-mode single-slot drop-late removing backpressure (compositor spun at 11K fps, QoS dropped 99.99% → 1-2 displayed fps); now only enables drop-late for transition overlaps or 3+ tracks
+           - [x] Initialize the conservative Program Monitor sink policy on startup (`qos=false`, `max-lateness=-1`, non-leaky display queue) so single-clip playback does not inherit gtk4paintablesink's default 5 ms lateness drop threshold before the first playback-policy transition
            - [x] Enable `realtime_preview` by default for out-of-box boundary stutter reduction
            - [x] Reduce teardown state-query timeout from 100ms to 10ms per element (10x faster teardown)
            - [x] Lower adaptive arrival wait floor from 200ms to 100ms for faster single-track boundary transitions
@@ -451,7 +456,7 @@ Tracking docs:
   - [x] GStreamer real-time LUT element — apply LUTs in the GStreamer preview pipeline via CPU-based trilinear 3D LUT pad probe at preview resolution, with parsed-LUT caching and automatic double-apply prevention when source is already LUT-baked
   - [x] Prerender keyframe interpolation — background prerender now carries brightness/contrast/saturation/temperature/tint keyframes so animated color adjustments remain visible during prerender-backed preview
   - [x] Configurable prerender quality — Preferences now expose background-prerender x264 preset + CRF controls (default `veryfast` / `20`), MCP `get_preferences` / `set_prerender_quality` surface the same settings, and prerender cache identity now includes them so stale mismatched-quality segments are not reused
-  - [ ] Preview/export comparison overlay — a split-screen or A/B toggle in the Program Monitor that shows the prerender frame beside a single-frame export render, allowing direct visual parity inspection without a full export cycle
+  - [x] Preview/export comparison overlay — Program Monitor reference stills now distinguish **Live** vs **Export** compare frames, and **Render export frame** captures the current playhead through the export pipeline into the existing A/B compare wipe. The workflow is also scriptable through MCP via `capture_export_compare_still`.
 - [x] Advanced color grading
   - [x] Match Clip Colors — automatic Reinhard-style color transfer: analyzes source and reference clip frames in CIE L\*a\*b\* space to compute slider adjustments (brightness, contrast, saturation, temperature, tint) and optional 17³ 3D LUT for fine-grained matching. Inspector "Match Color…" button, `Ctrl+Alt+M` shortcut, and `match_clip_colors` MCP tool with full undo support.
   - [x] HSL Qualifiers (Secondary color correction for specific hue/saturation/luminance ranges)
@@ -571,7 +576,7 @@ Tracking docs:
 - [x] Auto-save (60s timer, persistent per-project `.uspxml.autosave` files in XDG data dir with JSON metadata sidecars; replaces old single `/tmp/` file)
 - [x] Proxy media generation and management
 - [x] Proxy Status Badges on timeline clips indicating Original vs. Proxy resolution — a soft-blue **PROXY** badge shows on the timeline clip body when (a) the global proxy toggle is on and (b) at least one ready proxy exists for that clip's source; sits in the same badge row as HDR / OFFLINE / LINK / CC. Drawn from a `timeline_state.proxy_ready_sources` mirror refreshed on the 500 ms poll tick. New `ProxyCache::ready_source_paths` helper recovers source paths from composite keys.
-- [ ] Proxy Watermarks (optional visual burn-in for proxy files)
+- [x] Proxy Watermarks — soft-blue **PROXY** pill in the Program Monitor when the current playback clip resolves to a proxy file; toggleable via **Overlays ▾ → Proxy watermark** (default on); persisted in `ProgramMonitorState.show_proxy_watermark`; never baked into export
 - [x] Auto-backup with versioned history (timestamped backups to `$XDG_DATA_HOME/ultimateslice/backups/`, per-project pruning, restore UI, configurable in Preferences, MCP `list_backups` tool)
 
 ### Media Management
@@ -729,7 +734,7 @@ FCPXML persistence).
 
 **Timeline polish**
 - [x] Hover Scrubbing (Scrubbable Tooltips) in the Media Library and timeline — Media Library cards now scrub in place: moving the cursor horizontally across a thumbnail maps the x fraction to a source-time offset (quantized to ~100 ms buckets via the new `quantize_hover_scrub_time_ns` helper) and repaints the cached frame via the existing `ThumbnailCache`. Audio-only and still-image cards skip the motion controller. Timeline hover-scrub paints a 200×128 floating preview panel with the frame at the hovered timeline position and a source-timecode label — anchored near the cursor, clamped to widget bounds, reusing the same `ThumbnailCache`. Suppressed during any active drag, on mouse leave, and outside the content area (ruler / track label / empty track space). Applies to `ClipKind::Video` / `Image` / `Compound` bodies; skips Title / Adjustment / Audio / Drawing clips.
-- [ ] Two-Up / Four-Up Trim Displays in the Program Monitor for precision edits (Slip/Slide/Roll)
+- [x] Two-Up / Four-Up Trim Displays in the Program Monitor for precision edits (Slip/Slide/Roll) — 2-up for Trim/Roll, 4-up for Slip/Slide; toggleable via **Overlays ▾ → Precision trim** (Off / Auto); persisted in `ProgramMonitorState.trim_display_mode`; follows into the pop-out window.
 - [ ] Kinetic Scrolling & Playhead Elasticity
 - [x] Snap indicator visual — when snapping to a clip edge, marker, playhead, or sequence start, draw a dashed vertical guideline + small badge ("clip start" / "clip end" / "marker" / "playhead" / "start") at the snap point; snap targets now include the playhead, timeline markers, and time 0 in addition to other clip edges
 - [x] Drag preview ghosting — move/trim drags now show translucent ghost overlays at the live drop result, with a floating in/out timecode badge on the primary dragged clip
@@ -737,7 +742,7 @@ FCPXML persistence).
 - [x] Track header redesign — per-track color swatch, clearer Solo/Mute/Lock button states, drag handle for reorder, double-click to rename inline
 - [x] Marker list panel — a sortable list of timeline markers with name, time, color, and notes; double-click to seek
 - [x] Configurable timeline row heights — per-track **Small / Medium / Large** presets plus direct drag-to-resize on the track-header bottom edge (uses existing `height_preset` field)
-- [ ] Color-tag legend — a small persistent legend showing what each clip color means in this project, editable
+- [x] Color-tag legend — new **Color Legend** popover in the status bar lists the 8 clip palette colors, each with an editable display name (e.g. Red = "B-roll"); persisted on `Project.color_label_names`; round-trips through FCPXML as `us:color-label-names`; MCP `set_color_label_name` / `get_color_label_names`.
 - [x] Auto-scroll timeline to keep playhead in view during playback — when the playhead reaches the right edge of the visible region, smoothly page (or continuously scroll) the timeline so the playhead stays visible; preference toggle for Page / Smooth / Off, and suspend auto-scroll while the user is actively dragging/scrolling the timeline
 
 **Inspector polish**
@@ -765,10 +770,10 @@ FCPXML persistence).
 **Export & sharing**
 - [ ] Export presets gallery with thumbnail cards (YouTube 1080p, YouTube 4K, Instagram Reel 9:16, TikTok, ProRes Master, Web Compressed, etc.) instead of a flat dropdown
 - [ ] Share-link panel — after export, a popover with "Reveal in file manager", "Open with...", "Copy path", and (optional) upload-to-service hooks
-- [ ] Export queue panel persistence + drag-reorder — add reorder, pause-all, retry-failed, and persistence across app restarts to `src/ui/export_queue.rs`
+- [x] Export queue panel persistence + drag-reorder — persistence shipped earlier via `ExportQueueState` serde JSON; drag-reorder (insert-before + end-zone), pause-after-current (worker checks `Arc<AtomicBool>` between jobs, no mid-export kill), retry-failed (`↻` button on Error rows), and crash recovery (`repair_stuck_running` on dialog open) all landed in `src/ui/export_queue.rs`
 
 **Performance perception**
-- [ ] Skeleton loaders during project open — show track placeholders + "Loading project…" with the project filename instead of a blank window
+- [x] Skeleton loaders during project open — `draw_timeline_loading_state` in `timeline/widget.rs` shows track-shaped grey placeholders + "Loading <filename>…" while `TimelineState.loading` is true; suppresses the misleading empty-state hint during the parse window. Wired into File→Open, Recent, and CLI/file-manager startup paths.
 - [ ] Lazy-render off-screen tracks in `timeline/widget.rs` Cairo draw path on very tall timelines (12+ tracks)
 - [ ] Thumbnail/waveform progressive reveal with a subtle fade-in instead of pop-in when caches finish
 
@@ -780,7 +785,7 @@ FCPXML persistence).
 **Project housekeeping**
 - [x] Autosave + crash recovery: persistent per-project autosave files in `$XDG_DATA_HOME/ultimateslice/autosave/` with metadata sidecars; "Recover Unsaved Work" section on welcome screen; autosave cleaned up on save/discard/new-project
 - [x] Project health panel — **Export ▼ → Project Health…** now surfaces missing source media, managed/generated cache disk usage, and installed model directories in one place, with safe cleanup actions for generated caches plus MCP `get_project_health` / `cleanup_project_cache`. Thumbnail previews remain in-memory-only, so they are intentionally not reported as an on-disk cache here.
-- [ ] Recent projects with thumbnails in the welcome screen and a File menu submenu (currently text-only in `welcome.rs`)
+- [x] Recent projects with thumbnails in the welcome screen — both the "Jump back in" hero card and the "More Recent Projects" list show a 16:9 first-frame thumbnail next to project name/path. New `src/ui/welcome_project_peek.rs` lightweight quick_xml peek extracts the first asset's source path without a full project load. (File menu submenu still text-only — separate menu redesign work.)
 
 ### Professional Workflow (The "Pro" Edge)
 - [x] Multicam editing (sync by audio or timecode)
@@ -819,6 +824,7 @@ FCPXML persistence).
 - [ ] Sub-frame Audio Editing (sample-level precision for cuts and crossfades)
 - [x] Waveform Drawing Optimizations (bounded multi-resolution peak cache now backs both audio-track waveforms and the optional video-clip waveform overlay, so zoomed-out timelines reuse coarse summaries instead of rescanning raw 10 ms peaks on every redraw)
 - [x] **Advanced Audio Mode — surround (5.1 / 7.1) export**: opt-in `Audio Channels` dropdown in the export dialog selects Stereo (default) / 5.1 / 7.1; role-based auto-routing (Dialogue → FC, Music → FL/FR, Effects → FL/FR + SL/SR with both back- and side-rears in 7.1) plus per-track inspector override (FL/FR/FC/BL/BR/SL/SR/LFE/Auto); automatic LFE bass tap from Music + Effects via cascaded 120 Hz lowpass; AAC + Opus (`-mapping_family 1`) + FLAC + PCM compatible; preset round-trip (`#[serde(default)]` keeps legacy JSON loading as Stereo); built-in `Cinema H.264 5.1 1080p` factory preset; MCP `export_mp4` / `save_export_preset` / `list_export_presets` accept the new `audio_channel_layout` argument; FCPXML strict-DTD writer can emit non-stereo `audioLayout` (7.1 falls back to 5.1); OTIO writer/parser round-trip the per-track surround override; stereo path is byte-identical to the pre-surround code so all 922 prior tests still pass plus 13 new surround unit tests
+- [x] **Multichannel source stream / pair selection**: probe-time media metadata now records each source audio stream's ordinal, channel count/layout, sample rate, and optional language/title; library items and clips persist a preferred source stream + channel pair offset alongside the existing Stereo / Left / Right / Mono Mix mode; the Inspector exposes those controls; newly placed clips inherit saved source defaults; Program Monitor preview and FFmpeg export both honor the chosen source stream/pair; OTIO and UltimateSlice FCPXML vendor attrs round-trip the selected stream/pair fields so multichannel picks survive reload/export.
 - [ ] Dynamic per-clip surround pan keyframes (`pan=...:eval=frame`) for moving audio between channels during playback
 - [x] Loudness Radar / Normalization to Standards (Tools for broadcast-standard compliance like EBU R128)
   - [x] Phase 1: Program Monitor **Loudness** popover with full EBU R128 report (Integrated LUFS, Short-term max, Momentary max, LRA, True Peak, Threshold), target presets (EBU R128 / ATSC A/85 / Netflix / Apple Podcasts / Spotify/YouTube / Custom), one-click **Normalize to Target** + **Reset Gain** via new `Project::master_gain_db` field applied post-mix in preview and export, full FFmpeg `ebur128=peak=true:framelog=verbose` summary parser, background-thread analysis via temp MP4 render, Preferences → Loudness target, FCPXML `us:master-gain-db` + OTIO metadata round-trip, MCP `analyze_project_loudness` + `set_project_master_gain_db`, undo command, 6 new tests
@@ -832,6 +838,10 @@ FCPXML persistence).
 
 ### AI & Automation
 - [ ] Custom background removal model — train/export a self-hosted segmentation model with secure distribution and in-app download (Preferences → Models); replace third-party MODNet dependency
+  - [x] Phase C: model manifest infrastructure — `src/media/model_manifest.rs` with `ModelManifestEntry { url, expected_sha256, expected_size_bytes, license_short, license_url }`, real progress UI via `.partial` size polling, SHA-256 verification on completion (delete partial on mismatch), license attribution surfaced before download, `bg_removal_cache` reads identity from manifest. MODNet entry currently has `expected_sha256: None` (third-party Google Drive mirror could re-encode); the downloader logs the actual computed hash so it can be promoted to a pinned `Some(...)` once we either trust the upstream binary or replace it
+  - [ ] Phase A: train/export a portrait-matting model on properly licensed data, ONNX with same I/O spec as MODNet (1×3×512×512 in / 1×1×512×512 out) — outside this codebase
+  - [ ] Phase B: hosting target (S3 / Cloudflare R2 / GitHub Releases?), generate stable URL + SHA-256
+  - [ ] Phase D: flip MODNet's manifest entry to point at our model + pin its hash + update license attribution
 - [x] Speech-to-Text: Automatic subtitle generation and transcription
   - [x] Local Whisper model inference via `whisper-rs` (GGML models, auto-discovery)
   - [x] Per-clip subtitle segments with word-level timestamps
@@ -880,7 +890,7 @@ FCPXML persistence).
 - [x] Persist script path, scene mapping, and transcript cache in FCPXML (`us:script-path`, `us:scene-id`, `us:transcript-cache` attributes)
 
 ### Performance & Integration
-- [ ] Hardware-accelerated decoding/encoding (VA-API, NVENC)
+- [~] Hardware-accelerated decoding/encoding (VA-API, NVENC) — **partial**: GStreamer source-monitor decode already uses adaptive VA-API (above); **proxy generation + background prerender** now route through `h264_vaapi` / `h264_nvenc` for encode and `-hwaccel cuda/qsv/vaapi` for decode (CPU filters in between, decoded frames downloaded automatically), with per-source three-level fallback (HW+HW → SW+HW → SW+SW) and a 2-permit gate on concurrent ≥4K transcodes to avoid GPU/decoder contention. Preference + MCP under `set_hw_encoder_mode`. **Export-pipeline** HW encoder selection and FFmpeg-input-side `-hwaccel` for the export path remain to do.
 - [ ] Background rendering for complex effect stacks
 - [ ] Render-and-Replace (Bake complex effect stacks into temporary high-quality clips)
   - [x] Phase 1a foundation: `Clip.render_replace_enabled` flag, `RenderReplaceCache` module (`src/media/render_replace_cache.rs`) modeled on `voice_enhance_cache` — background ffmpeg worker, LRU-evicted ProRes 422 HQ + PCM s24 MOV sidecars under `$XDG_CACHE_HOME/ultimateslice/render_replace/`, cache signature folds every baked-scope field (color grade + keyframes, LUTs, frei0r chain, blur/denoise/sharpness, exposure/shadows/highlights) so unrelated edits (transform, opacity, timeline position) never invalidate an expensive bake. Bake filter chain reuses the export helpers (`build_color_filter`, `build_lut_filter_prefix`, `build_denoise_filter`, `build_sharpen_filter`, `build_blur_filter`, `build_frei0r_effects_filter`) for preview/export parity. OTIO round-trip via `UltimateSliceClipOtioMetadata::render_replace_enabled`. MCP `set_clip_render_replace`. 8 unit tests covering signature stability, invalidation, and round-trip.

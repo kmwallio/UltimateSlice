@@ -4,8 +4,67 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Condvar, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::media::hwaccel::{self, HwEncoderFamily};
+use crate::ui_state::{HwEncoderMode, ProxyCodec};
+
+/// Source pixel height at and above which a transcode counts as a "heavy"
+/// job and acquires a permit from [`HeavyPermit`] before launching ffmpeg.
+/// 2160 = 4K UHD; 6K / 8K sources are also heavy.
+pub const HEAVY_SOURCE_HEIGHT_THRESHOLD: u32 = 2160;
+
+/// Maximum number of "heavy" (4K+) ffmpeg transcodes allowed in flight at
+/// once. Prevents the worker pool from oversaturating decoder/GPU resources
+/// on high-resolution sources where 4 simultaneous decodes contend for the
+/// same hardware. Light (sub-4K) jobs ignore this cap.
+const MAX_HEAVY_PARALLEL_TRANSCODES: u32 = 2;
+
+/// Counting semaphore implemented with [`Mutex`] + [`Condvar`]. Used to gate
+/// concurrent heavy proxy transcodes without restructuring the work queue.
+pub(crate) struct HeavyPermit {
+    available: Mutex<u32>,
+    cond: Condvar,
+}
+
+impl HeavyPermit {
+    fn new(initial: u32) -> Self {
+        Self {
+            available: Mutex::new(initial),
+            cond: Condvar::new(),
+        }
+    }
+
+    /// Block until a permit is available, then take one. Returned guard
+    /// releases the permit on drop.
+    fn acquire(self: &Arc<Self>) -> HeavyPermitGuard {
+        let mut g = self.available.lock().unwrap();
+        while *g == 0 {
+            g = self.cond.wait(g).unwrap();
+        }
+        *g -= 1;
+        HeavyPermitGuard {
+            owner: self.clone(),
+        }
+    }
+
+    fn release(&self) {
+        let mut g = self.available.lock().unwrap();
+        *g += 1;
+        self.cond.notify_one();
+    }
+}
+
+pub(crate) struct HeavyPermitGuard {
+    owner: Arc<HeavyPermit>,
+}
+
+impl Drop for HeavyPermitGuard {
+    fn drop(&mut self) {
+        self.owner.release();
+    }
+}
 
 /// Result of a background proxy transcode.
 pub struct ProxyResult {
@@ -35,30 +94,26 @@ pub struct ProxyProgress {
     pub byte_fraction: Option<f64>,
 }
 
-/// Scale factor for proxy transcodes.
+/// Scale factor for proxy transcodes. Caps the height (preserving aspect ratio
+/// and never upscaling) so proxy decode cost is constant regardless of source
+/// resolution — vital for very high-res sources like 6.2K GoPro footage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ProxyScale {
-    Half,
-    Quarter,
-    Project { width: u32, height: u32 },
+    MaxHeight(u32),
 }
 
 impl ProxyScale {
     pub fn ffmpeg_scale_filter(&self) -> String {
         match self {
-            ProxyScale::Half => "scale=iw/2:ih/2".to_string(),
-            ProxyScale::Quarter => "scale=iw/4:ih/4".to_string(),
-            ProxyScale::Project { width, height } => format!(
-                "scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2"
-            ),
+            // -2 picks an even width that preserves the source aspect ratio.
+            // min(N,ih) prevents upscaling when the source is already shorter.
+            ProxyScale::MaxHeight(h) => format!("scale=-2:'min({h},ih)':flags=lanczos"),
         }
     }
 
     fn suffix(&self) -> String {
         match self {
-            ProxyScale::Half => "half".to_string(),
-            ProxyScale::Quarter => "quarter".to_string(),
-            ProxyScale::Project { width, height } => format!("proj{width}x{height}"),
+            ProxyScale::MaxHeight(h) => format!("{h}p"),
         }
     }
 }
@@ -68,11 +123,19 @@ pub struct ProxyVariantSpec {
     pub source_path: String,
     pub scale: ProxyScale,
     pub lut_path: Option<String>,
+    /// Codec the variant was transcoded with. Carried so cleanup-pass
+    /// path resolution matches the on-disk filename produced by the
+    /// worker (which folds codec into `proxy_filename_for_variant`).
+    pub codec: ProxyCodec,
     pub vidstab_enabled: bool,
     vidstab_smoothing_hundredths: i32,
 }
 
 impl ProxyVariantSpec {
+    /// Construct a spec assuming the historical H.264 codec. Existing
+    /// callers that don't carry codec context (legacy paths, tests) keep
+    /// using this — see [`ProxyVariantSpec::with_codec`] for the
+    /// codec-aware variant.
     pub fn new(
         source_path: impl Into<String>,
         scale: ProxyScale,
@@ -80,10 +143,29 @@ impl ProxyVariantSpec {
         vidstab_enabled: bool,
         vidstab_smoothing: f32,
     ) -> Self {
+        Self::with_codec(
+            source_path,
+            scale,
+            lut_path,
+            ProxyCodec::H264,
+            vidstab_enabled,
+            vidstab_smoothing,
+        )
+    }
+
+    pub fn with_codec(
+        source_path: impl Into<String>,
+        scale: ProxyScale,
+        lut_path: Option<String>,
+        codec: ProxyCodec,
+        vidstab_enabled: bool,
+        vidstab_smoothing: f32,
+    ) -> Self {
         Self {
             source_path: source_path.into(),
             scale,
             lut_path,
+            codec,
             vidstab_enabled,
             vidstab_smoothing_hundredths: normalized_vidstab_smoothing_hundredths(
                 vidstab_enabled,
@@ -105,7 +187,11 @@ impl ProxyVariantSpec {
     }
 }
 
+/// Summary of a proxy-cache cleanup pass. Fields are read by callers via
+/// pattern destructuring rather than by name, which the dead-code lint
+/// doesn't see — annotate to keep the warnings out of the build.
 #[derive(Default)]
+#[allow(dead_code)]
 pub struct ProxyCleanupSummary {
     pub removed_local: usize,
     pub removed_sidecar: usize,
@@ -132,10 +218,33 @@ pub fn proxy_key(source_path: &str, lut_path: Option<&str>) -> String {
     proxy_key_with_vidstab(source_path, lut_path, false, 0.0)
 }
 
-/// Extended composite key including vidstab stabilization state.
+/// Extended composite key including vidstab stabilization state. Defaults
+/// to H.264 codec for backwards compatibility — see
+/// [`proxy_key_with_codec_and_vidstab`] for the codec-aware variant.
 pub fn proxy_key_with_vidstab(
     source_path: &str,
     lut_path: Option<&str>,
+    vidstab_enabled: bool,
+    vidstab_smoothing: f32,
+) -> String {
+    proxy_key_with_codec_and_vidstab(
+        source_path,
+        lut_path,
+        ProxyCodec::H264,
+        vidstab_enabled,
+        vidstab_smoothing,
+    )
+}
+
+/// Authoritative composite cache key. H.264 — the historical default —
+/// produces the same key shape as the original `proxy_key_with_vidstab`
+/// so existing on-disk caches stay valid for users who never touch the
+/// codec preference. HEVC appends a `|c:hevc` discriminator so it lives
+/// at a distinct cache slot and gets its own transcode.
+pub fn proxy_key_with_codec_and_vidstab(
+    source_path: &str,
+    lut_path: Option<&str>,
+    codec: ProxyCodec,
     vidstab_enabled: bool,
     vidstab_smoothing: f32,
 ) -> String {
@@ -145,6 +254,9 @@ pub fn proxy_key_with_vidstab(
     };
     if vidstab_enabled && vidstab_smoothing > 0.0 {
         key.push_str(&format!("|vs:{:.2}", vidstab_smoothing));
+    }
+    if matches!(codec, ProxyCodec::Hevc) {
+        key.push_str("|c:hevc");
     }
     key
 }
@@ -171,7 +283,7 @@ pub struct ProxyCache {
     /// Total items ever requested in this session (for progress).
     total_requested: usize,
     result_rx: mpsc::Receiver<ProxyWorkerUpdate>,
-    work_tx: Option<mpsc::Sender<(String, ProxyScale, Vec<String>, bool, bool, f32)>>,
+    work_tx: Option<mpsc::Sender<(String, ProxyScale, Vec<String>, bool, bool, f32, ProxyCodec)>>,
     /// Per-job estimated bytes and written bytes for byte-based status progress.
     estimated_bytes: HashMap<String, u64>,
     written_bytes: HashMap<String, u64>,
@@ -184,6 +296,39 @@ pub struct ProxyCache {
     /// When true, successful local proxy transcodes are mirrored to
     /// alongside-media `UltimateSlice.cache` files too.
     sidecar_mirror_enabled: bool,
+    /// User preference: which hardware encoder family (if any) to try before
+    /// falling back to libx264 for proxy transcodes. Shared with worker
+    /// threads via `RwLock` so live preference changes apply to *future*
+    /// jobs without disturbing in-flight transcodes.
+    hw_encoder_mode: Arc<RwLock<HwEncoderMode>>,
+    /// User preference: which video codec to use for proxy files. H.264
+    /// for compatibility, HEVC for smaller files / faster iGPU encode.
+    proxy_codec: Arc<RwLock<ProxyCodec>>,
+    /// Source paths that failed under HW encoding in this session and should
+    /// be transcoded with libx264 directly to avoid the wasted HW attempt.
+    hw_failed_sources: Arc<Mutex<HashSet<String>>>,
+    /// Source paths that failed under HW *decode* in this session and should
+    /// be re-decoded in software directly.
+    hw_decode_failed_sources: Arc<Mutex<HashSet<String>>>,
+    /// Process-global blacklist of HW *encoder* families that have failed
+    /// at runtime during this session. Future picks skip the family
+    /// straight to libx264/libx265 instead of repeating the wasted
+    /// attempt for every source. Cleared when the encoder mode or codec
+    /// preference changes (the new combination might just work).
+    hw_encoder_blacklist: Arc<Mutex<HashSet<HwEncoderFamily>>>,
+    /// Process-global blacklist of HW *decode* methods (`cuda`, `qsv`,
+    /// `vaapi`) that have failed at runtime. Same semantics as
+    /// `hw_encoder_blacklist` — saves wasted per-source HW attempts on
+    /// machines where startup probes passed but runtime use still fails
+    /// (rare; usually narrows down to a specific source codec edge case).
+    hw_decode_blacklist: Arc<Mutex<HashSet<String>>>,
+    /// Counting semaphore that limits concurrent transcodes of sources at
+    /// or above [`HEAVY_SOURCE_HEIGHT_THRESHOLD`]. Workers that pick up a
+    /// light source bypass the permit entirely. Held only to keep the
+    /// Arc alive for the lifetime of the cache; the worker threads each
+    /// own their own clone.
+    #[allow(dead_code)]
+    heavy_permit: Arc<HeavyPermit>,
 }
 
 impl ProxyCache {
@@ -199,9 +344,24 @@ impl ProxyCache {
             );
         }
         let (result_tx, result_rx) = mpsc::sync_channel::<ProxyWorkerUpdate>(64);
-        // (source_path, scale, lut_paths, sidecar_mirror, vidstab_enabled, vidstab_smoothing)
+        // (source_path, scale, lut_paths, sidecar_mirror, vidstab_enabled,
+        //  vidstab_smoothing, codec_snapshot)
+        // The codec is snapshotted at enqueue time so the worker's cache
+        // key matches what `request_with_vidstab` already reserved in
+        // `pending` — without this, a codec preference change between
+        // enqueue and dequeue would orphan the work item.
         let (work_tx, work_rx) =
-            mpsc::channel::<(String, ProxyScale, Vec<String>, bool, bool, f32)>();
+            mpsc::channel::<(String, ProxyScale, Vec<String>, bool, bool, f32, ProxyCodec)>();
+
+        let hw_encoder_mode = Arc::new(RwLock::new(HwEncoderMode::default()));
+        let proxy_codec = Arc::new(RwLock::new(ProxyCodec::default()));
+        let hw_failed_sources: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let hw_decode_failed_sources: Arc<Mutex<HashSet<String>>> =
+            Arc::new(Mutex::new(HashSet::new()));
+        let hw_encoder_blacklist: Arc<Mutex<HashSet<HwEncoderFamily>>> =
+            Arc::new(Mutex::new(HashSet::new()));
+        let hw_decode_blacklist: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let heavy_permit = Arc::new(HeavyPermit::new(MAX_HEAVY_PARALLEL_TRANSCODES));
 
         // Pool of worker threads to transcode proxies in parallel.
         let work_rx = std::sync::Arc::new(std::sync::Mutex::new(work_rx));
@@ -210,6 +370,13 @@ impl ProxyCache {
             let rx = work_rx.clone();
             let tx = result_tx.clone();
             let local_root = local_cache_root.clone();
+            let hw_mode_ref = hw_encoder_mode.clone();
+            let proxy_codec_ref = proxy_codec.clone();
+            let hw_failed_ref = hw_failed_sources.clone();
+            let hw_decode_failed_ref = hw_decode_failed_sources.clone();
+            let enc_blacklist_ref = hw_encoder_blacklist.clone();
+            let dec_blacklist_ref = hw_decode_blacklist.clone();
+            let heavy_permit_ref = heavy_permit.clone();
             std::thread::spawn(move || loop {
                 let item = {
                     let lock = rx.lock().unwrap();
@@ -223,18 +390,60 @@ impl ProxyCache {
                         sidecar_mirror_enabled,
                         vidstab_enabled,
                         vidstab_smoothing,
+                        codec_snapshot,
                     )) => {
                         let lut_composite = if lut_paths.is_empty() {
                             None
                         } else {
                             Some(lut_paths.join("|"))
                         };
-                        let key = proxy_key_with_vidstab(
+                        let key = proxy_key_with_codec_and_vidstab(
                             &source_path,
                             lut_composite.as_deref(),
+                            codec_snapshot,
                             vidstab_enabled,
                             vidstab_smoothing,
                         );
+                        let mode_snapshot = *hw_mode_ref.read().unwrap();
+                        // codec_snapshot already arrived in the work tuple — keep
+                        // proxy_codec_ref alive in the closure so the outer Arc
+                        // doesn't get dropped, but read from the message.
+                        let _ = &proxy_codec_ref;
+                        let already_failed_enc = hw_failed_ref
+                            .lock()
+                            .map(|set| set.contains(&source_path))
+                            .unwrap_or(false);
+                        let session_blacklisted_enc = |fam: HwEncoderFamily| {
+                            enc_blacklist_ref
+                                .lock()
+                                .map(|set| set.contains(&fam))
+                                .unwrap_or(false)
+                        };
+                        let initial_family = if already_failed_enc {
+                            None
+                        } else {
+                            hwaccel::pick_encoder(
+                                codec_snapshot,
+                                mode_snapshot,
+                                hwaccel::detect(),
+                                hwaccel::cuda_runtime_loadable(),
+                            )
+                            .filter(|fam| !session_blacklisted_enc(*fam))
+                        };
+                        let already_failed_dec = hw_decode_failed_ref
+                            .lock()
+                            .map(|set| set.contains(&source_path))
+                            .unwrap_or(false);
+                        let initial_decode_hwaccel = if already_failed_dec {
+                            None
+                        } else {
+                            hwaccel::pick_decode_hwaccel(mode_snapshot).filter(|method| {
+                                !dec_blacklist_ref
+                                    .lock()
+                                    .map(|set| set.contains(*method))
+                                    .unwrap_or(false)
+                            })
+                        };
                         let (proxy_path, success, owned_local) = transcode_proxy(
                             &source_path,
                             scale,
@@ -245,6 +454,14 @@ impl ProxyCache {
                             &key,
                             &tx,
                             sidecar_mirror_enabled,
+                            initial_family,
+                            codec_snapshot,
+                            &hw_failed_ref,
+                            initial_decode_hwaccel,
+                            &hw_decode_failed_ref,
+                            &enc_blacklist_ref,
+                            &dec_blacklist_ref,
+                            &heavy_permit_ref,
                         );
                         if tx
                             .send(ProxyWorkerUpdate::Done(ProxyResult {
@@ -276,11 +493,58 @@ impl ProxyCache {
             ffprobe_path: find_ffprobe_path(),
             runtime_owned_local_files: HashSet::new(),
             sidecar_mirror_enabled: false,
+            hw_encoder_mode,
+            proxy_codec,
+            hw_failed_sources,
+            hw_decode_failed_sources,
+            hw_encoder_blacklist,
+            hw_decode_blacklist,
+            heavy_permit,
         }
+    }
+
+    /// Update the proxy codec preference. Applies to *future* worker jobs.
+    pub fn set_proxy_codec(&self, codec: ProxyCodec) {
+        if let Ok(mut guard) = self.proxy_codec.write() {
+            *guard = codec;
+        }
+        // Switching codec invalidates HW failure caches because a source
+        // that failed under (h264, nvenc) might succeed under (hevc, nvenc).
+        self.clear_hw_failure_state();
     }
 
     pub fn set_sidecar_mirror_enabled(&mut self, enabled: bool) {
         self.sidecar_mirror_enabled = enabled;
+    }
+
+    /// Update the hardware encoder preference. Applies to *future* worker
+    /// jobs; in-flight transcodes keep the mode they were started with.
+    pub fn set_hw_encoder_mode(&self, mode: HwEncoderMode) {
+        if let Ok(mut guard) = self.hw_encoder_mode.write() {
+            *guard = mode;
+        }
+        // Forget previous HW failures when the user changes mode — fresh
+        // mode might succeed on sources that failed under the old one
+        // (e.g. switching Vaapi → Nvenc after a missing /dev/dri/renderD128).
+        self.clear_hw_failure_state();
+    }
+
+    /// Clear all per-session HW failure caches and process-global
+    /// blacklists. Called whenever the user changes a preference that
+    /// could turn a previously-broken HW path into a working one.
+    fn clear_hw_failure_state(&self) {
+        if let Ok(mut set) = self.hw_failed_sources.lock() {
+            set.clear();
+        }
+        if let Ok(mut set) = self.hw_decode_failed_sources.lock() {
+            set.clear();
+        }
+        if let Ok(mut set) = self.hw_encoder_blacklist.lock() {
+            set.clear();
+        }
+        if let Ok(mut set) = self.hw_decode_blacklist.lock() {
+            set.clear();
+        }
     }
 
     /// Enqueue a proxy transcode for `source_path` (with optional LUT paths).
@@ -298,7 +562,22 @@ impl ProxyCache {
         vidstab_enabled: bool,
         vidstab_smoothing: f32,
     ) {
-        let key = proxy_key_with_vidstab(source_path, lut_path, vidstab_enabled, vidstab_smoothing);
+        // Snapshot the codec preference up front so the cache key, the
+        // disk-check, and the work-queue message all agree even if the
+        // user changes the preference between this call and the worker
+        // dequeue.
+        let codec_snapshot = self
+            .proxy_codec
+            .read()
+            .map(|g| *g)
+            .unwrap_or(ProxyCodec::H264);
+        let key = proxy_key_with_codec_and_vidstab(
+            source_path,
+            lut_path,
+            codec_snapshot,
+            vidstab_enabled,
+            vidstab_smoothing,
+        );
         if self.proxies.contains_key(&key)
             || self.pending.contains(&key)
             || self.failed.contains(&key)
@@ -310,6 +589,7 @@ impl ProxyCache {
             source_path,
             scale,
             lut_path,
+            codec_snapshot,
             vidstab_enabled,
             vidstab_smoothing,
             &self.local_cache_root,
@@ -318,17 +598,15 @@ impl ProxyCache {
             self.proxies.insert(key, p);
             return;
         }
-        self.pending.insert(key);
+        self.pending.insert(key.clone());
         self.total_requested += 1;
         log::info!(
-            "ProxyCache: enqueuing proxy for {} (scale={:?})",
+            "ProxyCache: enqueuing proxy for {} (scale={:?}, codec={})",
             source_path,
-            scale
+            scale,
+            codec_snapshot.as_str()
         );
-        self.written_bytes.insert(
-            proxy_key_with_vidstab(source_path, lut_path, vidstab_enabled, vidstab_smoothing),
-            0,
-        );
+        self.written_bytes.insert(key, 0);
         if let Some(ref tx) = self.work_tx {
             // Split composite key back into individual paths for the worker.
             let lut_paths: Vec<String> = match lut_path {
@@ -344,6 +622,7 @@ impl ProxyCache {
                 self.sidecar_mirror_enabled,
                 vidstab_enabled,
                 vidstab_smoothing,
+                codec_snapshot,
             ));
         }
     }
@@ -406,11 +685,9 @@ impl ProxyCache {
     pub fn ready_source_paths(&self) -> HashSet<String> {
         self.proxies
             .keys()
-            .map(|k| {
-                match k.split_once('|') {
-                    Some((src, _)) => src.to_string(),
-                    None => k.clone(),
-                }
+            .map(|k| match k.split_once('|') {
+                Some((src, _)) => src.to_string(),
+                None => k.clone(),
             })
             .collect()
     }
@@ -1066,6 +1343,7 @@ fn source_variant_hash(
     source_path: &str,
     scale: ProxyScale,
     lut_path: Option<&str>,
+    codec: ProxyCodec,
     vidstab_enabled: bool,
     vidstab_smoothing: f32,
 ) -> u64 {
@@ -1079,6 +1357,12 @@ fn source_variant_hash(
             vidstab_enabled,
             vidstab_smoothing,
         ));
+    // Codec only participates when it deviates from the historical H.264
+    // default. This keeps the variant hash stable for users who never
+    // touch the new HEVC preference, so their existing cache survives.
+    if matches!(codec, ProxyCodec::Hevc) {
+        hasher.add(codec.as_str());
+    }
     hasher.finish()
 }
 
@@ -1086,6 +1370,7 @@ fn proxy_filename_for_variant(
     source_path: &str,
     scale: ProxyScale,
     lut_path: Option<&str>,
+    codec: ProxyCodec,
     vidstab_enabled: bool,
     vidstab_smoothing: f32,
 ) -> Option<String> {
@@ -1095,6 +1380,7 @@ fn proxy_filename_for_variant(
         source_path,
         scale,
         lut_path,
+        codec,
         vidstab_enabled,
         vidstab_smoothing,
     );
@@ -1126,6 +1412,7 @@ fn local_proxy_path_for(
     source_path: &str,
     scale: ProxyScale,
     lut_path: Option<&str>,
+    codec: ProxyCodec,
     vidstab_enabled: bool,
     vidstab_smoothing: f32,
     local_root: &Path,
@@ -1134,6 +1421,7 @@ fn local_proxy_path_for(
         source_path,
         scale,
         lut_path,
+        codec,
         vidstab_enabled,
         vidstab_smoothing,
     )?;
@@ -1157,6 +1445,7 @@ fn alongside_proxy_path_for(
     source_path: &str,
     scale: ProxyScale,
     lut_path: Option<&str>,
+    codec: ProxyCodec,
     vidstab_enabled: bool,
     vidstab_smoothing: f32,
 ) -> Option<String> {
@@ -1167,6 +1456,7 @@ fn alongside_proxy_path_for(
         source_path,
         scale,
         lut_path,
+        codec,
         vidstab_enabled,
         vidstab_smoothing,
     )?;
@@ -1190,6 +1480,7 @@ fn local_proxy_path_for_spec(spec: &ProxyVariantSpec, local_root: &Path) -> Opti
         &spec.source_path,
         spec.scale,
         spec.lut_key(),
+        spec.codec,
         spec.vidstab_enabled,
         spec.vidstab_smoothing(),
         local_root,
@@ -1207,6 +1498,7 @@ fn alongside_proxy_path_for_spec(spec: &ProxyVariantSpec) -> Option<String> {
         &spec.source_path,
         spec.scale,
         spec.lut_key(),
+        spec.codec,
         spec.vidstab_enabled,
         spec.vidstab_smoothing(),
     )
@@ -1216,6 +1508,7 @@ fn existing_proxy_path_for(
     source_path: &str,
     scale: ProxyScale,
     lut_path: Option<&str>,
+    codec: ProxyCodec,
     vidstab_enabled: bool,
     vidstab_smoothing: f32,
     local_root: &Path,
@@ -1226,6 +1519,7 @@ fn existing_proxy_path_for(
             source_path,
             scale,
             lut_path,
+            codec,
             vidstab_enabled,
             vidstab_smoothing,
             local_root,
@@ -1234,6 +1528,7 @@ fn existing_proxy_path_for(
             source_path,
             scale,
             lut_path,
+            codec,
             vidstab_enabled,
             vidstab_smoothing,
         ),
@@ -1266,6 +1561,32 @@ fn find_ffprobe_path() -> Option<String> {
     } else {
         None
     }
+}
+
+/// Run a quick `ffprobe` to read the source's first video-stream height.
+/// Used to decide whether a transcode counts as a "heavy" job for the
+/// HeavyPermit gate. Returns `None` on probe failure or unparseable output;
+/// callers should treat unknown-height as light (don't acquire a permit).
+fn probe_source_height(source_path: &str, ffprobe: &str) -> Option<u32> {
+    let output = Command::new(ffprobe)
+        .arg("-v")
+        .arg("error")
+        .arg("-select_streams")
+        .arg("v:0")
+        .arg("-show_entries")
+        .arg("stream=height")
+        .arg("-of")
+        .arg("default=noprint_wrappers=1:nokey=1")
+        .arg(source_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .ok()
 }
 
 fn proxy_file_is_ready(path: &str, ffprobe_path: Option<&str>) -> bool {
@@ -1302,6 +1623,7 @@ fn proxy_file_is_ready(path: &str, ffprobe_path: Option<&str>) -> bool {
     duration.is_some_and(|d| d.is_finite() && d > 0.0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_transcode_command(
     ffmpeg: &str,
     source_path: &str,
@@ -1310,6 +1632,9 @@ fn run_transcode_command(
     cache_key: &str,
     estimated_size_bytes: Option<u64>,
     progress_tx: &mpsc::SyncSender<ProxyWorkerUpdate>,
+    hw_family: Option<HwEncoderFamily>,
+    proxy_codec: ProxyCodec,
+    hw_decode_method: Option<&str>,
 ) -> bool {
     let mut cmd = Command::new(ffmpeg);
     cmd.arg("-y")
@@ -1318,26 +1643,115 @@ fn run_transcode_command(
         .arg("error")
         .arg("-progress")
         .arg("pipe:2")
-        .arg("-nostats")
-        .arg("-i")
-        .arg(source_path)
-        .arg("-vf")
-        .arg(filter)
-        .arg("-c:v")
-        .arg("libx264")
-        .arg("-preset")
-        .arg("ultrafast")
-        .arg("-tune")
-        .arg("fastdecode")
-        .arg("-crf")
-        .arg("28")
-        .arg("-bf")
-        .arg("0")
-        .arg("-refs")
-        .arg("1")
-        .arg("-pix_fmt")
-        .arg("yuv420p")
-        .arg("-c:a")
+        .arg("-nostats");
+    // VA-API needs the hwaccel device declared *before* the input so the
+    // decoded frames can be uploaded to the GPU later in the filter chain.
+    // Use the render node we actually probed at startup (multi-GPU systems
+    // can expose renderD129/130/etc. when /dev/dri/renderD128 isn't
+    // accessible, and we already know this one opens cleanly).
+    if matches!(hw_family, Some(HwEncoderFamily::Vaapi)) {
+        if let Some(node) = hwaccel::detect().vaapi_render_node.as_ref() {
+            cmd.arg("-vaapi_device").arg(node);
+        }
+    }
+    // HW decode hint: tells FFmpeg to use the GPU/iGPU decoder for the
+    // input. We deliberately do NOT set `-hwaccel_output_format`, so
+    // decoded frames flow back to CPU memory and the existing software
+    // filter chain (lanczos/lut3d/...) keeps working unchanged.
+    //
+    // SKIP `-hwaccel vaapi` regardless of encoder. Empirical finding on
+    // Intel iGPUs (Xe2 / Lunar Lake): VA-API HEVC 10-bit decode is
+    // *slower* than libavcodec SW decode on a modern multi-core CPU —
+    // the iGPU path goes through a hybrid CPU+GPU implementation, and
+    // the lut3d step in our proxy filter chain forces a GPU→CPU
+    // roundtrip that wastes the work the GPU did. Measured on a 6:13
+    // 5952×3968 10-bit HEVC source: 6:39 (sw decode + vaapi encode) vs
+    // 14:12 (vaapi decode + vaapi encode), 2× regression. CUDA (NVDEC
+    // on discrete NVIDIA) and QSV decode hints are still emitted —
+    // their drivers handle the roundtrip more efficiently and NVDEC's
+    // dedicated 10-bit HEVC silicon is genuinely faster than CPU.
+    if let Some(method) = hw_decode_method {
+        if method != "vaapi" {
+            cmd.arg("-hwaccel").arg(method);
+        }
+    }
+    cmd.arg("-i").arg(source_path);
+    // VA-API requires explicit format conversion + hwupload at the tail of
+    // the software filter chain so the encoder receives GPU surfaces.
+    let effective_filter = match hw_family {
+        Some(HwEncoderFamily::Vaapi) => format!("{filter},format=nv12,hwupload"),
+        _ => filter.to_string(),
+    };
+    cmd.arg("-vf").arg(&effective_filter);
+    match (hw_family, proxy_codec) {
+        (Some(HwEncoderFamily::Vaapi), ProxyCodec::H264) => {
+            cmd.arg("-c:v")
+                .arg("h264_vaapi")
+                // qp ~ CRF in spirit; 28 keeps proxy bitrate similar to libx264 CRF 28.
+                .arg("-qp")
+                .arg("28");
+        }
+        (Some(HwEncoderFamily::Vaapi), ProxyCodec::Hevc) => {
+            cmd.arg("-c:v").arg("hevc_vaapi").arg("-qp").arg("28");
+        }
+        (Some(HwEncoderFamily::Nvenc), ProxyCodec::H264) => {
+            cmd.arg("-c:v")
+                .arg("h264_nvenc")
+                .arg("-preset")
+                .arg("p1")
+                .arg("-tune")
+                .arg("ll")
+                .arg("-rc")
+                .arg("constqp")
+                .arg("-cq")
+                .arg("28")
+                .arg("-pix_fmt")
+                .arg("yuv420p");
+        }
+        (Some(HwEncoderFamily::Nvenc), ProxyCodec::Hevc) => {
+            cmd.arg("-c:v")
+                .arg("hevc_nvenc")
+                .arg("-preset")
+                .arg("p1")
+                .arg("-tune")
+                .arg("ll")
+                .arg("-rc")
+                .arg("constqp")
+                .arg("-cq")
+                .arg("28")
+                .arg("-pix_fmt")
+                .arg("yuv420p");
+        }
+        (None, ProxyCodec::H264) => {
+            cmd.arg("-c:v")
+                .arg("libx264")
+                .arg("-preset")
+                .arg("ultrafast")
+                .arg("-tune")
+                .arg("fastdecode")
+                .arg("-crf")
+                .arg("28")
+                .arg("-bf")
+                .arg("0")
+                .arg("-refs")
+                .arg("1")
+                .arg("-pix_fmt")
+                .arg("yuv420p");
+        }
+        (None, ProxyCodec::Hevc) => {
+            cmd.arg("-c:v")
+                .arg("libx265")
+                .arg("-preset")
+                .arg("ultrafast")
+                .arg("-x265-params")
+                .arg("log-level=error")
+                .arg("-crf")
+                .arg("28")
+                .arg("-pix_fmt")
+                .arg("yuv420p");
+        }
+    }
+    cmd.arg("-c:a")
         .arg("aac")
         .arg("-b:a")
         .arg("128k")
@@ -1349,7 +1763,32 @@ fn run_transcode_command(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
 
+    let enc_label = match (hw_family, proxy_codec) {
+        (Some(HwEncoderFamily::Nvenc), ProxyCodec::H264) => "h264_nvenc",
+        (Some(HwEncoderFamily::Nvenc), ProxyCodec::Hevc) => "hevc_nvenc",
+        (Some(HwEncoderFamily::Vaapi), ProxyCodec::H264) => "h264_vaapi",
+        (Some(HwEncoderFamily::Vaapi), ProxyCodec::Hevc) => "hevc_vaapi",
+        (None, ProxyCodec::H264) => "libx264",
+        (None, ProxyCodec::Hevc) => "libx265",
+    };
+    let dec_label = match hw_decode_method {
+        Some("vaapi") => {
+            "sw (vaapi decode skipped — slower than CPU for HEVC 10-bit on Intel iGPUs)"
+        }
+        Some(method) => method,
+        None => "sw",
+    };
+    log::info!(
+        "ProxyCache: spawning ffmpeg for {} (decode={dec_label}, encode={enc_label})",
+        source_path
+    );
+    let attempt_started = std::time::Instant::now();
+
     let Ok(mut child) = cmd.spawn() else {
+        log::warn!(
+            "ProxyCache: failed to spawn ffmpeg for {} (decode={dec_label}, encode={enc_label})",
+            source_path
+        );
         return false;
     };
     let Some(stderr) = child.stderr.take() else {
@@ -1365,6 +1804,9 @@ fn run_transcode_command(
             estimated_bytes: estimate,
         });
     }
+    // Keep a small ring buffer of non-progress stderr lines so we can include
+    // them in the failure log and tell HW-path errors apart from anything else.
+    let mut recent_stderr: Vec<String> = Vec::with_capacity(8);
     for line in BufReader::new(stderr).lines().map_while(|r| r.ok()) {
         if let Some(v) = line.strip_prefix("total_size=") {
             if let Ok(bytes) = v.parse::<u64>() {
@@ -1374,19 +1816,55 @@ fn run_transcode_command(
                     estimated_bytes: estimate,
                 });
             }
+            continue;
+        }
+        // Filter out the periodic ffmpeg `-progress pipe:2` key=value rows
+        // (frame=, fps=, bitrate=, ...) so the buffer only retains real
+        // diagnostics like decoder/encoder errors.
+        if line.contains('=') && !line.contains(' ') {
+            continue;
+        }
+        if !line.trim().is_empty() {
+            if recent_stderr.len() == 8 {
+                recent_stderr.remove(0);
+            }
+            recent_stderr.push(line);
         }
     }
-    matches!(child.wait(), Ok(s) if s.success())
+    let success = matches!(child.wait(), Ok(s) if s.success());
+    let elapsed = attempt_started.elapsed();
+    if success {
+        log::info!(
+            "ProxyCache: ffmpeg ok for {} (decode={dec_label}, encode={enc_label}) in {:.1}s",
+            source_path,
+            elapsed.as_secs_f64()
+        );
+    } else {
+        let tail = if recent_stderr.is_empty() {
+            String::from("(no stderr captured)")
+        } else {
+            recent_stderr.join(" | ")
+        };
+        log::warn!(
+            "ProxyCache: ffmpeg FAILED for {} (decode={dec_label}, encode={enc_label}) after {:.1}s: {}",
+            source_path,
+            elapsed.as_secs_f64(),
+            tail
+        );
+    }
+    success
 }
 
 fn estimate_proxy_output_bitrate_bps(scale: ProxyScale, has_lut: bool) -> u64 {
+    // Estimate H.264 bitrate based on the proxy's pixel area, normalized against
+    // 1080p (~3.2 Mbps for 16:9). The width is approximated as 16/9 * height
+    // since MaxHeight preserves source aspect — close enough for an estimate.
     let base_video_bps = match scale {
-        ProxyScale::Half => 1_600_000f64,
-        ProxyScale::Quarter => 850_000f64,
-        ProxyScale::Project { width, height } => {
-            let pixel_scale =
-                ((width.max(1) as f64 * height.max(1) as f64) / (1920.0 * 1080.0)).clamp(0.25, 4.0);
-            (3_200_000f64 * pixel_scale).clamp(1_200_000.0, 12_000_000.0)
+        ProxyScale::MaxHeight(h) => {
+            let height_f = h.max(1) as f64;
+            let approx_pixels = height_f * height_f * (16.0 / 9.0);
+            let pixel_scale = (approx_pixels / (1920.0 * 1080.0)).clamp(0.25, 4.0);
+            (3_200_000f64 * pixel_scale).clamp(600_000.0, 12_000_000.0)
         }
     };
     let lut_scale = if has_lut { 1.1 } else { 1.0 };
@@ -1439,20 +1917,58 @@ fn mirror_local_proxy_to_sidecar(
         return;
     }
     let sidecar_dir = Path::new(sidecar_path).parent().unwrap_or(Path::new("."));
-    if std::fs::create_dir_all(sidecar_dir).is_err() {
+    if let Err(e) = std::fs::create_dir_all(sidecar_dir) {
+        // Most common real cause: the source's parent directory isn't
+        // writable — read-only mount (cinema RAW DIT drives often lock
+        // the volume), network share without write perms, sandboxed app
+        // paths, etc. Surface so users don't wonder why some sources
+        // get an alongside-media `UltimateSlice.cache/` and others don't.
+        log::warn!(
+            "ProxyCache: cannot create alongside-media cache dir {} for {}: {}. \
+             Proxy will live only in the managed local cache. Common causes: \
+             read-only source media (mount as rw or import to a writable drive), \
+             missing write permissions on the source directory, or sandboxed FS \
+             that hides the source parent.",
+            sidecar_dir.display(),
+            source_path,
+            e
+        );
         return;
     }
     let temp_sidecar_path = format!("{sidecar_path}.partial");
     let _ = std::fs::remove_file(&temp_sidecar_path);
-    if std::fs::copy(local_proxy_path, &temp_sidecar_path).is_err() {
+    if let Err(e) = std::fs::copy(local_proxy_path, &temp_sidecar_path) {
+        log::warn!(
+            "ProxyCache: failed to copy local proxy {} → {}: {}. \
+             Proxy will live only in the managed local cache. \
+             Common causes: target volume out of space, permission error, \
+             quota exceeded.",
+            local_proxy_path,
+            temp_sidecar_path,
+            e
+        );
         let _ = std::fs::remove_file(&temp_sidecar_path);
         return;
     }
     if !proxy_file_is_ready(&temp_sidecar_path, Some(ffprobe)) {
+        log::warn!(
+            "ProxyCache: mirrored copy at {} failed ffprobe readiness check; \
+             discarding alongside-media file (local proxy at {} is unaffected). \
+             This usually indicates the source volume truncated or corrupted the \
+             copy mid-write.",
+            temp_sidecar_path,
+            local_proxy_path
+        );
         let _ = std::fs::remove_file(&temp_sidecar_path);
         return;
     }
     if !finalize_output_file(&temp_sidecar_path, sidecar_path) {
+        log::warn!(
+            "ProxyCache: failed to atomically rename mirrored proxy {} → {}; \
+             alongside-media cache will not be populated for this source.",
+            temp_sidecar_path,
+            sidecar_path
+        );
         let _ = std::fs::remove_file(&temp_sidecar_path);
         return;
     }
@@ -1465,6 +1981,7 @@ fn mirror_local_proxy_to_sidecar(
 
 /// Run ffmpeg to create a proxy file.
 /// Returns `(proxy_path, success, owned_local)`.
+#[allow(clippy::too_many_arguments)]
 fn transcode_proxy(
     source_path: &str,
     scale: ProxyScale,
@@ -1475,6 +1992,14 @@ fn transcode_proxy(
     cache_key: &str,
     progress_tx: &mpsc::SyncSender<ProxyWorkerUpdate>,
     sidecar_mirror_enabled: bool,
+    initial_hw_family: Option<HwEncoderFamily>,
+    proxy_codec: ProxyCodec,
+    hw_failed_sources: &Arc<Mutex<HashSet<String>>>,
+    initial_decode_hwaccel: Option<&'static str>,
+    hw_decode_failed_sources: &Arc<Mutex<HashSet<String>>>,
+    hw_encoder_blacklist: &Arc<Mutex<HashSet<HwEncoderFamily>>>,
+    hw_decode_blacklist: &Arc<Mutex<HashSet<String>>>,
+    heavy_permit: &Arc<HeavyPermit>,
 ) -> (String, bool, bool) {
     let lut_composite = if lut_paths.is_empty() {
         None
@@ -1486,6 +2011,7 @@ fn transcode_proxy(
         source_path,
         scale,
         lut_key,
+        proxy_codec,
         vidstab_enabled,
         vidstab_smoothing,
         local_root,
@@ -1497,6 +2023,7 @@ fn transcode_proxy(
         source_path,
         scale,
         lut_key,
+        proxy_codec,
         vidstab_enabled,
         vidstab_smoothing,
     );
@@ -1507,6 +2034,21 @@ fn transcode_proxy(
     };
     let estimated_size_bytes = estimate_proxy_size_bytes(source_path, scale, lut_key, &ffmpeg);
     let ffprobe = ffmpeg.replace("ffmpeg", "ffprobe");
+
+    // Heavy-job gate: throttle 4K+ transcodes to keep the worker pool from
+    // saturating GPU/decoder resources. Held for the full transcode_proxy
+    // duration so the slow decode dominates the held window. Sources whose
+    // height we can't probe are treated as light (no permit).
+    let _heavy_permit_guard = match probe_source_height(source_path, &ffprobe) {
+        Some(h) if h >= HEAVY_SOURCE_HEIGHT_THRESHOLD => {
+            log::info!(
+                "ProxyCache: {} is heavy ({h}p), waiting for heavy-job permit",
+                source_path
+            );
+            Some(heavy_permit.acquire())
+        }
+        _ => None,
+    };
 
     // Build the -vf filter string: scale, then vidstab (if enabled), then LUT chain.
     let mut filter = scale.ffmpeg_scale_filter().to_string();
@@ -1583,7 +2125,11 @@ fn transcode_proxy(
         }
         let temp_proxy_path = format!("{proxy_path}.partial");
         let _ = std::fs::remove_file(&temp_proxy_path);
-        if run_transcode_command(
+        // Attempt 1: best-effort HW encode + HW decode (each independently
+        // gated on availability + per-source failure history).
+        let mut attempt_hw_enc = initial_hw_family;
+        let mut attempt_hw_dec = initial_decode_hwaccel;
+        let mut command_ok = run_transcode_command(
             &ffmpeg,
             source_path,
             &temp_proxy_path,
@@ -1591,7 +2137,85 @@ fn transcode_proxy(
             cache_key,
             estimated_size_bytes,
             progress_tx,
-        ) {
+            attempt_hw_enc,
+            proxy_codec,
+            attempt_hw_dec,
+        );
+        // Attempt 2: if HW encode was active, blame the encoder first
+        // (more commonly fragile on 10-bit / unusual input) and retry with
+        // libx264 while keeping the decoder choice.
+        if !command_ok && attempt_hw_enc.is_some() {
+            log::warn!(
+                "ProxyCache: hw encoder ({}) failed for {}, falling back to libx264",
+                attempt_hw_enc.map(|f| f.as_str()).unwrap_or("unknown"),
+                source_path
+            );
+            if let Ok(mut set) = hw_failed_sources.lock() {
+                set.insert(source_path.to_string());
+            }
+            // Process-global blacklist: this encoder family failed at
+            // runtime, future per-source picks will skip it from the start.
+            if let Some(fam) = attempt_hw_enc {
+                if let Ok(mut set) = hw_encoder_blacklist.lock() {
+                    if set.insert(fam) {
+                        log::info!(
+                            "ProxyCache: session-blacklisting hw encoder family `{}` after runtime failure",
+                            fam.as_str()
+                        );
+                    }
+                }
+            }
+            attempt_hw_enc = None;
+            let _ = std::fs::remove_file(&temp_proxy_path);
+            command_ok = run_transcode_command(
+                &ffmpeg,
+                source_path,
+                &temp_proxy_path,
+                &filter,
+                cache_key,
+                estimated_size_bytes,
+                progress_tx,
+                attempt_hw_enc,
+                proxy_codec,
+                attempt_hw_dec,
+            );
+        }
+        // Attempt 3: if HW decode was active and we still failed, fall
+        // back to fully-software decode + encode.
+        if !command_ok && attempt_hw_dec.is_some() {
+            log::warn!(
+                "ProxyCache: hw decoder ({}) failed for {}, falling back to software decode",
+                attempt_hw_dec.unwrap_or("unknown"),
+                source_path
+            );
+            if let Ok(mut set) = hw_decode_failed_sources.lock() {
+                set.insert(source_path.to_string());
+            }
+            if let Some(method) = attempt_hw_dec {
+                if let Ok(mut set) = hw_decode_blacklist.lock() {
+                    if set.insert(method.to_string()) {
+                        log::info!(
+                            "ProxyCache: session-blacklisting hw decoder `{method}` after runtime failure"
+                        );
+                    }
+                }
+            }
+            attempt_hw_dec = None;
+            let _ = std::fs::remove_file(&temp_proxy_path);
+            command_ok = run_transcode_command(
+                &ffmpeg,
+                source_path,
+                &temp_proxy_path,
+                &filter,
+                cache_key,
+                estimated_size_bytes,
+                progress_tx,
+                attempt_hw_enc,
+                proxy_codec,
+                attempt_hw_dec,
+            );
+        }
+        if command_ok {
             if !proxy_file_is_ready(&temp_proxy_path, Some(&ffprobe)) {
                 let _ = std::fs::remove_file(&temp_proxy_path);
                 continue;
@@ -1684,6 +2308,93 @@ mod tests {
     }
 
     #[test]
+    fn proxy_key_h264_default_matches_legacy_shape() {
+        // Regression guard: existing on-disk caches were keyed without the
+        // codec discriminator. proxy_key_with_vidstab (the historical
+        // entry point) must keep producing the same shape so users who
+        // never touch the codec preference don't get forced re-transcodes.
+        let key_legacy = proxy_key_with_vidstab("/tmp/a.mp4", None, false, 0.0);
+        let key_h264 =
+            proxy_key_with_codec_and_vidstab("/tmp/a.mp4", None, ProxyCodec::H264, false, 0.0);
+        assert_eq!(key_legacy, key_h264);
+        assert_eq!(key_legacy, "/tmp/a.mp4");
+    }
+
+    #[test]
+    fn proxy_key_codec_separates_h264_from_hevc_paths() {
+        let key_h264 = proxy_key_with_codec_and_vidstab(
+            "/tmp/a.mp4",
+            Some("/luts/lut.cube"),
+            ProxyCodec::H264,
+            false,
+            0.0,
+        );
+        let key_hevc = proxy_key_with_codec_and_vidstab(
+            "/tmp/a.mp4",
+            Some("/luts/lut.cube"),
+            ProxyCodec::Hevc,
+            false,
+            0.0,
+        );
+        assert_ne!(
+            key_h264, key_hevc,
+            "switching codec must produce a distinct cache key"
+        );
+        // H.264 omits the codec suffix; HEVC adds `|c:hevc`.
+        assert!(!key_h264.contains("|c:"));
+        assert!(key_hevc.ends_with("|c:hevc"));
+
+        // The on-disk path must also differ so the worker doesn't
+        // overwrite an existing H.264 file with a fresh HEVC transcode
+        // at the same location.
+        let local_root = std::env::temp_dir();
+        let path_h264 = local_proxy_path_for(
+            "/tmp/a.mp4",
+            ProxyScale::MaxHeight(1080),
+            None,
+            ProxyCodec::H264,
+            false,
+            0.0,
+            &local_root,
+        );
+        let path_hevc = local_proxy_path_for(
+            "/tmp/a.mp4",
+            ProxyScale::MaxHeight(1080),
+            None,
+            ProxyCodec::Hevc,
+            false,
+            0.0,
+            &local_root,
+        );
+        assert!(path_h264.is_some() && path_hevc.is_some());
+        assert_ne!(path_h264, path_hevc);
+    }
+
+    #[test]
+    fn max_height_filter_caps_height_preserves_aspect_and_avoids_upscale() {
+        // -2 forces an even auto-computed width that preserves source aspect.
+        // min(N,ih) clamps the height to the target only when source is taller.
+        assert_eq!(
+            ProxyScale::MaxHeight(1080).ffmpeg_scale_filter(),
+            "scale=-2:'min(1080,ih)':flags=lanczos"
+        );
+        assert_eq!(
+            ProxyScale::MaxHeight(640).ffmpeg_scale_filter(),
+            "scale=-2:'min(640,ih)':flags=lanczos"
+        );
+    }
+
+    #[test]
+    fn max_height_suffix_uses_height_p_form() {
+        // Suffix lands in the on-disk filename, e.g. clip-s....proxy_1080p.mp4.
+        // Distinct heights must produce distinct suffixes so cache keys stay unique.
+        let s1080 = ProxyScale::MaxHeight(1080);
+        let s640 = ProxyScale::MaxHeight(640);
+        assert_eq!(s1080.suffix(), "1080p");
+        assert_eq!(s640.suffix(), "640p");
+    }
+
+    #[test]
     fn ready_source_paths_recovers_source_prefix_from_composite_keys() {
         let mut cache = ProxyCache::new();
         // Bare source-only key (no LUT, no vidstab)
@@ -1723,10 +2434,10 @@ mod tests {
     #[test]
     fn sidecar_proxy_path_detection_matches_directory_name() {
         assert!(is_sidecar_proxy_path(
-            "/tmp/project/UltimateSlice.cache/a.proxy_half.mp4"
+            "/tmp/project/UltimateSlice.cache/a.proxy_1080p.mp4"
         ));
         assert!(!is_sidecar_proxy_path(
-            "/tmp/ultimateslice/proxies/a.proxy_half.mp4"
+            "/tmp/ultimateslice/proxies/a.proxy_1080p.mp4"
         ));
     }
 
@@ -1754,7 +2465,7 @@ mod tests {
         let mut cache = ProxyCache::new();
         let local_path = cache
             .local_cache_root
-            .join("cleanup-policy-test.proxy_half.mp4")
+            .join("cleanup-policy-test.proxy_1080p.mp4")
             .to_string_lossy()
             .to_string();
         let _ = std::fs::create_dir_all(&cache.local_cache_root);
@@ -1789,8 +2500,9 @@ mod tests {
         let other_source_path = test_source_file("clip-b.mp4");
         let plain_local = local_proxy_path_for(
             &source_path,
-            ProxyScale::Half,
+            ProxyScale::MaxHeight(1080),
             None,
+            ProxyCodec::H264,
             false,
             0.0,
             &local_root,
@@ -1798,21 +2510,37 @@ mod tests {
         .unwrap();
         let stabilized_local = local_proxy_path_for(
             &source_path,
-            ProxyScale::Half,
+            ProxyScale::MaxHeight(1080),
             None,
+            ProxyCodec::H264,
             true,
             0.45,
             &local_root,
         )
         .unwrap();
-        let plain_sidecar =
-            alongside_proxy_path_for(&source_path, ProxyScale::Half, None, false, 0.0).unwrap();
-        let stabilized_sidecar =
-            alongside_proxy_path_for(&source_path, ProxyScale::Half, None, true, 0.45).unwrap();
+        let plain_sidecar = alongside_proxy_path_for(
+            &source_path,
+            ProxyScale::MaxHeight(1080),
+            None,
+            ProxyCodec::H264,
+            false,
+            0.0,
+        )
+        .unwrap();
+        let stabilized_sidecar = alongside_proxy_path_for(
+            &source_path,
+            ProxyScale::MaxHeight(1080),
+            None,
+            ProxyCodec::H264,
+            true,
+            0.45,
+        )
+        .unwrap();
         let other_source_local = local_proxy_path_for(
             &other_source_path,
-            ProxyScale::Half,
+            ProxyScale::MaxHeight(1080),
             None,
+            ProxyCodec::H264,
             false,
             0.0,
             &local_root,
@@ -1825,15 +2553,23 @@ mod tests {
         let _ = std::fs::write(&source_path, b"source-modified-longer");
         let updated_local = local_proxy_path_for(
             &source_path,
-            ProxyScale::Half,
+            ProxyScale::MaxHeight(1080),
             None,
+            ProxyCodec::H264,
             false,
             0.0,
             &local_root,
         )
         .unwrap();
-        let updated_sidecar =
-            alongside_proxy_path_for(&source_path, ProxyScale::Half, None, false, 0.0).unwrap();
+        let updated_sidecar = alongside_proxy_path_for(
+            &source_path,
+            ProxyScale::MaxHeight(1080),
+            None,
+            ProxyCodec::H264,
+            false,
+            0.0,
+        )
+        .unwrap();
         assert_eq!(plain_local, updated_local);
         assert_eq!(plain_sidecar, updated_sidecar);
 
@@ -1853,8 +2589,9 @@ mod tests {
         let source_path = test_source_file("clip-a.mp4");
         let proxy_path = local_proxy_path_for(
             &source_path,
-            ProxyScale::Half,
+            ProxyScale::MaxHeight(1080),
             None,
+            ProxyCodec::H264,
             false,
             0.0,
             &local_root,
@@ -1868,8 +2605,9 @@ mod tests {
 
         let reused = existing_proxy_path_for(
             &source_path,
-            ProxyScale::Half,
+            ProxyScale::MaxHeight(1080),
             None,
+            ProxyCodec::H264,
             false,
             0.0,
             &local_root,
@@ -1880,8 +2618,9 @@ mod tests {
         let _ = std::fs::write(&source_path, b"source-modified-longer");
         let stale = existing_proxy_path_for(
             &source_path,
-            ProxyScale::Half,
+            ProxyScale::MaxHeight(1080),
             None,
+            ProxyCodec::H264,
             false,
             0.0,
             &local_root,
@@ -1901,7 +2640,8 @@ mod tests {
         let _ = std::fs::create_dir_all(&local_root);
         let source_path = test_source_file("clip-a.mp4");
         let legacy_sidecar =
-            legacy_alongside_proxy_path_for(&source_path, ProxyScale::Half, None).unwrap();
+            legacy_alongside_proxy_path_for(&source_path, ProxyScale::MaxHeight(1080), None)
+                .unwrap();
         if let Some(parent) = Path::new(&legacy_sidecar).parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -1909,8 +2649,9 @@ mod tests {
 
         let reused = existing_proxy_path_for(
             &source_path,
-            ProxyScale::Half,
+            ProxyScale::MaxHeight(1080),
             None,
+            ProxyCodec::H264,
             false,
             0.0,
             &local_root,
@@ -1932,11 +2673,27 @@ mod tests {
         let source_a = test_source_file("clip-a.mp4");
         let source_b = test_source_file("clip-b.mp4");
 
-        let keep_spec = ProxyVariantSpec::new(source_a.clone(), ProxyScale::Half, None, false, 0.0);
-        let remove_spec =
-            ProxyVariantSpec::new(source_a.clone(), ProxyScale::Quarter, None, false, 0.0);
-        let unrelated_spec =
-            ProxyVariantSpec::new(source_b.clone(), ProxyScale::Quarter, None, false, 0.0);
+        let keep_spec = ProxyVariantSpec::new(
+            source_a.clone(),
+            ProxyScale::MaxHeight(1080),
+            None,
+            false,
+            0.0,
+        );
+        let remove_spec = ProxyVariantSpec::new(
+            source_a.clone(),
+            ProxyScale::MaxHeight(640),
+            None,
+            false,
+            0.0,
+        );
+        let unrelated_spec = ProxyVariantSpec::new(
+            source_b.clone(),
+            ProxyScale::MaxHeight(640),
+            None,
+            false,
+            0.0,
+        );
 
         let keep_local = local_proxy_path_for_spec(&keep_spec, &local_root).unwrap();
         let remove_local = local_proxy_path_for_spec(&remove_spec, &local_root).unwrap();
@@ -1998,10 +2755,24 @@ mod tests {
     fn sidecar_proxy_usage_for_sources_counts_matching_proxy_artifacts() {
         let source_a = test_source_file("clip-a.mp4");
         let source_b = test_source_file("clip-b.mp4");
-        let side_a =
-            alongside_proxy_path_for(&source_a, ProxyScale::Half, None, false, 0.0).unwrap();
-        let side_b =
-            alongside_proxy_path_for(&source_b, ProxyScale::Quarter, None, false, 0.0).unwrap();
+        let side_a = alongside_proxy_path_for(
+            &source_a,
+            ProxyScale::MaxHeight(1080),
+            None,
+            ProxyCodec::H264,
+            false,
+            0.0,
+        )
+        .unwrap();
+        let side_b = alongside_proxy_path_for(
+            &source_b,
+            ProxyScale::MaxHeight(640),
+            None,
+            ProxyCodec::H264,
+            false,
+            0.0,
+        )
+        .unwrap();
 
         for (path, source_path) in [(&side_a, &source_a), (&side_b, &source_b)] {
             if let Some(parent) = Path::new(path).parent() {
@@ -2031,10 +2802,24 @@ mod tests {
     fn purge_sidecar_proxy_cache_for_sources_only_removes_matching_artifacts() {
         let source_a = test_source_file("clip-a.mp4");
         let source_b = test_source_file("clip-b.mp4");
-        let side_a =
-            alongside_proxy_path_for(&source_a, ProxyScale::Half, None, false, 0.0).unwrap();
-        let side_b =
-            alongside_proxy_path_for(&source_b, ProxyScale::Quarter, None, false, 0.0).unwrap();
+        let side_a = alongside_proxy_path_for(
+            &source_a,
+            ProxyScale::MaxHeight(1080),
+            None,
+            ProxyCodec::H264,
+            false,
+            0.0,
+        )
+        .unwrap();
+        let side_b = alongside_proxy_path_for(
+            &source_b,
+            ProxyScale::MaxHeight(640),
+            None,
+            ProxyCodec::H264,
+            false,
+            0.0,
+        )
+        .unwrap();
 
         for (path, source_path) in [(&side_a, &source_a), (&side_b, &source_b)] {
             if let Some(parent) = Path::new(path).parent() {

@@ -20,6 +20,7 @@ Welcome to UltimateSlice, a Final Cut Pro–inspired non-linear video editor bui
 | [effects.md](effects.md) | Complete effects reference: color grading, frei0r plugins, blend modes, chroma key, LUTs |
 | [color-scopes.md](color-scopes.md) | Waveform, histogram, RGB parade, vectorscope |
 | [preferences.md](preferences.md) | Application-level settings and performance preferences |
+| [proxy-settings.md](proxy-settings.md) | Proxy resolution / codec / HW encoder choice with per-PC-setup recommendations |
 | [workspace-layouts.md](workspace-layouts.md) | Saving and restoring panel arrangements for different tasks |
 | [python-mcp.md](python-mcp.md) | Python socket client commands for MCP |
 | [program-monitor.md](program-monitor.md) | Previewing the assembled timeline |

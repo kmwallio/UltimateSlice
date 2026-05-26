@@ -12,6 +12,7 @@ use crate::model::transition::{max_transition_duration_ns, transition_xfade_name
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
@@ -30,13 +31,81 @@ pub(crate) struct ColorFilterCapabilities {
     pub(crate) three_point_frei0r_module: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodec {
     H264,
     H265,
     Vp9,
     ProRes,
     Av1,
+}
+
+/// Append a `format=nv12,hwupload` step to a filter_complex graph and
+/// rename the output pad. Used by VA-API export and prerender paths to
+/// flip the CPU-composited frame onto a VAAPI surface for the encoder.
+///
+/// Returns `(new_filter, new_map_label)`. The new label is
+/// `<old_label>_va`; callers must update the `-map` arg accordingly.
+pub(crate) fn append_vaapi_upload(filter: String, map_label: &str) -> (String, String) {
+    let upload_label = format!("{map_label}_va");
+    let mut new_filter = filter;
+    new_filter.push_str(&format!(
+        ";[{map_label}]format=nv12,hwupload[{upload_label}]"
+    ));
+    (new_filter, upload_label)
+}
+
+/// Resolve the export-side HW encoder family for a given codec under the
+/// user's [`HwEncoderMode`] preference. Returns `None` for codecs that
+/// have no usable HW path on this build (VP9 / ProRes — neither VA-API
+/// nor NVENC encode is broadly available for these on Linux), or when
+/// the requested HW backend isn't installed/loadable.
+///
+/// HW encoder availability is checked per-codec via `hwaccel::pick_encoder`,
+/// which examines the right caps fields (`vaapi_h264` vs `vaapi_h265`,
+/// `nvenc_h264` vs `nvenc_h265`). AV1 specifically requires the NVENC
+/// `av1_nvenc` encoder (RTX 40-series and newer) or VA-API `av1_vaapi`
+/// (Battlemage / newer Intel discrete and recent iGPUs).
+pub(crate) fn pick_export_encoder(
+    codec: VideoCodec,
+    mode: crate::ui_state::HwEncoderMode,
+) -> Option<crate::media::hwaccel::HwEncoderFamily> {
+    pick_export_encoder_with_caps(
+        codec,
+        mode,
+        crate::media::hwaccel::detect(),
+        crate::media::hwaccel::cuda_runtime_loadable(),
+    )
+}
+
+/// Test-friendly variant of [`pick_export_encoder`] that accepts caps +
+/// libcuda-loadable explicitly instead of probing the running system.
+/// Production code goes through [`pick_export_encoder`].
+pub(crate) fn pick_export_encoder_with_caps(
+    codec: VideoCodec,
+    mode: crate::ui_state::HwEncoderMode,
+    caps: &crate::media::hwaccel::HwEncoderCaps,
+    cuda_loadable: bool,
+) -> Option<crate::media::hwaccel::HwEncoderFamily> {
+    use crate::media::hwaccel;
+    match codec {
+        VideoCodec::H264 => {
+            hwaccel::pick_encoder(crate::ui_state::ProxyCodec::H264, mode, caps, cuda_loadable)
+        }
+        VideoCodec::H265 => {
+            hwaccel::pick_encoder(crate::ui_state::ProxyCodec::Hevc, mode, caps, cuda_loadable)
+        }
+        // AV1 hardware encode is rare and the picker doesn't probe it
+        // separately yet — defer to a future Phase 3 once we know which
+        // hardware deserves the wiring. Treat as software-only for now.
+        VideoCodec::Av1 => None,
+        // VP9 has no widely-deployed HW encoder on Linux. ProRes is an
+        // intermediate codec with no HW implementation. Keep both on SW.
+        VideoCodec::Vp9 | VideoCodec::ProRes => {
+            let _ = mode; // silence unused-warning when matched
+            None
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioCodec {
@@ -182,6 +251,11 @@ pub struct ExportOptions {
     /// output file (10-bit pixel format, PQ/HLG transfer characteristics,
     /// MaxCLL/MaxFALL). Only effective with H.265, VP9, or AV1 codecs.
     pub hdr_passthrough: bool,
+    /// Hardware encoder selection mode. Default = Off (libx264 / libx265 /
+    /// etc. — the historical behaviour). Phase 1: only H.264 with NVENC
+    /// is wired in; other codecs and VA-API export-side encoding are
+    /// follow-up work.
+    pub hw_encoder_mode: crate::ui_state::HwEncoderMode,
 }
 
 impl Default for ExportOptions {
@@ -197,8 +271,262 @@ impl Default for ExportOptions {
             gif_fps: None,
             audio_channel_layout: AudioChannelLayout::Stereo,
             hdr_passthrough: false,
+            hw_encoder_mode: crate::ui_state::HwEncoderMode::Off,
         }
     }
+}
+
+fn clip_source_distance_for_snapshot(clip: &Clip, local_timeline_ns: u64) -> u64 {
+    if clip.speed_keyframes.is_empty() {
+        clip.timeline_to_source_dur(local_timeline_ns)
+    } else {
+        clip.integrated_source_distance_for_local_timeline_ns(local_timeline_ns)
+            .round()
+            .max(0.0) as u64
+    }
+}
+
+fn trim_clip_for_export_snapshot(clip: &Clip, window_start: u64, window_end: u64) -> Option<Clip> {
+    let clip_start = clip.timeline_start.max(window_start);
+    let clip_end = clip.timeline_end().min(window_end);
+    if clip_end <= clip_start {
+        return None;
+    }
+
+    let left_trim = clip_start.saturating_sub(clip.timeline_start);
+    let kept_duration = clip_end.saturating_sub(clip_start);
+    let kept_end_local = left_trim.saturating_add(kept_duration);
+    let right_trim = clip.timeline_end().saturating_sub(clip_end);
+
+    let mut trimmed = clip.clone();
+    trimmed.timeline_start = clip_start;
+    if left_trim > 0 || right_trim > 0 {
+        trimmed.retain_keyframes_in_local_range(left_trim, kept_end_local);
+        trimmed.retain_subtitles_in_local_range(left_trim, kept_end_local);
+    }
+
+    if clip.is_freeze_frame() {
+        trimmed.freeze_frame_hold_duration_ns = Some(kept_duration.max(1));
+        return Some(trimmed);
+    }
+
+    let direct_source_mapping = matches!(
+        clip.kind,
+        ClipKind::Video | ClipKind::Audio | ClipKind::Multicam | ClipKind::Audition
+    ) || (clip.kind == ClipKind::Image && clip.animated_svg);
+
+    if direct_source_mapping {
+        let left_src = clip_source_distance_for_snapshot(clip, left_trim);
+        let end_src = clip_source_distance_for_snapshot(clip, kept_end_local);
+        if clip.reverse {
+            trimmed.source_in = clip.source_out.saturating_sub(end_src).max(clip.source_in);
+            trimmed.source_out = clip
+                .source_out
+                .saturating_sub(left_src)
+                .min(clip.source_out);
+        } else {
+            trimmed.source_in = clip.source_in.saturating_add(left_src).min(clip.source_out);
+            trimmed.source_out = clip.source_in.saturating_add(end_src).min(clip.source_out);
+        }
+        if trimmed.source_out <= trimmed.source_in {
+            trimmed.source_out = trimmed.source_in.saturating_add(1);
+        }
+    } else {
+        if left_trim > 0 {
+            trimmed.source_in = trimmed.source_in.saturating_add(left_trim);
+        }
+        if right_trim > 0 {
+            trimmed.source_out = trimmed.source_out.saturating_sub(right_trim);
+        }
+        if trimmed.source_out <= trimmed.source_in {
+            trimmed.source_out = trimmed.source_in.saturating_add(1);
+        }
+    }
+
+    Some(trimmed)
+}
+
+fn snapshot_transition_window(current: &Clip, next: &Clip) -> Option<(u64, u64)> {
+    let timing = clamped_primary_transition_timing(current, next)?;
+    Some((
+        current.timeline_end().saturating_sub(timing.before_cut_ns),
+        current.timeline_end().saturating_add(timing.after_cut_ns),
+    ))
+}
+
+fn snapshot_clip_active_window(sorted_clips: &[&Clip], clip_idx: usize) -> (u64, u64) {
+    let clip = sorted_clips[clip_idx];
+    let incoming_before_ns = clip_idx
+        .checked_sub(1)
+        .and_then(|prev_idx| {
+            sorted_clips
+                .get(prev_idx)
+                .and_then(|prev| clamped_primary_transition_timing(prev, clip))
+        })
+        .map(|timing| timing.before_cut_ns)
+        .unwrap_or(0);
+    let outgoing_after_ns = sorted_clips
+        .get(clip_idx + 1)
+        .and_then(|next| clamped_primary_transition_timing(clip, next))
+        .map(|timing| timing.after_cut_ns)
+        .unwrap_or(0);
+    (
+        clip.timeline_start.saturating_sub(incoming_before_ns),
+        clip.timeline_end().saturating_add(outgoing_after_ns),
+    )
+}
+
+fn build_export_snapshot_project(
+    project: &Project,
+    timeline_pos_ns: u64,
+) -> Result<(Project, u64)> {
+    let frame_duration_ns = project.frame_rate.frame_duration_ns().max(1);
+    let mut window_start = timeline_pos_ns;
+    let mut window_end = timeline_pos_ns.saturating_add(frame_duration_ns);
+
+    for track in project
+        .tracks
+        .iter()
+        .filter(|track| track.is_video())
+        .filter(|track| project.track_is_active_for_output(track))
+    {
+        let mut sorted_clips: Vec<&Clip> = track.clips.iter().collect();
+        sorted_clips.sort_by_key(|clip| clip.timeline_start);
+        for pair in sorted_clips.windows(2) {
+            let current = pair[0];
+            let next = pair[1];
+            if let Some((start_ns, end_ns)) = snapshot_transition_window(current, next) {
+                if timeline_pos_ns >= start_ns && timeline_pos_ns < end_ns {
+                    window_start = window_start.min(start_ns);
+                    window_end = window_end.max(end_ns);
+                }
+            }
+        }
+    }
+
+    let mut snapshot_project = project.clone();
+    snapshot_project.tracks = project
+        .tracks
+        .iter()
+        .filter(|track| track.is_video())
+        .filter(|track| project.track_is_active_for_output(track))
+        .filter_map(|track| {
+            let mut sorted_clips: Vec<&Clip> = track.clips.iter().collect();
+            sorted_clips.sort_by_key(|clip| clip.timeline_start);
+
+            let mut trimmed_clips: Vec<Clip> = Vec::new();
+            for (clip_idx, clip) in sorted_clips.iter().enumerate() {
+                let (active_start_ns, active_end_ns) =
+                    snapshot_clip_active_window(&sorted_clips, clip_idx);
+                if active_end_ns <= window_start || active_start_ns >= window_end {
+                    continue;
+                }
+
+                let mut trimmed = trim_clip_for_export_snapshot(clip, window_start, window_end)?;
+                trimmed.timeline_start = trimmed.timeline_start.saturating_sub(window_start);
+
+                let keep_transition = sorted_clips
+                    .get(clip_idx + 1)
+                    .and_then(|next| snapshot_transition_window(clip, next))
+                    .map(|(start_ns, end_ns)| {
+                        timeline_pos_ns >= start_ns && timeline_pos_ns < end_ns
+                    })
+                    .unwrap_or(false);
+                if !keep_transition {
+                    trimmed.clear_outgoing_transition();
+                }
+                trimmed_clips.push(trimmed);
+            }
+
+            if trimmed_clips.is_empty() {
+                None
+            } else {
+                let mut trimmed_track = track.clone();
+                trimmed_track.clips = trimmed_clips;
+                Some(trimmed_track)
+            }
+        })
+        .collect();
+    snapshot_project.markers.clear();
+    snapshot_project.reference_stills.clear();
+    snapshot_project.dirty = false;
+
+    if snapshot_project.tracks.is_empty() {
+        return Err(anyhow!("no active video frame at current playhead"));
+    }
+
+    Ok((
+        snapshot_project,
+        timeline_pos_ns.saturating_sub(window_start),
+    ))
+}
+
+fn extract_video_frame_to_png(
+    video_path: &Path,
+    output_path: &Path,
+    timeline_pos_ns: u64,
+) -> Result<()> {
+    if let Some(parent) = output_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| anyhow!("create compare-frame dir {:?}: {e}", parent))?;
+    }
+    let ffmpeg = find_ffmpeg()?;
+    let offset_s = timeline_pos_ns as f64 / 1_000_000_000.0;
+    let output = Command::new(&ffmpeg)
+        .arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-i")
+        .arg(video_path)
+        .arg("-ss")
+        .arg(format!("{offset_s:.6}"))
+        .arg("-frames:v")
+        .arg("1")
+        .arg("-an")
+        .arg("-f")
+        .arg("image2")
+        .arg(output_path)
+        .output()
+        .map_err(|e| anyhow!("Failed to start ffmpeg frame extract: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow!("ffmpeg frame extract failed: {}", stderr.trim()));
+    }
+    Ok(())
+}
+
+pub fn render_project_frame_to_png(
+    project: &Project,
+    timeline_pos_ns: u64,
+    output_path: &Path,
+    bg_removal_paths: &HashMap<String, String>,
+    frame_interp_paths: &HashMap<String, String>,
+    render_replace_paths: &HashMap<String, String>,
+) -> Result<()> {
+    let (snapshot_project, relative_pos_ns) =
+        build_export_snapshot_project(project, timeline_pos_ns)?;
+    let temp_dir = tempfile::tempdir()?;
+    let temp_movie_path = temp_dir.path().join("export-compare.mov");
+    let temp_movie_str = temp_movie_path.to_string_lossy().to_string();
+    let (tx, _rx) = mpsc::channel();
+    let options = ExportOptions {
+        video_codec: VideoCodec::ProRes,
+        container: Container::Mov,
+        audio_codec: AudioCodec::Pcm,
+        ..ExportOptions::default()
+    };
+    export_project(
+        &snapshot_project,
+        &temp_movie_str,
+        options,
+        None,
+        bg_removal_paths,
+        frame_interp_paths,
+        render_replace_paths,
+        tx,
+    )?;
+    extract_video_frame_to_png(&temp_movie_path, output_path, relative_pos_ns)
 }
 
 struct ActiveVideoTrackExportLayout<'a> {
@@ -411,6 +739,23 @@ pub fn export_project_with_cancel(
         .arg("-progress")
         .arg("pipe:2")
         .arg("-nostats");
+
+    // Pre-resolve the export-side HW encoder choice (Phase 2). Done up
+    // front so we can declare `-vaapi_device` before any input args
+    // (FFmpeg requires the global VAAPI device hint to come before the
+    // encoder element references it). `pick_export_encoder` returns the
+    // family that actually fits this codec — e.g. for VP9 / ProRes there
+    // is no usable HW path, so it returns `None` and the SW branch
+    // handles the encode unchanged.
+    let export_hw_family = pick_export_encoder(options.video_codec, options.hw_encoder_mode);
+    if matches!(
+        export_hw_family,
+        Some(crate::media::hwaccel::HwEncoderFamily::Vaapi)
+    ) {
+        if let Some(node) = crate::media::hwaccel::detect().vaapi_render_node.as_ref() {
+            cmd.arg("-vaapi_device").arg(node);
+        }
+    }
 
     // Helper: resolve effective source path (bg-removed version if available).
     // Helper: true when the clip's actual FFmpeg input is a bg-removed file (video-only, no audio).
@@ -1129,8 +1474,9 @@ pub fn export_project_with_cancel(
                 let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
                 let pre_pan = format!("{label}_prepan");
                 let post_pan = format!("{label}_panned");
+                let input_label = build_audio_input_label(i, clip);
                 filter.push_str(&format!(
-                ";[{i}:a]{areverse}{atempo}{enhance_part}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
+                ";[{input_label}]{areverse}{atempo}{enhance_part}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
                 // Primary video clips — find owning track for role + surround position + track gain/pan.
                 let owning_track = project
@@ -1222,8 +1568,9 @@ pub fn export_project_with_cancel(
                 let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
                 let pre_pan = format!("{label}_prepan");
                 let post_pan = format!("{label}_panned");
+                let input_label = build_audio_input_label(in_idx, clip);
                 filter.push_str(&format!(
-                ";[{in_idx}:a]{areverse}{atempo}{enhance_part}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
+                ";[{input_label}]{areverse}{atempo}{enhance_part}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]"
             ));
                 // Find the track for this secondary clip to get its role + surround position + track gain/pan.
                 let owning_track = project
@@ -1321,9 +1668,9 @@ pub fn export_project_with_cancel(
             let fade_filters = build_audio_crossfade_filters(clip, fades, crossfade_curve);
             let pre_pan = format!("{label}_prepan");
             let post_pan = format!("{label}_panned");
+            let input_label = build_audio_input_label(audio_base + j, clip);
             filter.push_str(&format!(
-            ";[{}:a]{areverse}{atempo}{enhance_part}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{duck_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]",
-            audio_base + j
+            ";[{input_label}]{areverse}{atempo}{enhance_part}{volume_filter}{ch_part}{pitch_part}{ladspa_part}{duck_part}{match_eq_part}{eq_part},{fade_filters}anull[{pre_pan}]",
         ));
             append_pan_filter_chain(
                 &mut filter,
@@ -1625,6 +1972,20 @@ pub fn export_project_with_cancel(
         filter
     };
 
+    // Phase 2 export-side VA-API: append `format=nv12,hwupload` so the
+    // CPU-side composited frame ends up as a VAAPI surface for the
+    // hardware encoder. The whole filter graph above is software so
+    // we only need the upload step at the very end. NVENC accepts CPU
+    // frames natively so it skips this step.
+    let (filter, map_label) = if matches!(
+        export_hw_family,
+        Some(crate::media::hwaccel::HwEncoderFamily::Vaapi)
+    ) {
+        append_vaapi_upload(filter, &map_label)
+    } else {
+        (filter, map_label)
+    };
+
     let mut filter_script_file = tempfile::NamedTempFile::new()?;
     filter_script_file.write_all(filter.as_bytes())?;
 
@@ -1679,29 +2040,96 @@ pub fn export_project_with_cancel(
     } else {
         match options.video_codec {
             VideoCodec::H264 => {
-                cmd.arg("-c:v")
-                    .arg("libx264")
-                    .arg("-crf")
-                    .arg(options.crf.to_string())
-                    .arg("-pix_fmt")
-                    .arg("yuv420p");
+                use crate::media::hwaccel::HwEncoderFamily;
+                match export_hw_family {
+                    Some(HwEncoderFamily::Nvenc) => {
+                        log::info!("export: using h264_nvenc");
+                        cmd.arg("-c:v")
+                            .arg("h264_nvenc")
+                            .arg("-preset")
+                            .arg("p5")
+                            .arg("-cq")
+                            .arg(options.crf.to_string())
+                            .arg("-rc")
+                            .arg("constqp")
+                            .arg("-pix_fmt")
+                            .arg("yuv420p");
+                    }
+                    Some(HwEncoderFamily::Vaapi) => {
+                        log::info!("export: using h264_vaapi");
+                        cmd.arg("-c:v")
+                            .arg("h264_vaapi")
+                            // VA-API uses QP (0–51) where lower is better,
+                            // mirroring CRF semantics closely enough that
+                            // we can pass the CRF value through directly.
+                            .arg("-qp")
+                            .arg(options.crf.to_string());
+                    }
+                    None => {
+                        cmd.arg("-c:v")
+                            .arg("libx264")
+                            .arg("-crf")
+                            .arg(options.crf.to_string())
+                            .arg("-pix_fmt")
+                            .arg("yuv420p");
+                    }
+                }
             }
             VideoCodec::H265 => {
-                cmd.arg("-c:v")
-                    .arg("libx265")
-                    .arg("-crf")
-                    .arg(options.crf.to_string());
-                if options.hdr_passthrough {
-                    cmd.arg("-pix_fmt").arg("yuv420p10le");
-                    cmd.arg("-x265-params").arg(
-                        "hdr-opt=1:repeat-headers=1:colorprim=bt2020:\
-                         transfer=smpte2084:colormatrix=bt2020nc",
-                    );
-                    cmd.arg("-color_primaries").arg("bt2020");
-                    cmd.arg("-color_trc").arg("smpte2084");
-                    cmd.arg("-colorspace").arg("bt2020nc");
-                } else {
-                    cmd.arg("-pix_fmt").arg("yuv420p");
+                use crate::media::hwaccel::HwEncoderFamily;
+                match export_hw_family {
+                    Some(HwEncoderFamily::Nvenc) => {
+                        log::info!("export: using hevc_nvenc");
+                        cmd.arg("-c:v").arg("hevc_nvenc").arg("-preset").arg("p5");
+                        if options.hdr_passthrough {
+                            // NVENC HEVC supports 10-bit Main10 directly.
+                            cmd.arg("-pix_fmt").arg("p010le");
+                            cmd.arg("-color_primaries").arg("bt2020");
+                            cmd.arg("-color_trc").arg("smpte2084");
+                            cmd.arg("-colorspace").arg("bt2020nc");
+                        } else {
+                            cmd.arg("-pix_fmt").arg("yuv420p");
+                        }
+                        cmd.arg("-cq")
+                            .arg(options.crf.to_string())
+                            .arg("-rc")
+                            .arg("constqp");
+                    }
+                    Some(HwEncoderFamily::Vaapi) => {
+                        log::info!("export: using hevc_vaapi");
+                        cmd.arg("-c:v")
+                            .arg("hevc_vaapi")
+                            .arg("-qp")
+                            .arg(options.crf.to_string());
+                        if options.hdr_passthrough {
+                            // hevc_vaapi accepts p010 input on most modern
+                            // Intel/AMD VAAPI implementations. Older drivers
+                            // may need yuv420p10le; if users hit that, the
+                            // session-level HW encoder blacklist will fall
+                            // them back to libx265 automatically.
+                            cmd.arg("-color_primaries").arg("bt2020");
+                            cmd.arg("-color_trc").arg("smpte2084");
+                            cmd.arg("-colorspace").arg("bt2020nc");
+                        }
+                    }
+                    None => {
+                        cmd.arg("-c:v")
+                            .arg("libx265")
+                            .arg("-crf")
+                            .arg(options.crf.to_string());
+                        if options.hdr_passthrough {
+                            cmd.arg("-pix_fmt").arg("yuv420p10le");
+                            cmd.arg("-x265-params").arg(
+                                "hdr-opt=1:repeat-headers=1:colorprim=bt2020:\
+                                 transfer=smpte2084:colormatrix=bt2020nc",
+                            );
+                            cmd.arg("-color_primaries").arg("bt2020");
+                            cmd.arg("-color_trc").arg("smpte2084");
+                            cmd.arg("-colorspace").arg("bt2020nc");
+                        } else {
+                            cmd.arg("-pix_fmt").arg("yuv420p");
+                        }
+                    }
                 }
             }
             VideoCodec::Vp9 => {
@@ -1811,6 +2239,45 @@ pub fn export_project_with_cancel(
     }
     if !status.success() {
         let detail = error_lines.join("; ");
+        // HW → SW fallback: when this attempt actually used a hardware
+        // encoder family, recurse once with `hw_encoder_mode = Off` so a
+        // runtime VA-API / NVENC failure (driver issue, codec init error,
+        // unusual input) degrades to libx264 / libx265 instead of erroring
+        // out to the user. Mirrors the proxy_cache 3-attempt fallback
+        // pattern; export only needs HW → SW since there's no decode-side
+        // dimension to retry.
+        if export_hw_family.is_some()
+            && options.hw_encoder_mode != crate::ui_state::HwEncoderMode::Off
+        {
+            let fam_label = match export_hw_family {
+                Some(crate::media::hwaccel::HwEncoderFamily::Nvenc) => "nvenc",
+                Some(crate::media::hwaccel::HwEncoderFamily::Vaapi) => "vaapi",
+                None => "?",
+            };
+            log::warn!(
+                "export: hw encoder ({fam_label}) failed for {output_path}, falling back to software: {detail}"
+            );
+            // Drop the partial HW output before retrying so the SW pass
+            // doesn't see a half-written file at the same path.
+            let _ = std::fs::remove_file(output_path);
+            // Clean up any vidstab artifacts the HW attempt may have left.
+            for trf in vidstab_trf.values() {
+                let _ = std::fs::remove_file(trf);
+            }
+            let mut sw_options = options.clone();
+            sw_options.hw_encoder_mode = crate::ui_state::HwEncoderMode::Off;
+            return export_project_with_cancel(
+                project,
+                output_path,
+                sw_options,
+                estimated_size_bytes,
+                bg_removal_paths,
+                frame_interp_paths,
+                render_replace_paths,
+                tx,
+                cancel_flag,
+            );
+        }
         let msg = format!("ffmpeg export failed: {detail}");
         let _ = tx.send(ExportProgress::Error(msg.clone()));
         return Err(anyhow!("{msg}"));
@@ -4122,12 +4589,8 @@ fn build_timecode_burnin_filter(
     let (x_expr, y_expr): (String, String) = match position {
         TimecodeBurninPosition::TopLeft => (format!("{margin}"), format!("{margin}")),
         TimecodeBurninPosition::TopCenter => ("(w-text_w)/2".to_string(), format!("{margin}")),
-        TimecodeBurninPosition::TopRight => {
-            (format!("w-text_w-{margin}"), format!("{margin}"))
-        }
-        TimecodeBurninPosition::BottomLeft => {
-            (format!("{margin}"), format!("h-text_h-{margin}"))
-        }
+        TimecodeBurninPosition::TopRight => (format!("w-text_w-{margin}"), format!("{margin}")),
+        TimecodeBurninPosition::BottomLeft => (format!("{margin}"), format!("h-text_h-{margin}")),
         TimecodeBurninPosition::BottomCenter => {
             ("(w-text_w)/2".to_string(), format!("h-text_h-{margin}"))
         }
@@ -5558,13 +6021,40 @@ fn build_surround_lfe_tap_filter(
 
 /// Build an FFmpeg filter for audio channel routing (Left/Right/MonoMix).
 /// Returns empty string for Stereo (default passthrough).
+fn build_audio_input_label(input_idx: usize, clip: &crate::model::clip::Clip) -> String {
+    format!("{input_idx}:a:{}", clip.clamped_audio_source_stream_index())
+}
+
 fn build_channel_filter(clip: &crate::model::clip::Clip) -> String {
     use crate::model::clip::AudioChannelMode;
+
+    let channel_count = clip.selected_audio_stream_channel_count();
+    let (left_idx, right_idx) = clip.selected_audio_channel_indices();
+    let passthrough_stereo = matches!(clip.audio_channel_mode, AudioChannelMode::Stereo)
+        && channel_count <= 2
+        && left_idx == 0;
+    if passthrough_stereo {
+        return String::new();
+    }
+
     match clip.audio_channel_mode {
-        AudioChannelMode::Stereo => String::new(),
-        AudioChannelMode::Left => "pan=stereo|c0=c0|c1=c0".to_string(),
-        AudioChannelMode::Right => "pan=stereo|c0=c1|c1=c1".to_string(),
-        AudioChannelMode::MonoMix => "pan=stereo|c0=0.5*c0+0.5*c1|c1=0.5*c0+0.5*c1".to_string(),
+        AudioChannelMode::Stereo => match right_idx {
+            Some(right_idx) => format!("pan=stereo|c0=c{left_idx}|c1=c{right_idx}"),
+            None => format!("pan=stereo|c0=c{left_idx}|c1=c{left_idx}"),
+        },
+        AudioChannelMode::Left => format!("pan=stereo|c0=c{left_idx}|c1=c{left_idx}"),
+        AudioChannelMode::Right => {
+            let right_idx = right_idx.unwrap_or(left_idx);
+            format!("pan=stereo|c0=c{right_idx}|c1=c{right_idx}")
+        }
+        AudioChannelMode::MonoMix => match right_idx {
+            Some(right_idx) => {
+                format!(
+                    "pan=stereo|c0=0.5*c{left_idx}+0.5*c{right_idx}|c1=0.5*c{left_idx}+0.5*c{right_idx}"
+                )
+            }
+            None => format!("pan=stereo|c0=c{left_idx}|c1=c{left_idx}"),
+        },
     }
 }
 
@@ -5990,6 +6480,9 @@ pub fn analyze_project_loudness(project: &Project) -> Result<LoudnessReport> {
         gif_fps: None,
         audio_channel_layout: AudioChannelLayout::Stereo,
         hdr_passthrough: false,
+        // Loudness analysis is deterministic-by-codec; HW encoder choice
+        // doesn't affect the audio probe, so leave it Off.
+        hw_encoder_mode: crate::ui_state::HwEncoderMode::Off,
     };
 
     let (tx, _rx) = mpsc::channel();
@@ -6329,10 +6822,11 @@ fn flatten_clips(
 #[cfg(test)]
 mod tests {
     use super::{
-        adjustment_roi_padding_px, append_pan_filter_chain, audio_crossfade_curve_name,
-        build_adjustment_export_roi, build_adjustment_layer_filter_graph,
-        build_adjustment_scope_alpha_expression, build_audio_crossfade_filters, build_color_filter,
-        build_crop_filter, build_grading_filter, build_hsl_qualifier_filter,
+        adjustment_roi_padding_px, append_pan_filter_chain, append_vaapi_upload,
+        audio_crossfade_curve_name, build_adjustment_export_roi,
+        build_adjustment_layer_filter_graph, build_adjustment_scope_alpha_expression,
+        build_audio_crossfade_filters, build_color_filter, build_crop_filter,
+        build_export_snapshot_project, build_grading_filter, build_hsl_qualifier_filter,
         build_keyframed_property_expression, build_pan_expression, build_rotation_filter,
         build_scale_position_filter, build_subtitle_filter_composited,
         build_surround_lfe_tap_filter, build_surround_upmix_filter, build_temperature_tint_filter,
@@ -6352,6 +6846,7 @@ mod tests {
     };
     use crate::model::project::Project;
     use crate::model::track::{AudioRole, SurroundPositionOverride};
+    use crate::model::transition::{OutgoingTransition, TransitionAlignment};
     use crate::ui_state::CrossfadeCurve;
     use gstreamer as gst;
     use std::process::Command;
@@ -7921,8 +8416,12 @@ mod tests {
             numerator: 30000,
             denominator: 1001,
         };
-        let f =
-            super::build_timecode_burnin_filter(TimecodeBurninPosition::BottomCenter, &fr, 1920, 1080);
+        let f = super::build_timecode_burnin_filter(
+            TimecodeBurninPosition::BottomCenter,
+            &fr,
+            1920,
+            1080,
+        );
         assert!(f.starts_with("drawtext="), "filter: {f}");
         assert!(
             f.contains("timecode='00\\:00\\:00\\:00'"),
@@ -7944,11 +8443,24 @@ mod tests {
         let tl =
             super::build_timecode_burnin_filter(TimecodeBurninPosition::TopLeft, &fr, 1920, 1080);
         assert!(tl.contains("x='"), "x expr present: {tl}");
-        assert!(!tl.contains("h-text_h-"), "TopLeft has no bottom anchor: {tl}");
-        let br =
-            super::build_timecode_burnin_filter(TimecodeBurninPosition::BottomRight, &fr, 1920, 1080);
-        assert!(br.contains("w-text_w-"), "BottomRight anchors x to right: {br}");
-        assert!(br.contains("h-text_h-"), "BottomRight anchors y to bottom: {br}");
+        assert!(
+            !tl.contains("h-text_h-"),
+            "TopLeft has no bottom anchor: {tl}"
+        );
+        let br = super::build_timecode_burnin_filter(
+            TimecodeBurninPosition::BottomRight,
+            &fr,
+            1920,
+            1080,
+        );
+        assert!(
+            br.contains("w-text_w-"),
+            "BottomRight anchors x to right: {br}"
+        );
+        assert!(
+            br.contains("h-text_h-"),
+            "BottomRight anchors y to bottom: {br}"
+        );
     }
 
     #[test]
@@ -7958,8 +8470,7 @@ mod tests {
             numerator: 30,
             denominator: 1,
         };
-        let f =
-            super::build_timecode_burnin_filter(TimecodeBurninPosition::TopLeft, &fr, 0, 1080);
+        let f = super::build_timecode_burnin_filter(TimecodeBurninPosition::TopLeft, &fr, 0, 1080);
         assert!(f.is_empty(), "0-width returns empty filter: {f}");
     }
 
@@ -8776,6 +9287,67 @@ mod tests {
         assert_eq!(video_clips[0].timeline_start, 2_000);
     }
 
+    #[test]
+    fn export_snapshot_project_trims_reverse_clip_source_window() {
+        let mut project = Project::new("snapshot-reverse");
+        project.tracks.clear();
+        project.frame_rate.numerator = 1;
+        project.frame_rate.denominator = 1;
+
+        let mut clip = Clip::new("rev.mp4", 10_000_000_000, 0, ClipKind::Video);
+        clip.reverse = true;
+
+        let mut track = crate::model::track::Track::new_video("V1");
+        track.clips.push(clip);
+        project.tracks.push(track);
+
+        let (snapshot, relative_ns) =
+            build_export_snapshot_project(&project, 4_000_000_000).expect("snapshot project");
+        assert_eq!(relative_ns, 0);
+        assert_eq!(snapshot.tracks.len(), 1);
+        assert_eq!(snapshot.tracks[0].clips.len(), 1);
+        let trimmed = &snapshot.tracks[0].clips[0];
+        assert_eq!(trimmed.timeline_start, 0);
+        assert_eq!(trimmed.duration(), 1_000_000_000);
+        assert_eq!(trimmed.source_in, 5_000_000_000);
+        assert_eq!(trimmed.source_out, 6_000_000_000);
+    }
+
+    #[test]
+    fn export_snapshot_project_preserves_transition_overlap_at_playhead() {
+        let mut project = Project::new("snapshot-transition");
+        project.tracks.clear();
+        project.frame_rate.numerator = 1;
+        project.frame_rate.denominator = 1;
+
+        let mut left = Clip::new("left.mp4", 5_000_000_000, 0, ClipKind::Video);
+        left.outgoing_transition = OutgoingTransition {
+            kind: "cross_dissolve".into(),
+            duration_ns: 2_000_000_000,
+            alignment: TransitionAlignment::CenterOnCut,
+        };
+        let right = Clip::new("right.mp4", 5_000_000_000, 5_000_000_000, ClipKind::Video);
+
+        let mut track = crate::model::track::Track::new_video("V1");
+        track.clips.push(left);
+        track.clips.push(right);
+        project.tracks.push(track);
+
+        let (snapshot, relative_ns) =
+            build_export_snapshot_project(&project, 4_500_000_000).expect("snapshot project");
+        assert_eq!(relative_ns, 500_000_000);
+        assert_eq!(snapshot.tracks.len(), 1);
+        assert_eq!(snapshot.tracks[0].clips.len(), 2);
+
+        let left = &snapshot.tracks[0].clips[0];
+        let right = &snapshot.tracks[0].clips[1];
+        assert_eq!(left.timeline_start, 0);
+        assert_eq!(left.duration(), 1_000_000_000);
+        assert!(left.outgoing_transition.is_active());
+        assert_eq!(right.timeline_start, 1_000_000_000);
+        assert_eq!(right.duration(), 1_000_000_000);
+    }
+
     // ── Advanced Audio Mode (surround) tests ──────────────────────────────
 
     #[test]
@@ -9006,5 +9578,99 @@ mod tests {
             .map(|p| p.split('=').next().unwrap_or(""))
             .collect();
         assert_eq!(order, vec!["FL", "FR", "FC", "LFE", "BL", "BR", "SL", "SR"]);
+    }
+
+    // ----- HW encoder picker + filter mutation tests (Phase 2 follow-up) -----
+
+    fn caps_with_full_hw() -> crate::media::hwaccel::HwEncoderCaps {
+        crate::media::hwaccel::HwEncoderCaps {
+            vaapi_h264: true,
+            vaapi_h265: true,
+            vaapi_device_present: true,
+            vaapi_render_node: Some(std::path::PathBuf::from("/dev/dri/renderD128")),
+            render_node_blocked_by_permissions: false,
+            vaapi_init_ok: true,
+            qsv_init_ok: true,
+            nvenc_h264: true,
+            nvenc_h265: true,
+            hwaccels_available: vec!["cuda".into(), "qsv".into(), "vaapi".into()],
+        }
+    }
+
+    #[test]
+    fn pick_export_encoder_h264_picks_nvenc_when_loadable() {
+        // libcuda loadable + nvenc available + Auto mode → Nvenc preferred.
+        let caps = caps_with_full_hw();
+        assert_eq!(
+            super::pick_export_encoder_with_caps(
+                VideoCodec::H264,
+                crate::ui_state::HwEncoderMode::Auto,
+                &caps,
+                true,
+            ),
+            Some(crate::media::hwaccel::HwEncoderFamily::Nvenc),
+        );
+    }
+
+    #[test]
+    fn pick_export_encoder_hevc_uses_hevc_caps() {
+        // Synthesise caps with H.264 family enabled but not H.265.
+        // VideoCodec::H265 must consult hevc_h264 / nvenc_h265 only —
+        // returning None when those flags are off proves the codec→caps
+        // routing is correct (regression guard against accidental
+        // h264/h265 cross-talk in pick_encoder).
+        let mut caps = caps_with_full_hw();
+        caps.vaapi_h265 = false;
+        caps.nvenc_h265 = false;
+        assert_eq!(
+            super::pick_export_encoder_with_caps(
+                VideoCodec::H265,
+                crate::ui_state::HwEncoderMode::Auto,
+                &caps,
+                true,
+            ),
+            None,
+        );
+        // H.264 with the same caps still picks Nvenc — confirms we
+        // didn't accidentally read the H.265 flags for the H.264 path.
+        assert_eq!(
+            super::pick_export_encoder_with_caps(
+                VideoCodec::H264,
+                crate::ui_state::HwEncoderMode::Auto,
+                &caps,
+                true,
+            ),
+            Some(crate::media::hwaccel::HwEncoderFamily::Nvenc),
+        );
+    }
+
+    #[test]
+    fn pick_export_encoder_vp9_prores_av1_always_software() {
+        // Phase 2 keeps VP9 / ProRes / AV1 on the SW path even with full
+        // HW caps. Phase 3 will add av1_nvenc / av1_vaapi detection;
+        // this test will need updating then.
+        let caps = caps_with_full_hw();
+        for codec in [VideoCodec::Vp9, VideoCodec::ProRes, VideoCodec::Av1] {
+            assert_eq!(
+                super::pick_export_encoder_with_caps(
+                    codec,
+                    crate::ui_state::HwEncoderMode::Auto,
+                    &caps,
+                    true,
+                ),
+                None,
+                "{codec:?} must remain on software encoder path",
+            );
+        }
+    }
+
+    #[test]
+    fn vaapi_filter_graph_appends_hwupload() {
+        let (filter, label) = append_vaapi_upload("[v0]format=yuv420p[vout]".to_string(), "vout");
+        assert_eq!(label, "vout_va");
+        assert!(filter.ends_with(";[vout]format=nv12,hwupload[vout_va]"));
+        // Pre-existing graph content must be preserved verbatim — the
+        // helper is purely additive.
+        assert!(filter.starts_with("[v0]format=yuv420p[vout]"));
     }
 }

@@ -179,6 +179,25 @@ Video stabilization compensates camera shake using ffmpeg's libvidstab (two-pass
 | **Voice Isolation** | 0% → 100% | Off | Ducks volume between spoken words. See **Voice Isolation Source** below. |
 | **Pan** | −1.0 → 1.0 | 0.0 | Stereo position (−1 = full left, +1 = full right) |
 
+#### Source stream / pair selection
+
+When a source file has more than one audio stream or more than two channels,
+the Audio section now exposes two extra controls above **Channels**:
+
+| Control | What it does |
+|---|---|
+| **Source Stream** | Chooses which embedded audio stream to read from the source file (`Stream 1`, `Stream 2`, etc.). The label also shows the probed layout / sample rate / optional language or stream title when available. |
+| **Source Pair** | Chooses which channel pair from that stream feeds the existing clip routing mode. For example, a 5.1 stream exposes `Channels 1-2`, `Channels 3-4`, and `Channels 5-6`; odd channel counts expose the trailing single channel as `Channel N`. |
+
+These controls work *with* the existing **Channels** dropdown:
+
+- **Stereo** keeps the selected pair as stereo.
+- **Left Only** and **Right Only** let you isolate either side of the selected pair.
+- **Mono Mix** folds the selected pair (or trailing single channel) to mono.
+
+UltimateSlice saves the chosen stream/pair back to the library item, so future
+placements from the same source start with the same routing preference.
+
 #### Enhance Voice
 
 Toggling **Enhance Voice** on a clip runs a fixed FFmpeg cleanup chain on its

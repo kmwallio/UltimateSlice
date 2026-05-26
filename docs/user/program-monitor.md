@@ -36,6 +36,40 @@ or outside the export frame.
 | ▾ Scopes toggle | Show/hide the docked color scopes panel (waveform, histogram, vectorscope, RGB parade) |
 | Loudness button | Next to the Scopes toggle — opens the Loudness Radar popover for broadcast-standard EBU R128 analysis + normalize-to-target |
 
+## A/B Compare and Export Compare
+
+Open **Overlays** in the Program Monitor header to access the **Reference stills**
+section:
+
+- **Capture current frame** stores the live Program Monitor compositor output as a
+  compare still.
+- **Render export frame** runs the current playhead frame through the export
+  pipeline and stores that rendered result as a compare still. If the active
+  compare still is already an **Export** still, the button refreshes it in place
+  instead of creating another slot.
+- **A/B compare** toggles a vertical wipe between the live monitor frame and the
+  active reference still. Drag the midline to slide the split.
+- The still strip labels each item as **Live** or **Export** so you can tell
+  whether you are comparing against a captured preview frame or an
+  export-rendered parity frame.
+
+This is the fastest way to inspect preview/export parity for color, LUT, HDR
+tone-map, and compositing differences without running a full delivery export.
+
+Reference stills are capped at 4 per project. They are review aids, not timeline
+media: deleting one never affects clips on the timeline.
+
+### MCP automation
+
+The compare workflow is also scriptable:
+
+- `capture_reference_still` stores the live Program Monitor frame.
+- `capture_export_compare_still` renders the current playhead frame through the
+  export path and stores it as an **Export** compare still.
+- `set_program_monitor_ab_compare` selects the active compare still / wipe state.
+- `list_reference_stills` reports each still's `origin` (`live_preview` or
+  `export_render`) so automation can distinguish the two.
+
 ## Loudness Radar (EBU R128)
 
 The **Loudness** button next to the **▾ Scopes** toggle (below the
@@ -181,7 +215,10 @@ When **Motion Tracking → Edit Region in Monitor** is enabled for the selected 
   - **DROP** — cumulative video frames the preview pipeline has dropped
     under QoS pressure since the project was loaded. Reset on project
     open/new; a steadily climbing counter is a hint to drop preview
-    quality, enable proxies, or enable background prerender.
+    quality, enable proxies, or enable background prerender. On simple
+    single-clip playback this should usually stay at `0`; if it climbs,
+    the monitor is still shedding presentation frames somewhere in the
+    live preview path.
 - The HUD does not appear in export output — it is a monitoring overlay only.
 - Toggle state persists across launches (stored with the other Program Monitor
   overlay toggles in `ui-state.json`). The MCP tool `set_program_monitor_hud`
@@ -220,6 +257,71 @@ When **Motion Tracking → Edit Region in Monitor** is enabled for the selected 
   (`none` / `cinemascope` / `univisium` / `academy` / `standard` /
   `square` / `social_45` / `vertical`) flips the same setting from
   automation.
+
+## Proxy Watermark
+
+- Toggle **Overlays ▾ → Proxy watermark** to show a small soft-blue **PROXY**
+  pill in the top-right corner of the Program Monitor whenever the currently
+  active playback clip is being served from a proxy file rather than the
+  original media. Default on.
+- Mirrors the timeline PROXY badge but lives in the preview pane, so you
+  can tell at a glance that the frames you're seeing aren't full resolution.
+- The pill is preview-only — it never appears in export, prerender, or
+  still-frame capture output.
+- Appearance is AND-gated with the per-clip proxy-resolution check: even
+  with the toggle on, the pill stays hidden when the current playhead
+  plays an original (non-proxied) clip.
+- State persists across launches (`ProgramMonitorState.show_proxy_watermark`
+  in `ui-state.json`).
+
+## Precision Trim Display
+
+Shows source frames at the edit points during an active timeline trim drag,
+so you can see exactly what's on either side of the cut while dragging.
+
+- **2-up** (side-by-side) appears during **Trim In**, **Trim Out**, and **Roll**
+  drags. Left pane is the outgoing frame (`New out` for the clip being
+  trimmed, or `Prev out` for the previous clip's last frame); right pane is
+  the incoming frame (`New in` or `Next in`).
+- **4-up** (2×2 grid) appears during **Slip** and **Slide** drags. Slots are
+  `Prev out · Clip in · Clip out · Next in`. The middle two update in real
+  time as you slip (source window shifts) or slide (position + neighbor
+  edit points shift).
+- Frame captions include the source timecode at that edit point, updated
+  live as you drag.
+- If the clip is at the edge of a track with no neighbor on one side, that
+  slot shows a `—` placeholder so the layout stays stable.
+- The overlay auto-clears when you release the mouse; no separate toggle
+  action is needed per drag.
+- Pressing **Enter** while the timeline has focus and **Ripple**, **Roll**,
+  **Slip**, or **Slide** is the active tool opens a modal **Precision Trim**
+  session instead of a mouse drag. The overlay stays pinned on screen with a
+  title bar showing the edit mode and frame delta (`+1f`, `-2f`, etc.) while
+  you nudge.
+- During that session, use **Left/Right** to step by 1 frame,
+  **Shift+Left/Right** to step by 5 frames, **Enter** to commit, and
+  **Escape** to cancel back to the original edit.
+- Sourceless clip kinds (compounds, titles, adjustment layers) skip the
+  overlay because they have no extractable source frame.
+- Follows into the pop-out Program Monitor window automatically.
+
+### Enabling / Disabling
+
+- Open **Overlays ▾** in the Program Monitor header and pick from the
+  **Precision trim** dropdown:
+  - **Auto** (default) — 2-up for Trim/Roll, 4-up for Slip/Slide.
+  - **Off** — no overlay; drags show only the timeline ghost clip and
+    in/out badge.
+- The selected mode persists across launches in `ui-state.json` next to the
+  other Program Monitor overlay toggles.
+
+### Performance Notes
+
+- Frames are extracted in the background via a dedicated async ThumbnailCache.
+  A brief `Loading…` placeholder appears on first hover of a new frame
+  position; subsequent hits use the cached image.
+- The overlay is preview-only — it never appears in export, prerender, or
+  still-frame capture output, and it never triggers pipeline rebuilds.
 
 ## Playback Behaviour
 

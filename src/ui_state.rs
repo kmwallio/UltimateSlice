@@ -51,6 +51,15 @@ pub struct ProgramMonitorState {
     /// no-op even if `ab_compare_enabled` is true.
     #[serde(default)]
     pub ab_reference_still_id: Option<String>,
+    /// Precision trim display mode shown during slip/slide/roll/trim drags.
+    #[serde(default)]
+    pub trim_display_mode: TrimDisplayMode,
+    /// Show a small "PROXY" pill in the Program Monitor when the currently
+    /// active playback clip is being served from a proxy file rather than
+    /// the original media. Defaults to on — informational, never appears in
+    /// export output.
+    #[serde(default = "default_show_proxy_watermark")]
+    pub show_proxy_watermark: bool,
 }
 
 /// Delivery-format letterbox/pillarbox preview selected from the Program
@@ -138,8 +147,46 @@ impl AspectMaskPreset {
     }
 }
 
+/// Precision trim display mode shown over the Program Monitor during an
+/// active timeline slip/slide/roll/trim drag.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrimDisplayMode {
+    /// No precision overlay — drags show only the timeline ghost + badge.
+    Off,
+    /// Two-up (Trim In/Out/Roll) or four-up (Slip/Slide), chosen by active tool.
+    #[default]
+    Auto,
+}
+
+impl TrimDisplayMode {
+    pub const ALL: [TrimDisplayMode; 2] = [TrimDisplayMode::Off, TrimDisplayMode::Auto];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            TrimDisplayMode::Off => "Off",
+            TrimDisplayMode::Auto => "Auto",
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TrimDisplayMode::Off => "off",
+            TrimDisplayMode::Auto => "auto",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Option<TrimDisplayMode> {
+        Self::ALL.iter().copied().find(|m| m.as_str() == s)
+    }
+}
+
 fn default_zebra_threshold() -> f64 {
     0.90
+}
+
+fn default_show_proxy_watermark() -> bool {
+    true
 }
 
 fn default_ab_midline() -> f64 {
@@ -235,6 +282,8 @@ impl Default for ProgramMonitorState {
             ab_compare_enabled: false,
             ab_midline_percent: default_ab_midline(),
             ab_reference_still_id: None,
+            trim_display_mode: TrimDisplayMode::default(),
+            show_proxy_watermark: default_show_proxy_watermark(),
         }
     }
 }
@@ -718,12 +767,56 @@ pub fn clamp_prerender_crf(value: u32) -> u32 {
     value.clamp(MIN_PRERENDER_CRF, MAX_PRERENDER_CRF)
 }
 
+/// User preference controlling whether the FFmpeg-based proxy and background
+/// prerender pipelines try a hardware H.264 encoder before falling back to
+/// `libx264`. The export pipeline does its own encoder selection today and
+/// is intentionally not affected by this preference.
+///
+/// `Auto` is a no-op when no hardware encoder family is detected at startup,
+/// so users can leave it on safely.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HwEncoderMode {
+    Off,
+    Auto,
+    Vaapi,
+    Nvenc,
+}
+
+impl Default for HwEncoderMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl HwEncoderMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Auto => "auto",
+            Self::Vaapi => "vaapi",
+            Self::Nvenc => "nvenc",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "off" => Self::Off,
+            "vaapi" => Self::Vaapi,
+            "nvenc" => Self::Nvenc,
+            _ => Self::Auto,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProxyMode {
     Off,
-    HalfRes,
-    QuarterRes,
+    P1080,
+    P720,
+    P540,
+    P640,
 }
 
 impl Default for ProxyMode {
@@ -736,15 +829,20 @@ impl ProxyMode {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Off => "off",
-            Self::HalfRes => "half_res",
-            Self::QuarterRes => "quarter_res",
+            Self::P1080 => "p1080",
+            Self::P720 => "p720",
+            Self::P540 => "p540",
+            Self::P640 => "p640",
         }
     }
 
     pub fn from_str(value: &str) -> Self {
+        // Accept legacy fractional names so saved settings/scripts keep working.
         match value {
-            "half_res" => Self::HalfRes,
-            "quarter_res" => Self::QuarterRes,
+            "p1080" | "half_res" => Self::P1080,
+            "p720" => Self::P720,
+            "p540" => Self::P540,
+            "p640" | "quarter_res" => Self::P640,
             _ => Self::Off,
         }
     }
@@ -755,7 +853,41 @@ impl ProxyMode {
 }
 
 fn default_last_non_off_proxy_mode() -> ProxyMode {
-    ProxyMode::HalfRes
+    ProxyMode::P1080
+}
+
+/// Codec used to encode proxy files. Defaults to H.264 for compatibility
+/// with everything; HEVC produces smaller files at the same visual
+/// quality and on Intel iGPUs the dedicated HEVC encoder is often faster
+/// per frame than the H.264 encoder for very-high-resolution sources
+/// (less compression work per output pixel).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyCodec {
+    H264,
+    Hevc,
+}
+
+impl Default for ProxyCodec {
+    fn default() -> Self {
+        Self::H264
+    }
+}
+
+impl ProxyCodec {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::H264 => "h264",
+            Self::Hevc => "hevc",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "hevc" | "h265" => Self::Hevc,
+            _ => Self::H264,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -990,6 +1122,11 @@ impl ExportPreset {
             audio_bitrate_kbps: self.audio_bitrate_kbps,
             gif_fps: self.gif_fps,
             audio_channel_layout: self.audio_channel_layout.to_layout(),
+            // ExportPreset doesn't currently round-trip hw_encoder_mode —
+            // the user's *current* preference is applied at export time
+            // by the toolbar/MCP plumbing, not baked into the saved
+            // preset. Default to Off here so test loads stay deterministic.
+            hw_encoder_mode: HwEncoderMode::Off,
             hdr_passthrough: self.hdr_passthrough,
         }
     }
@@ -1230,6 +1367,96 @@ pub struct ExportQueueState {
     pub jobs: Vec<ExportQueueJob>,
 }
 
+impl ExportQueueState {
+    /// Reorder a pending job by removing it from its current slot and
+    /// inserting it just before `target_id` (also a pending job). Both
+    /// jobs must be Pending — running/done/error jobs are anchored.
+    /// Returns true if the move happened.
+    pub fn move_pending_before(&mut self, src_id: &str, target_id: &str) -> bool {
+        if src_id == target_id {
+            return false;
+        }
+        let src_idx = match self
+            .jobs
+            .iter()
+            .position(|j| j.id == src_id && j.status == ExportQueueJobStatus::Pending)
+        {
+            Some(i) => i,
+            None => return false,
+        };
+        let target_idx = match self
+            .jobs
+            .iter()
+            .position(|j| j.id == target_id && j.status == ExportQueueJobStatus::Pending)
+        {
+            Some(i) => i,
+            None => return false,
+        };
+        let job = self.jobs.remove(src_idx);
+        // Removing src may shift target_idx down by 1.
+        let insert_at = if src_idx < target_idx {
+            target_idx - 1
+        } else {
+            target_idx
+        };
+        self.jobs.insert(insert_at, job);
+        true
+    }
+
+    /// Move a pending job to the very end of the queue. Anchors the
+    /// other non-pending jobs in place. Returns true if the move happened.
+    pub fn move_pending_to_end(&mut self, src_id: &str) -> bool {
+        let src_idx = match self
+            .jobs
+            .iter()
+            .position(|j| j.id == src_id && j.status == ExportQueueJobStatus::Pending)
+        {
+            Some(i) => i,
+            None => return false,
+        };
+        if src_idx == self.jobs.len() - 1 {
+            return false;
+        }
+        let job = self.jobs.remove(src_idx);
+        self.jobs.push(job);
+        true
+    }
+
+    /// Flip an Error job back to Pending and clear its error message so
+    /// the user can re-run it on the next Run Queue press. No-op on any
+    /// non-Error status. Returns true if a status flip happened.
+    pub fn retry_errored(&mut self, id: &str) -> bool {
+        if let Some(job) = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.id == id && j.status == ExportQueueJobStatus::Error)
+        {
+            job.status = ExportQueueJobStatus::Pending;
+            job.error = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// One-shot load-time fixup: if the app crashed (or was force-quit)
+    /// during an export, the persisted queue still has that job marked
+    /// `Running` with no live worker behind it. Flip those back to
+    /// `Pending` so the user can re-press Run Queue to recover.
+    /// Returns the number of jobs repaired.
+    pub fn repair_stuck_running(&mut self) -> usize {
+        let mut count = 0;
+        for job in self.jobs.iter_mut() {
+            if job.status == ExportQueueJobStatus::Running {
+                job.status = ExportQueueJobStatus::Pending;
+                job.error = None;
+                count += 1;
+            }
+        }
+        count
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreferencesState {
     #[serde(default)]
@@ -1244,6 +1471,10 @@ pub struct PreferencesState {
     /// user's preferred proxy quality.
     #[serde(default = "default_last_non_off_proxy_mode")]
     pub last_non_off_proxy_mode: ProxyMode,
+    /// Codec used for proxy transcodes. H.264 is universal; HEVC produces
+    /// smaller files at the same quality and is often faster on iGPUs.
+    #[serde(default)]
+    pub proxy_codec: ProxyCodec,
     /// Mirror/preserve proxy files in `UltimateSlice.cache/` next to source media.
     #[serde(default = "default_persist_proxies_next_to_original_media")]
     pub persist_proxies_next_to_original_media: bool,
@@ -1296,6 +1527,11 @@ pub struct PreferencesState {
     /// FFmpeg x264 CRF used for background prerender video segments.
     #[serde(default = "default_prerender_crf")]
     pub prerender_crf: u32,
+    /// Selects whether the proxy and background-prerender FFmpeg pipelines
+    /// try a hardware H.264 encoder (VA-API / NVENC) before falling back to
+    /// libx264. Has no effect on the export pipeline.
+    #[serde(default)]
+    pub hw_encoder_mode: HwEncoderMode,
     /// Preserve prerender cache files beside saved project files instead of using
     /// a temporary-only cache root.
     #[serde(default = "default_persist_prerenders_next_to_project_file")]
@@ -1373,6 +1609,7 @@ impl Default for PreferencesState {
             source_playback_priority: PlaybackPriority::default(),
             proxy_mode: ProxyMode::default(),
             last_non_off_proxy_mode: default_last_non_off_proxy_mode(),
+            proxy_codec: ProxyCodec::default(),
             persist_proxies_next_to_original_media: default_persist_proxies_next_to_original_media(
             ),
             show_waveform_on_video: false,
@@ -1390,6 +1627,7 @@ impl Default for PreferencesState {
             background_auto_tagging: false,
             prerender_preset: PrerenderEncodingPreset::default(),
             prerender_crf: default_prerender_crf(),
+            hw_encoder_mode: HwEncoderMode::default(),
             persist_prerenders_next_to_project_file:
                 default_persist_prerenders_next_to_project_file(),
             preview_luts: false,
@@ -1654,6 +1892,170 @@ pub fn save_inspector_sections_state(state: &HashMap<String, bool>) {
 mod tests {
     use super::*;
 
+    fn pending(id: &str) -> ExportQueueJob {
+        ExportQueueJob {
+            id: id.to_string(),
+            label: format!("job-{id}"),
+            output_path: format!("/tmp/{id}.mp4"),
+            options: ExportPreset::from_export_options("test", &ExportOptions::default()),
+            status: ExportQueueJobStatus::Pending,
+            error: None,
+        }
+    }
+
+    fn errored(id: &str) -> ExportQueueJob {
+        let mut j = pending(id);
+        j.status = ExportQueueJobStatus::Error;
+        j.error = Some("ffmpeg blew up".to_string());
+        j
+    }
+
+    fn running(id: &str) -> ExportQueueJob {
+        let mut j = pending(id);
+        j.status = ExportQueueJobStatus::Running;
+        j
+    }
+
+    fn done(id: &str) -> ExportQueueJob {
+        let mut j = pending(id);
+        j.status = ExportQueueJobStatus::Done;
+        j
+    }
+
+    fn ids(state: &ExportQueueState) -> Vec<String> {
+        state.jobs.iter().map(|j| j.id.clone()).collect()
+    }
+
+    #[test]
+    fn move_pending_before_reorders_within_pending() {
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), pending("b"), pending("c"), pending("d")],
+        };
+        // Drag 'c' onto 'a' → c lands before a.
+        assert!(q.move_pending_before("c", "a"));
+        assert_eq!(ids(&q), vec!["c", "a", "b", "d"]);
+    }
+
+    #[test]
+    fn move_pending_before_handles_src_after_target_idx_shift() {
+        // Removing src that's before target should not skip the target
+        // by one — verifies the `if src_idx < target_idx { target_idx - 1 }`
+        // adjustment is correct.
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), pending("b"), pending("c"), pending("d")],
+        };
+        // Move 'a' (idx 0) before 'c' (idx 2). After removing 'a', 'c' is
+        // at idx 1; inserting before 'c' puts 'a' at idx 1.
+        assert!(q.move_pending_before("a", "c"));
+        assert_eq!(ids(&q), vec!["b", "a", "c", "d"]);
+    }
+
+    #[test]
+    fn move_pending_before_is_noop_for_same_id() {
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), pending("b")],
+        };
+        assert!(!q.move_pending_before("a", "a"));
+        assert_eq!(ids(&q), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn move_pending_before_refuses_non_pending_jobs() {
+        let mut q = ExportQueueState {
+            jobs: vec![running("a"), pending("b"), done("c"), errored("d")],
+        };
+        // 'a' is Running — can't move it.
+        assert!(!q.move_pending_before("a", "b"));
+        // 'c' is Done — can't be a drop target.
+        assert!(!q.move_pending_before("b", "c"));
+        // 'd' is Error — can't be a drop target either.
+        assert!(!q.move_pending_before("b", "d"));
+        assert_eq!(ids(&q), vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn move_pending_to_end_moves_to_last_slot() {
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), pending("b"), pending("c")],
+        };
+        assert!(q.move_pending_to_end("a"));
+        assert_eq!(ids(&q), vec!["b", "c", "a"]);
+    }
+
+    #[test]
+    fn move_pending_to_end_is_noop_when_already_last() {
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), pending("b")],
+        };
+        assert!(!q.move_pending_to_end("b"));
+        assert_eq!(ids(&q), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn move_pending_to_end_anchors_past_non_pending_tail() {
+        // Non-pending jobs at the end still move past — the operation
+        // is "last in the Vec", not "last among pending". Document the
+        // chosen semantics so the test catches accidental changes.
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), done("b"), pending("c")],
+        };
+        assert!(q.move_pending_to_end("a"));
+        assert_eq!(ids(&q), vec!["b", "c", "a"]);
+    }
+
+    #[test]
+    fn retry_errored_flips_status_and_clears_error() {
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), errored("b")],
+        };
+        assert!(q.retry_errored("b"));
+        let b = q.jobs.iter().find(|j| j.id == "b").unwrap();
+        assert_eq!(b.status, ExportQueueJobStatus::Pending);
+        assert!(b.error.is_none());
+    }
+
+    #[test]
+    fn retry_errored_is_noop_for_non_error_jobs() {
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), running("b"), done("c")],
+        };
+        assert!(!q.retry_errored("a"));
+        assert!(!q.retry_errored("b"));
+        assert!(!q.retry_errored("c"));
+        assert!(!q.retry_errored("does-not-exist"));
+    }
+
+    #[test]
+    fn repair_stuck_running_flips_only_running() {
+        let mut q = ExportQueueState {
+            jobs: vec![
+                running("a"),
+                pending("b"),
+                done("c"),
+                errored("d"),
+                running("e"),
+            ],
+        };
+        assert_eq!(q.repair_stuck_running(), 2);
+        assert_eq!(q.jobs[0].status, ExportQueueJobStatus::Pending);
+        assert_eq!(q.jobs[1].status, ExportQueueJobStatus::Pending);
+        assert_eq!(q.jobs[2].status, ExportQueueJobStatus::Done);
+        assert_eq!(q.jobs[3].status, ExportQueueJobStatus::Error);
+        assert_eq!(q.jobs[4].status, ExportQueueJobStatus::Pending);
+        // Repaired jobs lose their error too (a Running job that had
+        // an old error from a previous failed run shouldn't carry it
+        // forward as a misleading message in the new Pending state).
+        assert!(q.jobs[0].error.is_none());
+    }
+
+    #[test]
+    fn repair_stuck_running_returns_zero_when_nothing_to_fix() {
+        let mut q = ExportQueueState {
+            jobs: vec![pending("a"), done("b"), errored("c")],
+        };
+        assert_eq!(q.repair_stuck_running(), 0);
+    }
+
     #[test]
     fn export_preset_round_trip_to_export_options() {
         let options = ExportOptions {
@@ -1667,6 +2069,7 @@ mod tests {
             gif_fps: None,
             audio_channel_layout: AudioChannelLayout::Surround51,
             hdr_passthrough: false,
+            hw_encoder_mode: HwEncoderMode::Off,
         };
         let preset = ExportPreset::from_export_options("High Quality", &options);
         assert_eq!(preset.name, "High Quality");
@@ -1914,33 +2317,39 @@ mod tests {
     }
 
     #[test]
-    fn preferences_default_missing_proxy_restore_mode_to_half_res() {
+    fn preferences_default_missing_proxy_restore_mode_to_p1080() {
         let parsed: UiState =
             serde_json::from_str(r#"{"preferences":{"proxy_mode":"off"}}"#).unwrap();
         assert_eq!(parsed.preferences.proxy_mode, ProxyMode::Off);
-        assert_eq!(
-            parsed.preferences.remembered_proxy_mode(),
-            ProxyMode::HalfRes
-        );
+        assert_eq!(parsed.preferences.remembered_proxy_mode(), ProxyMode::P1080);
     }
 
     #[test]
     fn preferences_set_proxy_mode_remembers_last_enabled_mode() {
         let mut prefs = PreferencesState::default();
-        prefs.set_proxy_mode(ProxyMode::QuarterRes);
+        prefs.set_proxy_mode(ProxyMode::P640);
         prefs.set_proxy_mode(ProxyMode::Off);
         assert_eq!(prefs.proxy_mode, ProxyMode::Off);
-        assert_eq!(prefs.remembered_proxy_mode(), ProxyMode::QuarterRes);
+        assert_eq!(prefs.remembered_proxy_mode(), ProxyMode::P640);
     }
 
     #[test]
     fn preferences_set_proxy_enabled_restores_last_enabled_mode() {
         let mut prefs = PreferencesState::default();
-        prefs.set_proxy_mode(ProxyMode::QuarterRes);
+        prefs.set_proxy_mode(ProxyMode::P640);
         prefs.set_proxy_enabled(false);
         prefs.set_proxy_enabled(true);
-        assert_eq!(prefs.proxy_mode, ProxyMode::QuarterRes);
-        assert_eq!(prefs.remembered_proxy_mode(), ProxyMode::QuarterRes);
+        assert_eq!(prefs.proxy_mode, ProxyMode::P640);
+        assert_eq!(prefs.remembered_proxy_mode(), ProxyMode::P640);
+    }
+
+    #[test]
+    fn proxy_mode_from_str_migrates_legacy_values() {
+        assert_eq!(ProxyMode::from_str("half_res"), ProxyMode::P1080);
+        assert_eq!(ProxyMode::from_str("quarter_res"), ProxyMode::P640);
+        assert_eq!(ProxyMode::from_str("p1080"), ProxyMode::P1080);
+        assert_eq!(ProxyMode::from_str("p640"), ProxyMode::P640);
+        assert_eq!(ProxyMode::from_str("off"), ProxyMode::Off);
     }
 
     #[test]
@@ -2042,6 +2451,8 @@ mod tests {
             ab_compare_enabled: false,
             ab_midline_percent: 50.0,
             ab_reference_still_id: None,
+            trim_display_mode: TrimDisplayMode::Auto,
+            show_proxy_watermark: true,
         };
         let workspace = ProgramMonitorWorkspaceState::from_program_monitor_state(&monitor);
         assert!(workspace.popped);
@@ -2113,7 +2524,10 @@ mod tests {
         assert!(decoded.show_hud);
         let legacy: ProgramMonitorState =
             serde_json::from_str(r#"{"popped":false}"#).expect("legacy deserialize");
-        assert!(!legacy.show_hud, "legacy JSON without show_hud defaults false");
+        assert!(
+            !legacy.show_hud,
+            "legacy JSON without show_hud defaults false"
+        );
     }
 
     #[test]
@@ -2169,5 +2583,31 @@ mod tests {
         );
         assert!(parsed.program_monitor.popped);
         assert!(parsed.program_monitor.scopes_visible);
+    }
+
+    #[test]
+    fn program_monitor_state_defaults_trim_display_mode_to_auto() {
+        // Legacy JSON predates trim_display_mode; must default to Auto.
+        let legacy = r#"{"popped":false,"width":960,"height":540,"docked_split_pos":420,"scopes_visible":false,"show_safe_areas":false,"show_false_color":false,"show_zebra":false,"zebra_threshold":0.9,"show_hud":false,"aspect_mask":"none","ab_compare_enabled":false,"ab_midline_percent":50.0,"ab_reference_still_id":null}"#;
+        let parsed: ProgramMonitorState = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.trim_display_mode, TrimDisplayMode::Auto);
+    }
+
+    #[test]
+    fn program_monitor_state_defaults_show_proxy_watermark_to_true() {
+        // Legacy JSON predates show_proxy_watermark; must default to true.
+        let legacy = r#"{"popped":false,"width":960,"height":540,"docked_split_pos":420,"scopes_visible":false,"show_safe_areas":false,"show_false_color":false,"show_zebra":false,"zebra_threshold":0.9,"show_hud":false,"aspect_mask":"none","ab_compare_enabled":false,"ab_midline_percent":50.0,"ab_reference_still_id":null}"#;
+        let parsed: ProgramMonitorState = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.show_proxy_watermark);
+    }
+
+    #[test]
+    fn trim_display_mode_round_trips() {
+        for mode in TrimDisplayMode::ALL {
+            let json = serde_json::to_string(&mode).unwrap();
+            let back: TrimDisplayMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(mode, back);
+            assert_eq!(TrimDisplayMode::from_str(mode.as_str()), Some(mode));
+        }
     }
 }

@@ -1,7 +1,7 @@
 use crate::ui_state::{
-    clamp_prerender_crf, AutoScrollMode, CrossfadeCurve, GskRenderer, PlaybackPriority,
-    PreferencesState, PrerenderEncodingPreset, PreviewQuality, ProxyMode, MAX_PRERENDER_CRF,
-    MIN_PRERENDER_CRF,
+    clamp_prerender_crf, AutoScrollMode, CrossfadeCurve, GskRenderer, HwEncoderMode,
+    PlaybackPriority, PreferencesState, PrerenderEncodingPreset, PreviewQuality, ProxyCodec,
+    ProxyMode, MAX_PRERENDER_CRF, MIN_PRERENDER_CRF,
 };
 use gtk4::prelude::*;
 use gtk4::{
@@ -248,9 +248,36 @@ pub fn show_preferences_dialog(
     let priority_hint = Label::new(Some("Program monitor playback priority controls smoothness vs frame precision during active playback."));
     priority_hint.set_halign(gtk::Align::Start);
     priority_hint.add_css_class("dim-label");
+    let hw_caps = crate::media::hwaccel::detect();
+    let hw_encoder_combo = gtk4::ComboBoxText::new();
+    hw_encoder_combo.append(Some("auto"), "Auto (use hardware when available)");
+    hw_encoder_combo.append(Some("vaapi"), "VA-API (Intel / AMD)");
+    hw_encoder_combo.append(Some("nvenc"), "NVENC (NVIDIA)");
+    hw_encoder_combo.append(Some("off"), "Off (always libx264)");
+    hw_encoder_combo.set_active_id(Some(current.hw_encoder_mode.as_str()));
+    hw_encoder_combo.set_halign(gtk::Align::Start);
+    let hw_encoder_hint = Label::new(Some(
+        "Used for proxy generation and background prerender only. Falls back to \
+         libx264 automatically when the requested encoder is unavailable. Final \
+         exports always use software encoders.",
+    ));
+    hw_encoder_hint.set_halign(gtk::Align::Start);
+    hw_encoder_hint.add_css_class("dim-label");
+    hw_encoder_hint.set_wrap(true);
+    hw_encoder_hint.set_max_width_chars(60);
+    if !hw_caps.any_usable() {
+        hw_encoder_combo.set_sensitive(false);
+        hw_encoder_combo.set_tooltip_text(Some(
+            "No hardware encoder detected (h264_vaapi / h264_nvenc).",
+        ));
+    }
+
     playback_box.append(&playback_label);
     playback_box.append(&hw_accel);
     playback_box.append(&hint);
+    playback_box.append(&Label::new(Some("Hardware encoder (proxy / prerender)")));
+    playback_box.append(&hw_encoder_combo);
+    playback_box.append(&hw_encoder_hint);
     playback_box.append(&Label::new(Some("Program monitor playback priority")));
     playback_box.append(&playback_priority);
     playback_box.append(&priority_hint);
@@ -338,12 +365,14 @@ pub fn show_preferences_dialog(
     proxy_label.set_halign(gtk::Align::Start);
     let proxy_mode = gtk4::ComboBoxText::new();
     proxy_mode.append(Some("off"), "Off (use original media)");
-    proxy_mode.append(Some("half_res"), "Half resolution");
-    proxy_mode.append(Some("quarter_res"), "Quarter resolution");
+    proxy_mode.append(Some("p1080"), "1080p (HD-tall preview)");
+    proxy_mode.append(Some("p720"), "720p (smaller, ~10–15% faster)");
+    proxy_mode.append(Some("p640"), "640p (very small, fastest scrubbing)");
+    proxy_mode.append(Some("p540"), "540p (smallest, fastest)");
     proxy_mode.set_active_id(Some(current.proxy_mode.as_str()));
     proxy_mode.set_halign(gtk::Align::Start);
     let proxy_hint = Label::new(Some(
-        "Generate lightweight proxy files for smoother preview playback. Export always uses original media.",
+        "Generate lightweight proxy files for smoother preview playback. Proxies preserve source aspect ratio and never upscale. Export always uses original media.",
     ));
     proxy_hint.set_halign(gtk::Align::Start);
     proxy_hint.add_css_class("dim-label");
@@ -352,6 +381,27 @@ pub fn show_preferences_dialog(
     proxies_box.append(&proxy_label);
     proxies_box.append(&proxy_mode);
     proxies_box.append(&proxy_hint);
+
+    let proxy_codec_label = Label::new(Some("Proxy codec"));
+    proxy_codec_label.set_halign(gtk::Align::Start);
+    let proxy_codec_combo = gtk4::ComboBoxText::new();
+    proxy_codec_combo.append(Some("h264"), "H.264 (universal)");
+    proxy_codec_combo.append(
+        Some("hevc"),
+        "HEVC / H.265 (smaller files, often faster on iGPUs)",
+    );
+    proxy_codec_combo.set_active_id(Some(current.proxy_codec.as_str()));
+    proxy_codec_combo.set_halign(gtk::Align::Start);
+    let proxy_codec_hint = Label::new(Some(
+        "HEVC compresses ~30–50% better than H.264 at the same visual quality, and on Intel iGPUs the dedicated HEVC encoder can be faster than H.264 for very-high-resolution sources. Falls back to libx265 (software) when no hardware HEVC encoder is available.",
+    ));
+    proxy_codec_hint.set_halign(gtk::Align::Start);
+    proxy_codec_hint.add_css_class("dim-label");
+    proxy_codec_hint.set_wrap(true);
+    proxy_codec_hint.set_max_width_chars(60);
+    proxies_box.append(&proxy_codec_label);
+    proxies_box.append(&proxy_codec_combo);
+    proxies_box.append(&proxy_codec_hint);
 
     let persist_proxies_check = CheckButton::with_label("Persist proxies next to original media");
     persist_proxies_check.set_active(current.persist_proxies_next_to_original_media);
@@ -663,9 +713,8 @@ pub fn show_preferences_dialog(
     // ── Models section (only when ai-inference feature is enabled) ─────────
     #[cfg(feature = "ai-inference")]
     {
-        use crate::media::bg_removal_cache::{
-            find_model_path, model_download_dir, MODEL_DOWNLOAD_URL, MODEL_FILENAME,
-        };
+        use crate::media::bg_removal_cache::{find_model_path, model_download_dir, model_manifest};
+        use crate::media::model_manifest::{download_model_in_background, DownloadState};
 
         let models_box = GBox::new(Orientation::Vertical, 10);
         models_box.set_margin_start(8);
@@ -783,9 +832,12 @@ pub fn show_preferences_dialog(
             models_box.append(&Separator::new(Orientation::Horizontal));
         }
 
-        // MODNet status row.
+        // Portrait-matting model status row. Identity, URL, expected size,
+        // and license attribution all come from the manifest entry so this
+        // UI doesn't need to change when the underlying model is swapped.
+        let manifest_entry = model_manifest();
         let modnet_row = GBox::new(Orientation::Horizontal, 8);
-        let modnet_name = Label::new(Some("MODNet (Background Removal)"));
+        let modnet_name = Label::new(Some(manifest_entry.display_name));
         modnet_name.set_halign(gtk::Align::Start);
         modnet_name.set_hexpand(true);
         let status_label = Label::new(None);
@@ -803,15 +855,34 @@ pub fn show_preferences_dialog(
         modnet_row.append(&status_label);
         models_box.append(&modnet_row);
 
-        let modnet_hint = Label::new(Some(
-            "MODNet is used for AI-powered background removal on video clips. \
-             The model file (~25 MB) will be downloaded to your local data directory.",
-        ));
+        // Description (purpose) — pulled from manifest.
+        let modnet_hint = Label::new(Some(manifest_entry.description));
         modnet_hint.set_halign(gtk::Align::Start);
         modnet_hint.add_css_class("dim-label");
         modnet_hint.set_wrap(true);
         modnet_hint.set_max_width_chars(60);
         models_box.append(&modnet_hint);
+
+        // Size + license attribution. Surface the license up front because
+        // the user is about to download a binary they'll be governed by.
+        let size_text = match manifest_entry.expected_size_bytes {
+            Some(n) => format!("~{:.0} MB", (n as f64) / 1_000_000.0),
+            None => "size unknown".to_string(),
+        };
+        let license_link = format!(
+            "<a href=\"{}\">{}</a>",
+            glib::markup_escape_text(manifest_entry.license_url),
+            glib::markup_escape_text(manifest_entry.license_short),
+        );
+        let license_label = Label::new(None);
+        license_label.set_markup(&format!(
+            "Download size: {size_text}. License: {license_link}."
+        ));
+        license_label.set_halign(gtk::Align::Start);
+        license_label.add_css_class("dim-label");
+        license_label.set_wrap(true);
+        license_label.set_max_width_chars(60);
+        models_box.append(&license_label);
 
         // Download button + progress bar.
         let download_btn = gtk::Button::with_label(if has_model {
@@ -831,43 +902,55 @@ pub fn show_preferences_dialog(
         download_btn.connect_clicked(move |_| {
             let dest_dir = model_download_dir();
             let _ = std::fs::create_dir_all(&dest_dir);
-            let dest = dest_dir.join(MODEL_FILENAME);
-            let partial = dest_dir.join(format!("{MODEL_FILENAME}.partial"));
-            let url = MODEL_DOWNLOAD_URL.to_string();
 
             progress_bar_c.set_visible(true);
             progress_bar_c.set_fraction(0.0);
-            progress_bar_c.set_text(Some("Downloading…"));
+            progress_bar_c.set_text(Some("Starting download…"));
             progress_bar_c.set_show_text(true);
             download_btn_c.set_sensitive(false);
             status_label_c.set_text("Downloading…");
 
-            // result: None = still running, Some(true) = success, Some(false) = failure.
-            let result = std::sync::Arc::new(std::sync::Mutex::new(None::<bool>));
-            let result_w = result.clone();
-            std::thread::spawn(move || {
-                let ok = std::process::Command::new("curl")
-                    .args(["-L", "-o", &partial.to_string_lossy(), &url])
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
-                if ok {
-                    let _ = std::fs::rename(&partial, &dest);
-                } else {
-                    let _ = std::fs::remove_file(&partial);
-                }
-                *result_w.lock().unwrap() = Some(ok);
-            });
+            let state = download_model_in_background(model_manifest(), dest_dir);
 
             let bg_cache_c = bg_cache.clone();
             let status_label_cc = status_label_c.clone();
             let progress_bar_cc = progress_bar_c.clone();
             let download_btn_cc = download_btn_c.clone();
-            glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
-                let done = result.lock().unwrap().clone();
-                match done {
-                    None => glib::ControlFlow::Continue,
-                    Some(true) => {
+            glib::timeout_add_local(std::time::Duration::from_millis(250), move || {
+                let snapshot = state.lock().unwrap().clone();
+                match snapshot {
+                    DownloadState::Pending => {
+                        progress_bar_cc.pulse();
+                        glib::ControlFlow::Continue
+                    }
+                    DownloadState::Downloading { downloaded, total } => {
+                        match total {
+                            Some(t) if t > 0 => {
+                                let frac = ((downloaded as f64) / (t as f64)).clamp(0.0, 1.0);
+                                progress_bar_cc.set_fraction(frac);
+                                progress_bar_cc.set_text(Some(&format!(
+                                    "{:.1} / {:.1} MB",
+                                    (downloaded as f64) / 1_000_000.0,
+                                    (t as f64) / 1_000_000.0,
+                                )));
+                            }
+                            _ => {
+                                progress_bar_cc.pulse();
+                                progress_bar_cc.set_text(Some(&format!(
+                                    "{:.1} MB downloaded",
+                                    (downloaded as f64) / 1_000_000.0,
+                                )));
+                            }
+                        }
+                        glib::ControlFlow::Continue
+                    }
+                    DownloadState::Verifying => {
+                        progress_bar_cc.pulse();
+                        progress_bar_cc.set_text(Some("Verifying SHA-256…"));
+                        status_label_cc.set_text("Verifying…");
+                        glib::ControlFlow::Continue
+                    }
+                    DownloadState::Done { .. } => {
                         progress_bar_cc.set_fraction(1.0);
                         progress_bar_cc.set_text(Some("Done"));
                         status_label_cc.set_text("✓ Installed");
@@ -876,8 +959,8 @@ pub fn show_preferences_dialog(
                         bg_cache_c.borrow_mut().refresh_model_path();
                         glib::ControlFlow::Break
                     }
-                    Some(false) => {
-                        progress_bar_cc.set_text(Some("Download failed"));
+                    DownloadState::Failed(msg) => {
+                        progress_bar_cc.set_text(Some(&msg));
                         progress_bar_cc.set_fraction(0.0);
                         status_label_cc.set_text("Download failed");
                         download_btn_cc.set_sensitive(true);
@@ -1468,6 +1551,9 @@ pub fn show_preferences_dialog(
                 ),
                 proxy_mode: current.proxy_mode.clone(),
                 last_non_off_proxy_mode: current.last_non_off_proxy_mode.clone(),
+                proxy_codec: ProxyCodec::from_str(
+                    proxy_codec_combo.active_id().as_deref().unwrap_or("h264"),
+                ),
                 persist_proxies_next_to_original_media: persist_proxies_check.is_active(),
                 show_waveform_on_video: waveform_video_check.is_active(),
                 show_timeline_preview: timeline_preview_check.is_active(),
@@ -1491,6 +1577,9 @@ pub fn show_preferences_dialog(
                 background_auto_tagging: background_auto_tagging_check.is_active(),
                 prerender_preset: current.prerender_preset.clone(),
                 prerender_crf: current.prerender_crf,
+                hw_encoder_mode: HwEncoderMode::from_str(
+                    hw_encoder_combo.active_id().as_deref().unwrap_or("auto"),
+                ),
                 persist_prerenders_next_to_project_file: persist_prerenders_check.is_active(),
                 preview_luts: preview_luts_check.is_active(),
                 crossfade_enabled: crossfade_enabled_check.is_active(),

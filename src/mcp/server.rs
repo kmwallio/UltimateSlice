@@ -464,6 +464,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_hw_encoder_mode",
+            "description": "Set the hardware encoder family used for proxy generation and background prerender ('off', 'auto', 'vaapi', or 'nvenc'). 'auto' picks NVENC over VA-API when both are available; falls back to libx264 when the chosen family is unsupported. Does not affect the export pipeline.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": { "type": "string", "enum": ["off", "auto", "vaapi", "nvenc"], "description": "Encoder selection mode." }
+                },
+                "required": ["mode"]
+            }
+        },
+        {
             "name": "set_playback_priority",
             "description": "Set program monitor playback priority ('smooth', 'balanced', or 'accurate').",
             "inputSchema": {
@@ -820,6 +831,27 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_color_label_name",
+            "description": "Set the project-scoped display name for a clip color label (color-tag legend). Pass an empty or whitespace-only name to remove the override so the legend falls back to the default English name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "description": "Color label key (snake_case). One of: red, orange, yellow, green, teal, blue, purple, magenta.",
+                        "enum": ["red", "orange", "yellow", "green", "teal", "blue", "purple", "magenta"]
+                    },
+                    "name": { "type": "string", "description": "New custom display name for that color (empty removes the override)." }
+                },
+                "required": ["label", "name"]
+            }
+        },
+        {
+            "name": "get_color_label_names",
+            "description": "Return the project-scoped color-tag legend (custom names per color) and the default fallbacks.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "save_fcpxml",
             "description": "Export the current project to a Final Cut Pro XML (.fcpxml) file using FCPXML 1.14.",
             "inputSchema": {
@@ -1065,6 +1097,32 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "replace_clip_source",
+            "description": "Swap a single timeline clip's source media for a different file (e.g., proxy → master, 1080p → 4K). The new file is probed for dimensions/duration/audio streams. If the new media has different resolution than the old source, the clip's pixel-based crop values (and their keyframe lanes) are auto-rescaled to maintain visual parity. The clip's source_in/source_out is clamped if the new file is shorter; an error is returned if clamping would invert the trim range. Other clips referencing the old source path are NOT affected — see `replace_library_source` for the project-wide swap.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "ID of the timeline clip whose source to replace." },
+                    "new_path": { "type": "string", "description": "Absolute path to the replacement media file." },
+                    "old_width": { "type": "number", "description": "Optional: source width of the OLD media in pixels. When supplied alongside old_height the helper rescales crop values; when omitted, crop values are left as-is (best-effort)." },
+                    "old_height": { "type": "number", "description": "Optional: source height of the OLD media in pixels. See old_width." }
+                },
+                "required": ["clip_id", "new_path"]
+            }
+        },
+        {
+            "name": "replace_library_source",
+            "description": "Swap a Media Library item's source media file and propagate the change to every timeline clip that referenced the old path (analogous to `relink_media` but for deliberate version swaps rather than offline-media recovery). Library `MediaItem` metadata (resolution, codec, duration, HDR colorimetry, audio streams) is updated from the new file's probe. Per-clip fields adapt the same way `replace_clip_source` does — pixel crops rescale on resolution change, source_out clamps on shorter media. Returns the count of timeline clips updated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "item_id": { "type": "string", "description": "ID of the library MediaItem whose source to replace." },
+                    "new_path": { "type": "string", "description": "Absolute path to the replacement media file." }
+                },
+                "required": ["item_id", "new_path"]
+            }
+        },
+        {
             "name": "create_bin",
             "description": "Create a media library bin (folder) for organizing media items",
             "inputSchema": {
@@ -1254,11 +1312,11 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_proxy_mode",
-            "description": "Set proxy preview mode ('off', 'half_res', or 'quarter_res'). When enabled, lightweight proxy files are generated for smoother preview playback. Export always uses original media.",
+            "description": "Set proxy preview mode ('off', 'p1080', or 'p640'). 'p1080' caps proxy height at 1080 px; 'p640' caps at 640 px. Both preserve source aspect ratio and never upscale. Legacy values 'half_res' and 'quarter_res' are accepted for backward compatibility (mapped to 'p1080' and 'p640' respectively). Export always uses original media.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "mode": { "type": "string", "enum": ["off", "half_res", "quarter_res"], "description": "Proxy preview mode." }
+                    "mode": { "type": "string", "enum": ["off", "p1080", "p640", "half_res", "quarter_res"], "description": "Proxy preview mode. 'half_res'/'quarter_res' are legacy aliases for 'p1080'/'p640'." }
                 },
                 "required": ["mode"]
             }
@@ -1733,8 +1791,25 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "capture_export_compare_still",
+            "description": "Render the current playhead frame through the export pipeline and store it as a reference still for Program Monitor A/B compare. If reference_still_id points at an existing export-origin still, that still is refreshed in place; otherwise a new export compare still is created and activated.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "label": {
+                        "type": "string",
+                        "description": "Optional label to use when creating a new export compare still. Ignored when refreshing an existing still."
+                    },
+                    "reference_still_id": {
+                        "type": "string",
+                        "description": "Optional existing export-origin reference still id to refresh in place."
+                    }
+                }
+            }
+        },
+        {
             "name": "list_reference_stills",
-            "description": "List all reference stills currently pinned in the project, with id, label, capture timestamp (ns since epoch), dimensions, cache filename, and whether the PNG is present on disk.",
+            "description": "List all reference stills currently pinned in the project, with id, label, origin, capture timestamp (ns since epoch), dimensions, cache filename, and whether the PNG is present on disk.",
             "inputSchema": {
                 "type": "object",
                 "properties": {}
@@ -2899,6 +2974,10 @@ fn dispatch_tool_payload(
             enabled: arg_bool!(args, "enabled"),
             reply: tx,
         },
+        "set_hw_encoder_mode" => McpCommand::SetHwEncoderMode {
+            mode: arg_str!(args, "mode", "auto"),
+            reply: tx,
+        },
         "set_playback_priority" => McpCommand::SetPlaybackPriority {
             priority: arg_str!(args, "priority", "smooth"),
             reply: tx,
@@ -3174,6 +3253,14 @@ fn dispatch_tool_payload(
             reply: tx,
         },
 
+        "set_color_label_name" => McpCommand::SetColorLabelName {
+            label: arg_str!(args, "label"),
+            name: arg_str!(args, "name"),
+            reply: tx,
+        },
+
+        "get_color_label_names" => McpCommand::GetColorLabelNames { reply: tx },
+
         "save_fcpxml" => McpCommand::SaveFcpxml {
             path: arg_str!(args, "path"),
             reply: tx,
@@ -3310,6 +3397,24 @@ fn dispatch_tool_payload(
         },
         "relink_media" => McpCommand::RelinkMedia {
             root_path: arg_str!(args, "root_path"),
+            reply: tx,
+        },
+        "replace_clip_source" => McpCommand::ReplaceClipSource {
+            clip_id: arg_str!(args, "clip_id"),
+            new_path: arg_str!(args, "new_path"),
+            old_width: args
+                .get("old_width")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32),
+            old_height: args
+                .get("old_height")
+                .and_then(|v| v.as_u64())
+                .map(|v| v as u32),
+            reply: tx,
+        },
+        "replace_library_source" => McpCommand::ReplaceLibrarySource {
+            item_id: arg_str!(args, "item_id"),
+            new_path: arg_str!(args, "new_path"),
             reply: tx,
         },
 
@@ -3875,9 +3980,7 @@ fn dispatch_tool_payload(
         }
         "set_program_monitor_ab_compare" => {
             let enabled = args.get("enabled").and_then(|v| v.as_bool());
-            let midline_percent = args
-                .get("midline_percent")
-                .and_then(|v| v.as_f64());
+            let midline_percent = args.get("midline_percent").and_then(|v| v.as_f64());
             let reference_still_id = args
                 .get("reference_still_id")
                 .and_then(|v| v.as_str())
@@ -3897,6 +4000,17 @@ fn dispatch_tool_payload(
         "capture_reference_still" => McpCommand::CaptureReferenceStill {
             label: args
                 .get("label")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            reply: tx,
+        },
+        "capture_export_compare_still" => McpCommand::CaptureExportCompareStill {
+            label: args
+                .get("label")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            reference_still_id: args
+                .get("reference_still_id")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             reply: tx,

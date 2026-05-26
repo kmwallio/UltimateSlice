@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::mpsc;
 
 use gstreamer_pbutils::prelude::DiscovererStreamInfoExt;
+use serde::Deserialize;
 
 /// Shared media metadata resolved from a probe pass.
 #[derive(Debug, Clone, Default)]
@@ -10,6 +11,7 @@ pub struct MediaProbeMetadata {
     pub duration_ns: Option<u64>,
     pub is_audio_only: bool,
     pub has_audio: bool,
+    pub audio_source_streams: Vec<crate::model::clip::AudioSourceStreamInfo>,
     pub source_timecode_base_ns: Option<u64>,
     pub is_image: bool,
     pub is_animated_svg: bool,
@@ -30,6 +32,7 @@ pub struct ProbeResult {
     pub duration_ns: u64,
     pub is_audio_only: bool,
     pub has_audio: bool,
+    pub audio_source_streams: Vec<crate::model::clip::AudioSourceStreamInfo>,
     pub source_timecode_base_ns: Option<u64>,
     /// True when the file is a still image (PNG, JPEG, etc.).
     pub is_image: bool,
@@ -76,6 +79,7 @@ impl MediaProbeCache {
                         duration_ns: metadata.duration_ns.unwrap_or(10 * 1_000_000_000),
                         is_audio_only: metadata.is_audio_only,
                         has_audio: metadata.has_audio,
+                        audio_source_streams: metadata.audio_source_streams,
                         source_timecode_base_ns: metadata.source_timecode_base_ns,
                         is_image: metadata.is_image,
                         is_animated_svg: metadata.is_animated_svg,
@@ -139,6 +143,7 @@ pub fn probe_media_metadata(path: &str) -> MediaProbeMetadata {
     let uri = format!("file://{path}");
     let is_image = crate::model::clip::is_image_file(path);
     let file_size_bytes = std::fs::metadata(path).ok().map(|m| m.len());
+    let audio_source_streams = ffprobe_audio_streams(path);
 
     // For still images, skip the Discoverer entirely — images have no
     // meaningful duration or audio streams.
@@ -156,6 +161,7 @@ pub fn probe_media_metadata(path: &str) -> MediaProbeMetadata {
                         video_width,
                         video_height,
                         codec_summary: Some("Animated SVG".to_string()),
+                        audio_source_streams,
                         file_size_bytes,
                         ..MediaProbeMetadata::default()
                     };
@@ -168,6 +174,7 @@ pub fn probe_media_metadata(path: &str) -> MediaProbeMetadata {
             video_width,
             video_height,
             codec_summary: image_codec_summary(path),
+            audio_source_streams,
             file_size_bytes,
             ..MediaProbeMetadata::default()
         };
@@ -176,7 +183,9 @@ pub fn probe_media_metadata(path: &str) -> MediaProbeMetadata {
     use gstreamer_pbutils::Discoverer;
     let fallback = MediaProbeMetadata {
         duration_ns: Some(10 * 1_000_000_000),
-        has_audio: true,
+        has_audio: !audio_source_streams.is_empty(),
+        is_audio_only: !audio_source_streams.is_empty(),
+        audio_source_streams: audio_source_streams.clone(),
         file_size_bytes,
         ..MediaProbeMetadata::default()
     };
@@ -192,7 +201,7 @@ pub fn probe_media_metadata(path: &str) -> MediaProbeMetadata {
     let duration_ns = info.duration().map(|d| d.nseconds());
     let video_streams = info.video_streams();
     let is_audio_only = video_streams.is_empty();
-    let has_audio = !info.audio_streams().is_empty();
+    let has_audio = !audio_source_streams.is_empty() || !info.audio_streams().is_empty();
     let video_stream = video_streams.first();
     let (video_width, video_height) = video_stream
         .map(|vs| (Some(vs.width()), Some(vs.height())))
@@ -239,9 +248,7 @@ pub fn probe_media_metadata(path: &str) -> MediaProbeMetadata {
     let file_path = uri.strip_prefix("file://").unwrap_or(&uri);
     let source_timecode_base_ns =
         extract_embedded_timecode(file_path, frame_rate_num, frame_rate_den)
-            .or_else(|| {
-                extract_format_timecode(file_path, frame_rate_num, frame_rate_den)
-            })
+            .or_else(|| extract_format_timecode(file_path, frame_rate_num, frame_rate_den))
             .or_else(|| {
                 if is_audio_only {
                     extract_bwf_time_reference_ns(file_path)
@@ -255,6 +262,7 @@ pub fn probe_media_metadata(path: &str) -> MediaProbeMetadata {
         duration_ns,
         is_audio_only,
         has_audio,
+        audio_source_streams,
         source_timecode_base_ns,
         video_width,
         video_height,
@@ -474,6 +482,78 @@ fn ffprobe_dimensions(path: &str) -> (Option<u32>, Option<u32>) {
     (width, height)
 }
 
+#[derive(Debug, Deserialize)]
+struct FfprobeStreamsResponse {
+    #[serde(default)]
+    streams: Vec<FfprobeAudioStreamEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FfprobeAudioStreamEntry {
+    #[serde(default)]
+    channels: Option<u32>,
+    #[serde(default)]
+    channel_layout: Option<String>,
+    #[serde(default)]
+    sample_rate: Option<String>,
+    #[serde(default)]
+    tags: FfprobeAudioStreamTags,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct FfprobeAudioStreamTags {
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+}
+
+fn ffprobe_audio_streams(path: &str) -> Vec<crate::model::clip::AudioSourceStreamInfo> {
+    use std::process::Command;
+
+    let output = match Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=channels,channel_layout,sample_rate:stream_tags=language,title",
+            "-of",
+            "json",
+            path,
+        ])
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        _ => return Vec::new(),
+    };
+
+    let parsed = match serde_json::from_slice::<FfprobeStreamsResponse>(&output.stdout) {
+        Ok(parsed) => parsed,
+        Err(_) => return Vec::new(),
+    };
+
+    parsed
+        .streams
+        .into_iter()
+        .enumerate()
+        .map(
+            |(stream_index, stream)| crate::model::clip::AudioSourceStreamInfo {
+                stream_index: stream_index as u32,
+                channels: stream.channels.unwrap_or(0),
+                channel_layout: stream.channel_layout,
+                sample_rate_hz: stream
+                    .sample_rate
+                    .as_deref()
+                    .and_then(|value| value.parse::<u32>().ok()),
+                language: stream.tags.language,
+                title: stream.tags.title,
+            },
+        )
+        .collect()
+}
+
 fn ffprobe_codec_summary(path: &str) -> Option<String> {
     use std::process::Command;
 
@@ -655,10 +735,7 @@ mod tests {
     #[test]
     fn test_parse_bwf_time_reference_ns_missing_fields_return_none() {
         // No TAG line at all (plain non-BWF WAV)
-        assert_eq!(
-            parse_bwf_time_reference_ns("sample_rate=48000\n"),
-            None
-        );
+        assert_eq!(parse_bwf_time_reference_ns("sample_rate=48000\n"), None);
         // Missing sample_rate — can't convert without it
         assert_eq!(
             parse_bwf_time_reference_ns("TAG:time_reference=48000\n"),

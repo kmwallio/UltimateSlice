@@ -1,5 +1,7 @@
+use super::clip::ClipColorLabel;
 use super::track::{AudioRole, Track};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 
 /// A timeline marker (chapter point / note) placed at a specific position.
@@ -42,6 +44,30 @@ impl Marker {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReferenceStillOrigin {
+    #[default]
+    LivePreview,
+    ExportRender,
+}
+
+impl ReferenceStillOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LivePreview => "live_preview",
+            Self::ExportRender => "export_render",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::LivePreview => "Live",
+            Self::ExportRender => "Export",
+        }
+    }
+}
+
 /// A pinned reference still captured from the Program Monitor, used as the
 /// fixed side of the A/B compare wipe. Thumbnails are stored as PNGs under
 /// `$XDG_CACHE_HOME/ultimateslice/reference_stills/<id>.png`; the project
@@ -67,6 +93,10 @@ pub struct ReferenceStill {
     /// (e.g. `d4f2...png`). Not a full path.
     #[serde(default)]
     pub filename: String,
+    /// Whether this still came from the live Program Monitor compositor or
+    /// from the export-compare render path.
+    #[serde(default)]
+    pub origin: ReferenceStillOrigin,
     /// True if this still was captured with grading bypassed.
     #[serde(default)]
     pub ungraded: bool,
@@ -82,6 +112,7 @@ impl ReferenceStill {
             width: 0,
             height: 0,
             filename: String::new(),
+            origin: ReferenceStillOrigin::default(),
             ungraded: false,
         }
     }
@@ -197,9 +228,7 @@ impl TimecodeBurninPosition {
         margin: f64,
     ) -> (f64, f64) {
         let (hx, vy) = match self {
-            TimecodeBurninPosition::TopLeft | TimecodeBurninPosition::BottomLeft => {
-                (margin, 0.0)
-            }
+            TimecodeBurninPosition::TopLeft | TimecodeBurninPosition::BottomLeft => (margin, 0.0),
             TimecodeBurninPosition::TopCenter | TimecodeBurninPosition::BottomCenter => {
                 ((canvas_w - pill_w) * 0.5, 0.0)
             }
@@ -295,6 +324,14 @@ pub struct Project {
     pub timecode_burnin_enabled: bool,
     #[serde(default)]
     pub timecode_burnin_position: TimecodeBurninPosition,
+    /// Project-scoped custom display names for each `ClipColorLabel`. Lets
+    /// users attach a meaning to each color (e.g. Red = "B-roll",
+    /// Green = "Interview") that persists across sessions via the
+    /// `us:color-label-names` FCPXML vendor attribute. Missing entries fall
+    /// back to the enum's `default_display_name`. The `None` variant is
+    /// intentionally not user-labelable — "no color" does not carry meaning.
+    #[serde(default)]
+    pub color_label_names: HashMap<ClipColorLabel, String>,
     /// Dirty flag — true if there are unsaved changes
     #[serde(skip)]
     pub dirty: bool,
@@ -402,6 +439,7 @@ impl Project {
             reference_stills: Vec::new(),
             timecode_burnin_enabled: false,
             timecode_burnin_position: TimecodeBurninPosition::default(),
+            color_label_names: HashMap::new(),
             dirty: false,
             file_path: None,
             source_fcpxml: None,
@@ -429,6 +467,42 @@ impl Project {
 
     pub fn video_tracks(&self) -> impl Iterator<Item = &Track> {
         self.tracks.iter().filter(|t| t.is_video())
+    }
+
+    /// Display name for a clip color label. Returns the user-provided
+    /// project-scoped override when set (non-empty, trimmed), else the
+    /// enum's default English name (e.g. "Red"). `ClipColorLabel::None`
+    /// always returns "None" — the legend UI skips this variant, but
+    /// callers that format clip tooltips may still ask for it.
+    pub fn display_name_for_color_label(&self, label: ClipColorLabel) -> String {
+        if label == ClipColorLabel::None {
+            return ClipColorLabel::None.default_display_name().to_string();
+        }
+        match self.color_label_names.get(&label) {
+            Some(custom) if !custom.trim().is_empty() => custom.trim().to_string(),
+            _ => label.default_display_name().to_string(),
+        }
+    }
+
+    /// Upsert a user-provided name for a color label. Empty / whitespace-only
+    /// names remove the override (so the legend falls back to the default).
+    /// Returns `true` when the map actually changed, so callers can skip
+    /// firing `on_project_changed` on no-op writes.
+    pub fn set_color_label_name(&mut self, label: ClipColorLabel, name: &str) -> bool {
+        if label == ClipColorLabel::None {
+            return false;
+        }
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return self.color_label_names.remove(&label).is_some();
+        }
+        match self.color_label_names.get(&label) {
+            Some(existing) if existing == trimmed => false,
+            _ => {
+                self.color_label_names.insert(label, trimmed.to_string());
+                true
+            }
+        }
     }
 
     pub fn audio_tracks(&self) -> impl Iterator<Item = &Track> {
@@ -587,8 +661,7 @@ impl Project {
         fn walk(tracks: &[super::track::Track], paths: &[String], acc: &mut usize) {
             for track in tracks {
                 for clip in &track.clips {
-                    if !clip.source_path.is_empty()
-                        && paths.iter().any(|p| p == &clip.source_path)
+                    if !clip.source_path.is_empty() && paths.iter().any(|p| p == &clip.source_path)
                     {
                         *acc += 1;
                     }
@@ -973,9 +1046,12 @@ mod tests {
         project.tracks.clear();
         let mut video_track = crate::model::track::Track::new_video("V1");
         let target_src = "/tmp/target.mp4".to_string();
-        video_track
-            .clips
-            .push(Clip::new(target_src.clone(), 1_000_000_000, 0, ClipKind::Video));
+        video_track.clips.push(Clip::new(
+            target_src.clone(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
         video_track.clips.push(Clip::new(
             target_src.clone(),
             1_000_000_000,
@@ -1008,10 +1084,8 @@ mod tests {
         let count = project.count_clips_using_source_paths(&["/tmp/nope.mp4".to_string()]);
         assert_eq!(count, 0);
         // Two paths at once → 3 target + 1 other = 4
-        let count = project.count_clips_using_source_paths(&[
-            target_src,
-            "/tmp/other.mp4".to_string(),
-        ]);
+        let count =
+            project.count_clips_using_source_paths(&[target_src, "/tmp/other.mp4".to_string()]);
         assert_eq!(count, 4);
     }
 
@@ -1023,7 +1097,8 @@ mod tests {
         let mut project = Project::new("empty-path");
         project.tracks.clear();
         let mut t = crate::model::track::Track::new_video("V1");
-        t.clips.push(Clip::new("", 5_000_000_000, 0, ClipKind::Compound));
+        t.clips
+            .push(Clip::new("", 5_000_000_000, 0, ClipKind::Compound));
         project.tracks.push(t);
         assert_eq!(
             project.count_clips_using_source_paths(&["".to_string()]),
@@ -1513,5 +1588,68 @@ mod tests {
         assert!((g - 0.5012).abs() < 0.001);
         // None role returns unity
         assert!((p.bus_gain_linear(&AudioRole::None) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn color_label_display_name_falls_back_to_default() {
+        let p = Project::new("legend");
+        assert_eq!(p.display_name_for_color_label(ClipColorLabel::Red), "Red");
+        assert_eq!(p.display_name_for_color_label(ClipColorLabel::None), "None");
+    }
+
+    #[test]
+    fn color_label_custom_name_wins_over_default() {
+        let mut p = Project::new("legend");
+        assert!(p.set_color_label_name(ClipColorLabel::Red, "B-roll"));
+        assert_eq!(
+            p.display_name_for_color_label(ClipColorLabel::Red),
+            "B-roll"
+        );
+        // Other colors unaffected.
+        assert_eq!(p.display_name_for_color_label(ClipColorLabel::Blue), "Blue");
+    }
+
+    #[test]
+    fn color_label_empty_name_removes_override() {
+        let mut p = Project::new("legend");
+        p.set_color_label_name(ClipColorLabel::Green, "Interview");
+        assert_eq!(
+            p.display_name_for_color_label(ClipColorLabel::Green),
+            "Interview"
+        );
+        // Empty / whitespace removes the override.
+        assert!(p.set_color_label_name(ClipColorLabel::Green, "   "));
+        assert!(!p.color_label_names.contains_key(&ClipColorLabel::Green));
+        assert_eq!(
+            p.display_name_for_color_label(ClipColorLabel::Green),
+            "Green"
+        );
+    }
+
+    #[test]
+    fn color_label_set_trims_whitespace_and_is_noop_when_unchanged() {
+        let mut p = Project::new("legend");
+        // First write trims surrounding whitespace.
+        assert!(p.set_color_label_name(ClipColorLabel::Purple, "  Fantasy  "));
+        assert_eq!(
+            p.color_label_names.get(&ClipColorLabel::Purple).unwrap(),
+            "Fantasy"
+        );
+        // Second write with the same (trimmed-equivalent) value reports no change.
+        assert!(!p.set_color_label_name(ClipColorLabel::Purple, "Fantasy"));
+        // None variant is never settable.
+        assert!(!p.set_color_label_name(ClipColorLabel::None, "Nothing"));
+    }
+
+    #[test]
+    fn clip_color_label_palette_excludes_none() {
+        for l in ClipColorLabel::PALETTE {
+            assert_ne!(l, ClipColorLabel::None);
+        }
+        assert_eq!(ClipColorLabel::PALETTE.len(), 8);
+        // Round-trip through snake-case string.
+        for l in ClipColorLabel::PALETTE {
+            assert_eq!(ClipColorLabel::from_str(l.as_str()), Some(l));
+        }
     }
 }

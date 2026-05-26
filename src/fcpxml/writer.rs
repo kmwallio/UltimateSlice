@@ -250,6 +250,19 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                 event.push_attribute(("us:reference-stills", json.as_str()));
             }
         }
+        // Color-tag legend: per-project display names for each ClipColorLabel
+        // (e.g. Red = "B-roll"). Keys are the enum's snake_case serialization
+        // so the JSON is portable between projects + future tooling.
+        if !project.color_label_names.is_empty() {
+            let mut keyed: std::collections::BTreeMap<&str, &str> =
+                std::collections::BTreeMap::new();
+            for (label, name) in project.color_label_names.iter() {
+                keyed.insert(label.as_str(), name.as_str());
+            }
+            if let Ok(json) = serde_json::to_string(&keyed) {
+                event.push_attribute(("us:color-label-names", json.as_str()));
+            }
+        }
     }
     writer.write_event(Event::Start(event))?;
 
@@ -1047,6 +1060,18 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                         asset_clip.push_attribute((
                             "us:audio-channel-mode",
                             clip.audio_channel_mode.as_str(),
+                        ));
+                    }
+                    if clip.audio_source_stream_index != 0 {
+                        asset_clip.push_attribute((
+                            "us:audio-source-stream-index",
+                            clip.audio_source_stream_index.to_string().as_str(),
+                        ));
+                    }
+                    if clip.audio_source_channel_offset != 0 {
+                        asset_clip.push_attribute((
+                            "us:audio-source-channel-offset",
+                            clip.audio_source_channel_offset.to_string().as_str(),
                         ));
                     }
                     if let Some(lufs) = clip.measured_loudness_lufs {
@@ -1876,6 +1901,29 @@ fn apply_collected_files_to_tracks(
                             project_media_references_updated += 1;
                         }
                     }
+                    for lut_path in &mut angle.lut_paths {
+                        let Some(new_path) =
+                            remapped_collect_path(lut_path, lut_source_to_destination_path)
+                        else {
+                            continue;
+                        };
+                        if *lut_path != new_path {
+                            *lut_path = new_path;
+                            project_lut_references_updated += 1;
+                        }
+                    }
+                }
+            }
+            if let Some(takes) = clip.audition_takes.as_mut() {
+                for take in takes {
+                    if let Some(new_path) =
+                        remapped_collect_path(&take.source_path, source_to_destination_path)
+                    {
+                        if take.source_path != new_path {
+                            take.source_path = new_path;
+                            project_media_references_updated += 1;
+                        }
+                    }
                 }
             }
             if let Some(compound_tracks) = clip.compound_tracks.as_mut() {
@@ -1954,44 +2002,11 @@ where
     export_project.source_fcpxml = None;
     export_project.file_path = None;
     export_project.dirty = true;
-    for clip in export_project
-        .tracks
-        .iter_mut()
-        .flat_map(|track| track.clips.iter_mut())
-    {
-        if clip.source_path.is_empty() {
-            clip.fcpxml_original_source_path = None;
-            continue;
-        }
-        let mapped = collected
-            .source_to_destination_path
-            .get(&clip.source_path)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Missing packaged media mapping for source: {}",
-                    clip.source_path
-                )
-            })?;
-        let portable_path = normalize_packaged_path_for_portability(mapped);
-        clip.source_path = portable_path.to_string_lossy().to_string();
-        clip.fcpxml_original_source_path = None;
-    }
-
-    for clip in export_project
-        .tracks
-        .iter_mut()
-        .flat_map(|track| track.clips.iter_mut())
-    {
-        let mut rewritten: Vec<String> = Vec::new();
-        for lut_path in &clip.lut_paths {
-            let Some(mapped) = collected.lut_source_to_destination_path.get(lut_path) else {
-                continue;
-            };
-            let portable_path = normalize_packaged_path_for_portability(mapped);
-            rewritten.push(portable_path.to_string_lossy().to_string());
-        }
-        clip.lut_paths = rewritten;
-    }
+    rewrite_packaged_export_paths_in_tracks(
+        export_project.tracks.as_mut_slice(),
+        &collected.source_to_destination_path,
+        &collected.lut_source_to_destination_path,
+    )?;
 
     on_progress(ExportProjectWithMediaProgress::WritingProjectXml);
     let xml = write_fcpxml_for_path(&export_project, &output_fcpxml_path)?;
@@ -2207,9 +2222,7 @@ fn source_paths_for_collect_mode(
 ) -> Vec<String> {
     let mut paths = Vec::new();
     let mut seen = HashSet::new();
-    for clip in project.tracks.iter().flat_map(|track| track.clips.iter()) {
-        push_unique_source_path(&mut paths, &mut seen, &clip.source_path);
-    }
+    collect_track_source_paths(project.tracks.as_slice(), &mut paths, &mut seen);
     if mode == CollectFilesMode::EntireLibrary {
         for item in library.iter().filter(|item| item.has_backing_file()) {
             push_unique_source_path(&mut paths, &mut seen, &item.source_path);
@@ -2221,15 +2234,69 @@ fn source_paths_for_collect_mode(
 fn collect_clip_lut_paths(project: &Project) -> Vec<String> {
     let mut paths = Vec::new();
     let mut seen = HashSet::new();
-    for lut_path in project
-        .tracks
-        .iter()
-        .flat_map(|track| track.clips.iter())
-        .flat_map(|clip| clip.lut_paths.iter())
-    {
-        push_unique_source_path(&mut paths, &mut seen, lut_path);
-    }
+    collect_track_lut_paths(project.tracks.as_slice(), &mut paths, &mut seen);
     paths
+}
+
+fn collect_track_source_paths(
+    tracks: &[crate::model::track::Track],
+    paths: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    for clip in tracks.iter().flat_map(|track| track.clips.iter()) {
+        collect_clip_source_paths(clip, paths, seen);
+    }
+}
+
+fn collect_clip_source_paths(
+    clip: &crate::model::clip::Clip,
+    paths: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    push_unique_source_path(paths, seen, &clip.source_path);
+    if let Some(angles) = clip.multicam_angles.as_ref() {
+        for angle in angles {
+            push_unique_source_path(paths, seen, &angle.source_path);
+        }
+    }
+    if let Some(takes) = clip.audition_takes.as_ref() {
+        for take in takes {
+            push_unique_source_path(paths, seen, &take.source_path);
+        }
+    }
+    if let Some(compound_tracks) = clip.compound_tracks.as_ref() {
+        collect_track_source_paths(compound_tracks.as_slice(), paths, seen);
+    }
+}
+
+fn collect_track_lut_paths(
+    tracks: &[crate::model::track::Track],
+    paths: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    for clip in tracks.iter().flat_map(|track| track.clips.iter()) {
+        collect_clip_lut_paths_from_clip(clip, paths, seen);
+    }
+}
+
+fn collect_clip_lut_paths_from_clip(
+    clip: &crate::model::clip::Clip,
+    paths: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+) {
+    for lut_path in &clip.lut_paths {
+        push_unique_source_path(paths, seen, lut_path);
+    }
+    if let Some(angles) = clip.multicam_angles.as_ref() {
+        for angle in angles {
+            for lut_path in &angle.lut_paths {
+                push_unique_source_path(paths, seen, lut_path);
+            }
+        }
+    }
+    if let Some(compound_tracks) = clip.compound_tracks.as_ref() {
+        collect_track_lut_paths(compound_tracks.as_slice(), paths, seen);
+    }
 }
 
 fn push_unique_source_path(paths: &mut Vec<String>, seen: &mut HashSet<String>, source_path: &str) {
@@ -2326,6 +2393,97 @@ fn normalize_packaged_path_for_portability(path: &Path) -> PathBuf {
         normalized.push(part);
     }
     normalized
+}
+
+fn rewrite_packaged_export_paths_in_tracks(
+    tracks: &mut [crate::model::track::Track],
+    source_to_destination_path: &HashMap<String, PathBuf>,
+    lut_source_to_destination_path: &HashMap<String, PathBuf>,
+) -> Result<()> {
+    for track in tracks {
+        for clip in track.clips.iter_mut() {
+            rewrite_packaged_export_paths_in_clip(
+                clip,
+                source_to_destination_path,
+                lut_source_to_destination_path,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn rewrite_packaged_export_paths_in_clip(
+    clip: &mut crate::model::clip::Clip,
+    source_to_destination_path: &HashMap<String, PathBuf>,
+    lut_source_to_destination_path: &HashMap<String, PathBuf>,
+) -> Result<()> {
+    rewrite_packaged_export_source_path(&mut clip.source_path, source_to_destination_path)?;
+    rewrite_packaged_export_lut_paths(&mut clip.lut_paths, lut_source_to_destination_path)?;
+    clip.fcpxml_original_source_path = None;
+
+    if let Some(angles) = clip.multicam_angles.as_mut() {
+        for angle in angles {
+            rewrite_packaged_export_source_path(
+                &mut angle.source_path,
+                source_to_destination_path,
+            )?;
+            rewrite_packaged_export_lut_paths(
+                &mut angle.lut_paths,
+                lut_source_to_destination_path,
+            )?;
+        }
+    }
+    if let Some(takes) = clip.audition_takes.as_mut() {
+        for take in takes {
+            rewrite_packaged_export_source_path(&mut take.source_path, source_to_destination_path)?;
+        }
+    }
+    if let Some(compound_tracks) = clip.compound_tracks.as_mut() {
+        rewrite_packaged_export_paths_in_tracks(
+            compound_tracks.as_mut_slice(),
+            source_to_destination_path,
+            lut_source_to_destination_path,
+        )?;
+    }
+    Ok(())
+}
+
+fn rewrite_packaged_export_source_path(
+    source_path: &mut String,
+    source_to_destination_path: &HashMap<String, PathBuf>,
+) -> Result<()> {
+    if source_path.trim().is_empty() {
+        return Ok(());
+    }
+    let mapped = source_to_destination_path.get(source_path).ok_or_else(|| {
+        anyhow::anyhow!("Missing packaged media mapping for source: {}", source_path)
+    })?;
+    *source_path = normalize_packaged_path_for_portability(mapped)
+        .to_string_lossy()
+        .to_string();
+    Ok(())
+}
+
+fn rewrite_packaged_export_lut_paths(
+    lut_paths: &mut Vec<String>,
+    lut_source_to_destination_path: &HashMap<String, PathBuf>,
+) -> Result<()> {
+    let original_paths = std::mem::take(lut_paths);
+    let mut rewritten = Vec::with_capacity(original_paths.len());
+    for lut_path in original_paths {
+        let mapped = lut_source_to_destination_path
+            .get(&lut_path)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Missing packaged LUT mapping for source: {lut_path}")
+            })?;
+        rewritten.push(
+            normalize_packaged_path_for_portability(mapped)
+                .to_string_lossy()
+                .to_string(),
+        );
+    }
+    *lut_paths = rewritten;
+    Ok(())
 }
 
 fn decode_percent_encoded_path(path: &str) -> String {
@@ -4418,6 +4576,7 @@ fn is_writer_managed_event_attr(_key: &str) -> bool {
             | "us:script-path"
             | "us:transcript-cache"
             | "us:reference-stills"
+            | "us:color-label-names"
     )
 }
 
@@ -4585,6 +4744,8 @@ fn is_writer_managed_asset_clip_attr(key: &str) -> bool {
             | "us:pitch-shift-semitones"
             | "us:pitch-preserve"
             | "us:audio-channel-mode"
+            | "us:audio-source-stream-index"
+            | "us:audio-source-channel-offset"
             | "us:ladspa-effects"
             | "us:motion-trackers"
             | "us:tracking-binding"
@@ -5184,6 +5345,7 @@ mod tests {
         use crate::fcpxml::parser::parse_fcpxml;
         let mut project = Project::new("ReferenceStillsRT");
         let mut still = crate::model::project::ReferenceStill::new("Take 1");
+        still.origin = crate::model::project::ReferenceStillOrigin::ExportRender;
         still.width = 1920;
         still.height = 1080;
         still.captured_at_ns = 42_000_000_000;
@@ -5207,6 +5369,83 @@ mod tests {
         assert_eq!(got.filename, still.filename);
         assert_eq!(got.captured_at_ns, 42_000_000_000);
         assert_eq!(got.timeline_pos_ns, 5_000_000_000);
+        assert_eq!(
+            got.origin,
+            crate::model::project::ReferenceStillOrigin::ExportRender
+        );
+    }
+
+    #[test]
+    fn test_audio_source_routing_round_trip_through_fcpxml() {
+        use crate::fcpxml::parser::parse_fcpxml;
+
+        let mut project = Project::new("AudioRoutingRT");
+        project.tracks.clear();
+        let mut track = crate::model::track::Track::new_audio("A1");
+        let mut clip = crate::model::clip::Clip::new(
+            "/tmp/multichannel.wav",
+            1_000_000_000,
+            0,
+            crate::model::clip::ClipKind::Audio,
+        );
+        clip.audio_channel_mode = crate::model::clip::AudioChannelMode::Right;
+        clip.audio_source_stream_index = 1;
+        clip.audio_source_channel_offset = 2;
+        track.add_clip(clip.clone());
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(xml.contains("us:audio-source-stream-index=\"1\""));
+        assert!(xml.contains("us:audio-source-channel-offset=\"2\""));
+
+        let roundtripped = parse_fcpxml(&xml).expect("parse");
+        let got = &roundtripped.tracks[0].clips[0];
+        assert_eq!(got.audio_channel_mode, clip.audio_channel_mode);
+        assert_eq!(got.audio_source_stream_index, 1);
+        assert_eq!(got.audio_source_channel_offset, 2);
+    }
+
+    #[test]
+    fn test_color_label_names_round_trip_through_fcpxml() {
+        use crate::fcpxml::parser::parse_fcpxml;
+        use crate::model::clip::ClipColorLabel;
+        let mut project = Project::new("ColorLegendRT");
+        project.set_color_label_name(ClipColorLabel::Red, "B-roll");
+        project.set_color_label_name(ClipColorLabel::Green, "Interview");
+        project.set_color_label_name(ClipColorLabel::Blue, "VFX");
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            xml.contains("us:color-label-names="),
+            "color-label-names vendor attr missing"
+        );
+
+        let rt = parse_fcpxml(&xml).expect("parse");
+        assert_eq!(rt.color_label_names.len(), 3);
+        assert_eq!(
+            rt.display_name_for_color_label(ClipColorLabel::Red),
+            "B-roll"
+        );
+        assert_eq!(
+            rt.display_name_for_color_label(ClipColorLabel::Green),
+            "Interview"
+        );
+        assert_eq!(rt.display_name_for_color_label(ClipColorLabel::Blue), "VFX");
+        // Unset colors fall back to defaults.
+        assert_eq!(
+            rt.display_name_for_color_label(ClipColorLabel::Yellow),
+            "Yellow"
+        );
+    }
+
+    #[test]
+    fn test_color_label_names_empty_is_omitted_from_xml() {
+        let project = Project::new("NoLegend");
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            !xml.contains("us:color-label-names"),
+            "empty legend must not emit vendor attr"
+        );
     }
 
     #[test]
@@ -6648,6 +6887,181 @@ mod tests {
     }
 
     #[test]
+    fn test_export_project_with_media_rewrites_nested_compound_sources() {
+        use crate::model::clip::{AuditionTake, MulticamAngle};
+
+        let root = unique_test_dir("package-export-nested");
+        std::fs::create_dir_all(&root).expect("create root");
+
+        let inner_source = root.join("inner.mp4");
+        let clip_lut = root.join("clip-look.cube");
+        let angle_a_source = root.join("angle-a.mp4");
+        let angle_b_source = root.join("angle-b.mp4");
+        let angle_lut = root.join("angle-look.cube");
+        let audition_a_source = root.join("take-a.mp4");
+        let audition_b_source = root.join("take-b.mp4");
+        for (path, bytes) in [
+            (&inner_source, b"inner-media".as_slice()),
+            (&clip_lut, b"clip-lut".as_slice()),
+            (&angle_a_source, b"angle-a".as_slice()),
+            (&angle_b_source, b"angle-b".as_slice()),
+            (&angle_lut, b"angle-lut".as_slice()),
+            (&audition_a_source, b"take-a".as_slice()),
+            (&audition_b_source, b"take-b".as_slice()),
+        ] {
+            std::fs::write(path, bytes).expect("write nested packaged-export fixture");
+        }
+
+        let mut inner_track = Track::new_video("Inner Video");
+        let mut inner_clip = Clip::new(
+            inner_source.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+        inner_clip
+            .lut_paths
+            .push(clip_lut.to_string_lossy().to_string());
+        inner_track.add_clip(inner_clip);
+
+        let mut angle_a = MulticamAngle {
+            id: "angle-a".to_string(),
+            label: "Angle A".to_string(),
+            source_path: angle_a_source.to_string_lossy().to_string(),
+            source_out: 1_000_000_000,
+            media_duration_ns: Some(1_000_000_000),
+            ..Default::default()
+        };
+        angle_a
+            .lut_paths
+            .push(angle_lut.to_string_lossy().to_string());
+        let angle_b = MulticamAngle {
+            id: "angle-b".to_string(),
+            label: "Angle B".to_string(),
+            source_path: angle_b_source.to_string_lossy().to_string(),
+            source_out: 1_000_000_000,
+            media_duration_ns: Some(1_000_000_000),
+            ..Default::default()
+        };
+        inner_track.add_clip(Clip::new_multicam(1_000_000_000, vec![angle_a, angle_b]));
+
+        inner_track.add_clip(Clip::new_audition(
+            2_000_000_000,
+            vec![
+                AuditionTake {
+                    id: "take-a".to_string(),
+                    label: "Take A".to_string(),
+                    source_path: audition_a_source.to_string_lossy().to_string(),
+                    source_in: 0,
+                    source_out: 1_000_000_000,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: Some(1_000_000_000),
+                },
+                AuditionTake {
+                    id: "take-b".to_string(),
+                    label: "Take B".to_string(),
+                    source_path: audition_b_source.to_string_lossy().to_string(),
+                    source_in: 0,
+                    source_out: 1_000_000_000,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: Some(1_000_000_000),
+                },
+            ],
+            0,
+        ));
+
+        let output = root.join("NestedPackaged.uspxml");
+        let mut project = Project::new("NestedPackaged");
+        project.tracks.clear();
+        let mut outer_track = Track::new_video("Video 1");
+        outer_track.add_clip(Clip::new_compound(0, vec![inner_track]));
+        project.tracks.push(outer_track);
+
+        let library_dir =
+            export_project_with_media(&project, &output).expect("nested packaged export succeeds");
+        let packaged_root = std::fs::canonicalize(&library_dir).unwrap_or(library_dir.clone());
+        let xml = std::fs::read_to_string(&output).expect("read nested packaged xml");
+        for original_path in [
+            &inner_source,
+            &clip_lut,
+            &angle_a_source,
+            &angle_b_source,
+            &angle_lut,
+            &audition_a_source,
+            &audition_b_source,
+        ] {
+            assert!(
+                !xml.contains(original_path.to_string_lossy().as_ref()),
+                "packaged xml should not retain original nested path {}",
+                original_path.display()
+            );
+        }
+
+        let parsed = parse_fcpxml(&xml).expect("parse nested packaged xml");
+        let packaged_compound = &parsed.tracks[0].clips[0];
+        let packaged_inner_track = packaged_compound
+            .compound_tracks
+            .as_ref()
+            .expect("compound tracks preserved")[0]
+            .clone();
+
+        let packaged_inner_clip = &packaged_inner_track.clips[0];
+        assert!(
+            packaged_inner_clip
+                .source_path
+                .starts_with(packaged_root.to_string_lossy().as_ref()),
+            "inner clip source should point into packaged library"
+        );
+        assert_eq!(packaged_inner_clip.fcpxml_original_source_path, None);
+        assert!(
+            packaged_inner_clip.lut_paths[0].starts_with(packaged_root.to_string_lossy().as_ref()),
+            "inner clip LUT should point into packaged library"
+        );
+
+        let packaged_multicam = &packaged_inner_track.clips[1];
+        let packaged_angles = packaged_multicam
+            .multicam_angles
+            .as_ref()
+            .expect("multicam angles preserved");
+        assert!(
+            packaged_angles.iter().all(|angle| angle
+                .source_path
+                .starts_with(packaged_root.to_string_lossy().as_ref())),
+            "all multicam angles should point into packaged library"
+        );
+        assert!(
+            packaged_angles[0].lut_paths[0].starts_with(packaged_root.to_string_lossy().as_ref()),
+            "angle LUT should point into packaged library"
+        );
+
+        let packaged_audition = &packaged_inner_track.clips[2];
+        assert!(
+            packaged_audition
+                .source_path
+                .starts_with(packaged_root.to_string_lossy().as_ref()),
+            "audition host clip should point into packaged library"
+        );
+        let packaged_takes = packaged_audition
+            .audition_takes
+            .as_ref()
+            .expect("audition takes preserved");
+        assert!(
+            packaged_takes.iter().all(|take| take
+                .source_path
+                .starts_with(packaged_root.to_string_lossy().as_ref())),
+            "all audition takes should point into packaged library"
+        );
+
+        let copied_files: Vec<_> = std::fs::read_dir(&library_dir)
+            .expect("read packaged library dir")
+            .filter_map(|entry| entry.ok())
+            .collect();
+        assert_eq!(copied_files.len(), 7, "expected nested media and LUT files");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn test_collect_files_timeline_used_only_excludes_unused_library_media() {
         let root = unique_test_dir("collect-timeline-only");
         std::fs::create_dir_all(&root).expect("create root");
@@ -6697,6 +7111,125 @@ mod tests {
             !destination.join("unused.mp4").exists(),
             "unused library media should not be copied in timeline-used mode"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_collect_files_timeline_used_only_includes_nested_compound_media() {
+        use crate::model::clip::{AuditionTake, MulticamAngle};
+
+        let root = unique_test_dir("collect-nested-compound");
+        std::fs::create_dir_all(&root).expect("create root");
+
+        let inner_source = root.join("inner.mp4");
+        let clip_lut = root.join("clip-look.cube");
+        let angle_a_source = root.join("angle-a.mp4");
+        let angle_b_source = root.join("angle-b.mp4");
+        let angle_lut = root.join("angle-look.cube");
+        let audition_a_source = root.join("take-a.mp4");
+        let audition_b_source = root.join("take-b.mp4");
+        for (path, bytes) in [
+            (&inner_source, b"inner-media".as_slice()),
+            (&clip_lut, b"clip-lut".as_slice()),
+            (&angle_a_source, b"angle-a".as_slice()),
+            (&angle_b_source, b"angle-b".as_slice()),
+            (&angle_lut, b"angle-lut".as_slice()),
+            (&audition_a_source, b"take-a".as_slice()),
+            (&audition_b_source, b"take-b".as_slice()),
+        ] {
+            std::fs::write(path, bytes).expect("write nested collect fixture");
+        }
+
+        let destination = root.join("Collected");
+        let mut inner_track = Track::new_video("Inner Video");
+        let mut inner_clip = Clip::new(
+            inner_source.to_string_lossy().to_string(),
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        );
+        inner_clip
+            .lut_paths
+            .push(clip_lut.to_string_lossy().to_string());
+        inner_track.add_clip(inner_clip);
+
+        let mut angle_a = MulticamAngle {
+            id: "angle-a".to_string(),
+            label: "Angle A".to_string(),
+            source_path: angle_a_source.to_string_lossy().to_string(),
+            source_out: 1_000_000_000,
+            media_duration_ns: Some(1_000_000_000),
+            ..Default::default()
+        };
+        angle_a
+            .lut_paths
+            .push(angle_lut.to_string_lossy().to_string());
+        let angle_b = MulticamAngle {
+            id: "angle-b".to_string(),
+            label: "Angle B".to_string(),
+            source_path: angle_b_source.to_string_lossy().to_string(),
+            source_out: 1_000_000_000,
+            media_duration_ns: Some(1_000_000_000),
+            ..Default::default()
+        };
+        inner_track.add_clip(Clip::new_multicam(1_000_000_000, vec![angle_a, angle_b]));
+
+        inner_track.add_clip(Clip::new_audition(
+            2_000_000_000,
+            vec![
+                AuditionTake {
+                    id: "take-a".to_string(),
+                    label: "Take A".to_string(),
+                    source_path: audition_a_source.to_string_lossy().to_string(),
+                    source_in: 0,
+                    source_out: 1_000_000_000,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: Some(1_000_000_000),
+                },
+                AuditionTake {
+                    id: "take-b".to_string(),
+                    label: "Take B".to_string(),
+                    source_path: audition_b_source.to_string_lossy().to_string(),
+                    source_in: 0,
+                    source_out: 1_000_000_000,
+                    source_timecode_base_ns: None,
+                    media_duration_ns: Some(1_000_000_000),
+                },
+            ],
+            0,
+        ));
+
+        let mut project = Project::new("CollectNestedCompound");
+        project.tracks.clear();
+        let mut outer_track = Track::new_video("Video 1");
+        outer_track.add_clip(Clip::new_compound(0, vec![inner_track]));
+        project.tracks.push(outer_track);
+
+        let summary = collect_files(
+            &project,
+            &[],
+            &destination,
+            CollectFilesMode::TimelineUsedOnly,
+        )
+        .expect("nested timeline-used collection should succeed");
+        assert_eq!(summary.media_files_copied, 5);
+        assert_eq!(summary.lut_files_copied, 2);
+        assert_eq!(summary.total_files_copied(), 7);
+        for file_name in [
+            "inner.mp4",
+            "clip-look.cube",
+            "angle-a.mp4",
+            "angle-b.mp4",
+            "angle-look.cube",
+            "take-a.mp4",
+            "take-b.mp4",
+        ] {
+            assert!(
+                destination.join(file_name).exists(),
+                "expected nested packaged file {file_name}"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }

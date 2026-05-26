@@ -757,6 +757,7 @@ fn collect_export_options(
     ab_entry: &gtk::Entry,
     gif_fps_spin: &gtk::SpinButton,
     cl_combo: &gtk::DropDown,
+    hw_encoder_mode: crate::ui_state::HwEncoderMode,
 ) -> ExportOptions {
     let (output_width, output_height) = output_resolution_from_selected(or_combo.selected());
     let container = container_from_selected(ct_combo.selected());
@@ -776,6 +777,7 @@ fn collect_export_options(
         gif_fps,
         audio_channel_layout: audio_channel_layout_from_selected(cl_combo.selected()),
         hdr_passthrough: false,
+        hw_encoder_mode,
     }
 }
 
@@ -1958,6 +1960,10 @@ pub fn build_toolbar(
                                     &ab_entry,
                                     &gif_fps_spin,
                                     &cl_combo,
+                                    // Presets don't round-trip hw_encoder_mode;
+                                    // pick a stable Off so the preset hash is
+                                    // deterministic across sessions.
+                                    crate::ui_state::HwEncoderMode::Off,
                                 );
                                 let ok = {
                                     let mut state = presets_state.borrow_mut();
@@ -2021,6 +2027,7 @@ pub fn build_toolbar(
                             &ab_entry,
                             &gif_fps_spin,
                             &cl_combo,
+                            crate::ui_state::HwEncoderMode::Off,
                         );
                         let ok = state
                             .upsert_preset(ExportPreset::from_export_options(
@@ -2089,6 +2096,10 @@ pub fn build_toolbar(
                     return;
                 }
 
+                // User-driven export: read the saved hw_encoder_mode each
+                // time so a Preferences change applies to the next export
+                // without having to plumb the state through build_toolbar.
+                let hw_mode = crate::ui_state::load_preferences_state().hw_encoder_mode;
                 let options = collect_export_options(
                     &vc_combo,
                     &ct_combo,
@@ -2098,6 +2109,7 @@ pub fn build_toolbar(
                     &ab_entry,
                     &gif_fps_spin,
                     &cl_combo,
+                    hw_mode,
                 );
                 let mut state = presets_state.borrow_mut();
                 state.last_used_preset = if preset_dropdown.selected() > 0 {

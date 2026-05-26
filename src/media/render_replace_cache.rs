@@ -414,8 +414,7 @@ impl RenderReplaceCache {
             && clip.vidstab_enabled
             && clip.vidstab_smoothing > 0.0
         {
-            let trf_path =
-                format!("/tmp/ultimateslice-rrbake-{}.trf", &key);
+            let trf_path = format!("/tmp/ultimateslice-rrbake-{}.trf", &key);
             let shakiness = ((clip.vidstab_smoothing * 10.0).round() as i32).clamp(1, 10);
             let smoothing = ((clip.vidstab_smoothing * 30.0).round() as i32).clamp(1, 30);
             Some(VidstabBakeParams {
@@ -465,9 +464,7 @@ impl RenderReplaceCache {
         // project-change walker queues the inner requests and the
         // outer request re-runs on the next tick.
         if !self.nested_compounds_ready(tracks, 0) {
-            log::debug!(
-                "RenderReplaceCache: deferring compound bake (inner compound not ready)"
-            );
+            log::debug!("RenderReplaceCache: deferring compound bake (inner compound not ready)");
             return;
         }
 
@@ -506,12 +503,11 @@ impl RenderReplaceCache {
         // keeps the signature-level guarantee — `cache_key_for_compound`
         // does NOT fold dims or fps, so the cache hit rate is
         // unaffected by the fallback.
-        let synthetic_project = match build_synthetic_project_for_compound(
-            compound, 1920, 1080, 24, 1,
-        ) {
-            Some(p) => p,
-            None => return,
-        };
+        let synthetic_project =
+            match build_synthetic_project_for_compound(compound, 1920, 1080, 24, 1) {
+                Some(p) => p,
+                None => return,
+            };
 
         self.total_requested += 1;
         self.pending.insert(key.clone());
@@ -609,11 +605,7 @@ impl RenderReplaceCache {
     /// orthogonal to compound bakes and their sidecars are consumed
     /// by the export pipeline via its own sidecar lookups, not by
     /// this cache's path map.
-    fn nested_compounds_ready(
-        &self,
-        tracks: &[crate::model::track::Track],
-        depth: usize,
-    ) -> bool {
+    fn nested_compounds_ready(&self, tracks: &[crate::model::track::Track], depth: usize) -> bool {
         if depth >= MAX_COMPOUND_DEPTH {
             return true; // depth-capped: assume ready to avoid infinite defer
         }
@@ -713,10 +705,7 @@ impl RenderReplaceCache {
                             resolved.push(result.cache_key);
                         }
                         JobOutcome::Cancelled => {
-                            log::info!(
-                                "RenderReplaceCache: cancelled key={}",
-                                result.cache_key
-                            );
+                            log::info!("RenderReplaceCache: cancelled key={}", result.cache_key);
                             // Roll back total so Jobs tray math stays correct.
                             self.total_requested = self.total_requested.saturating_sub(1);
                         }
@@ -869,8 +858,7 @@ fn fold_baked_fields(
         for (name, value) in pairs {
             hasher.add(name.as_str()).add((*value * 10_000.0) as i64);
         }
-        let mut str_pairs: Vec<(&String, &String)> =
-            effect.string_params.iter().collect();
+        let mut str_pairs: Vec<(&String, &String)> = effect.string_params.iter().collect();
         str_pairs.sort_by(|a, b| a.0.cmp(b.0));
         for (name, value) in str_pairs {
             hasher.add(name.as_str()).add(value.as_str());
@@ -1607,10 +1595,7 @@ pub fn materialize_tracks_with_sidecars(
         .collect()
 }
 
-fn materialize_clip_recursive(
-    clip: &Clip,
-    render_replace_paths: &HashMap<String, String>,
-) -> Clip {
+fn materialize_clip_recursive(clip: &Clip, render_replace_paths: &HashMap<String, String>) -> Clip {
     if let Some(substituted) = materialize_clip_with_sidecar(clip, render_replace_paths) {
         return substituted;
     }
@@ -1686,10 +1671,7 @@ fn file_exists_and_nonempty(path: &str) -> bool {
 /// subtitle pixels. Only the synthetic project's clone of the tracks
 /// is mutated; the live project model is untouched and the Program
 /// Monitor overlay keeps drawing subtitles from there.
-fn strip_subtitle_visibility_recursive(
-    tracks: &mut [crate::model::track::Track],
-    depth: usize,
-) {
+fn strip_subtitle_visibility_recursive(tracks: &mut [crate::model::track::Track], depth: usize) {
     if depth >= MAX_COMPOUND_DEPTH {
         return;
     }
@@ -1905,13 +1887,7 @@ fn run_leaf_bake(
     // poll ticks. On failure we carry on with the main bake sans
     // stabilization (matches export pipeline's graceful fallback).
     let vidstab_transform_filter = if let Some(params) = vidstab {
-        if !run_vidstab_detect(
-            source_path,
-            &start,
-            &duration,
-            params,
-            cancel_flag,
-        ) {
+        if !run_vidstab_detect(source_path, &start, &duration, params, cancel_flag) {
             if cancel_flag.load(Ordering::SeqCst) {
                 // Cancelled during detect — exit without running the
                 // main pass. The dispatcher rolls the job back to Idle.
@@ -2263,7 +2239,9 @@ mod tests {
         let clip = make_clip();
         let key = cache_key_for_clip(&clip);
         // Pretend the sidecar is already cached.
-        cache.paths.insert(key.clone(), "/tmp/fake_sidecar.mov".into());
+        cache
+            .paths
+            .insert(key.clone(), "/tmp/fake_sidecar.mov".into());
         let before = cache.total_requested;
         cache.request(&clip);
         assert_eq!(cache.total_requested, before);
@@ -2802,8 +2780,7 @@ mod tests {
         let mut compound = Clip::new("", 5_000_000_000, 0, ClipKind::Compound);
         compound.compound_tracks = Some(vec![track]);
 
-        let synthetic =
-            build_synthetic_project_for_compound(&compound, 1920, 1080, 24, 1).unwrap();
+        let synthetic = build_synthetic_project_for_compound(&compound, 1920, 1080, 24, 1).unwrap();
         assert!(
             !synthetic.tracks[0].clips[0].subtitle_visible,
             "synthetic project must have subtitle_visible=false on internal clips"
@@ -2874,19 +2851,16 @@ mod tests {
         let tmp = tempfile::NamedTempFile::new().expect("temp");
         std::fs::write(tmp.path(), b"sidecar-data").expect("write");
         let mut paths: HashMap<String, String> = HashMap::new();
-        paths.insert(
-            leaf_key.clone(),
-            tmp.path().to_string_lossy().to_string(),
-        );
+        paths.insert(leaf_key.clone(), tmp.path().to_string_lossy().to_string());
 
         let substituted = materialize_tracks_with_sidecars(&[outer_track], &paths);
         let out_outer = &substituted[0].clips[0];
         assert_eq!(out_outer.kind, ClipKind::Compound);
         let out_inner = &out_outer.compound_tracks.as_ref().unwrap()[0].clips[0];
         // Leaf was substituted: source_path swapped, baked-scope cleared.
-        assert!(out_inner.source_path.ends_with(
-            tmp.path().file_name().unwrap().to_str().unwrap()
-        ));
+        assert!(out_inner
+            .source_path
+            .ends_with(tmp.path().file_name().unwrap().to_str().unwrap()));
         assert!((out_inner.brightness - 0.0).abs() < 1e-6);
         assert!(out_inner.lut_paths.is_empty());
         assert!(out_inner.frei0r_effects.is_empty());
@@ -2909,9 +2883,9 @@ mod tests {
         let substituted = materialize_clip_with_sidecar(&compound, &paths).expect("some");
         assert_eq!(substituted.kind, ClipKind::Video);
         assert!(substituted.compound_tracks.is_none());
-        assert!(substituted.source_path.ends_with(
-            tmp.path().file_name().unwrap().to_str().unwrap()
-        ));
+        assert!(substituted
+            .source_path
+            .ends_with(tmp.path().file_name().unwrap().to_str().unwrap()));
     }
 
     #[test]

@@ -75,18 +75,23 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 
 - Activates ripple trimming: trim a clip's in-point or out-point and all subsequent clips on the same track shift to fill or accommodate the change.
 - Press **R** to toggle Ripple mode on/off.
+- With a single clip selected, press **Enter** (or right-click the clip and choose **Precision Trim…**) to open a frame-by-frame precision session for the clip edge nearest the playhead. Use **Left/Right** to nudge by 1 frame, **Shift+Left/Right** for 5-frame jumps, **Enter** to commit, and **Escape** to cancel.
 
 ### Roll Edit Tool (`E`)
 
 - Click near an edit point (boundary between two adjacent clips) to adjust the cut point.
 - The left clip's out-point and the right clip's in-point move together — the overall timeline duration stays the same.
 - Press **E** to toggle Roll mode on/off.
+- While dragging, the Program Monitor shows a **2-up precision trim display** with the new out-frame on the left and new in-frame on the right. See [`program-monitor.md#precision-trim-display`](program-monitor.md) for details; disable via **Overlays ▾ → Precision trim → Off**.
+- With a single clip selected, press **Enter** (or use **Precision Trim…** from the clip context menu) to open a modal precision-roll session. The playhead decides which adjacent cut is targeted when the clip has neighbors on both sides.
 
 ### Slip Edit Tool (`Y`)
 
 - Drag a clip body to shift its **source window** (source in/out) without moving the clip on the timeline or changing its duration.
 - Useful for adjusting which portion of the source footage appears in a fixed-length clip.
 - Press **Y** to toggle Slip mode on/off.
+- While dragging, the Program Monitor shows a **4-up precision trim display** (`Prev out · Clip in · Clip out · Next in`). See [`program-monitor.md#precision-trim-display`](program-monitor.md).
+- With a single clip selected, press **Enter** to hold that 4-up view open as a frame-step editing session. Use **Left/Right** for 1-frame slips, **Shift+Left/Right** for 5 frames, then **Enter** to commit or **Escape** to revert.
 
 ### Slide Edit Tool (`U`)
 
@@ -94,6 +99,8 @@ Snapping: clip edges snap to nearby clip boundaries (±10 px threshold) while mo
 - The left neighbor's out-point extends/shrinks and the right neighbor's in-point shrinks/extends — overall timeline duration stays the same.
 - On edge clips (only one neighbor), slide remains available but movement is clamped and only the available-side neighbor is adjusted.
 - Press **U** to toggle Slide mode on/off.
+- While dragging, the Program Monitor shows a **4-up precision trim display** (`Prev out · Clip in · Clip out · Next in`). See [`program-monitor.md#precision-trim-display`](program-monitor.md).
+- With a single clip selected, press **Enter** to open the same view as a frame-by-frame slide editor. The session stays active until you commit with **Enter**, cancel with **Escape**, or click back into the timeline.
 
 ### Draw Tool (`D`)
 
@@ -471,6 +478,7 @@ The undo history is per-session (not persisted in the FCPXML).
 - Clips with phase-1 keyframes show color-coded keyframe ticks/guides on the clip body (Scale, Opacity, Position X, Position Y, Volume, Pan, Rotate, Crop Left/Right/Top/Bottom), a `KF <count>` badge, and a `◆` prefix in the clip label when keyframes are present. **Click a keyframe tick** to select the clip and jump the playhead to that keyframe time.
 - Hovering a keyframe marker shows a tooltip with the clip name, keyframe time, and which properties are modified at that keyframe moment.
 - Clips can use semantic color labels (set in the Inspector) for quick visual categorization.
+- **Color Legend** in the status bar assigns a per-project meaning to each color (e.g. Red = "B-roll", Green = "Interview"). Click the **Color Legend** button, type a name next to each color swatch, press Enter or click away to commit. Empty names fall back to the default color name. The legend is saved with the project (FCPXML `us:color-label-names` vendor attr) and can be automated via the `set_color_label_name` / `get_color_label_names` MCP tools.
 - Selected clips have a yellow highlight border.
 - Adjacent join-safe through-edits (same source with contiguous source/timeline ranges, no boundary transition, and compatible clip metadata/effects) are marked with a subtle dotted line at the cut on the track row.
 - Group peers (same `Ctrl+G` group) show a lighter secondary border when a group member is selected.
