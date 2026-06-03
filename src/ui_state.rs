@@ -639,6 +639,49 @@ impl GskRenderer {
     }
 }
 
+/// Application UI appearance. `System` follows the desktop's light/dark
+/// preference (via the XDG `org.freedesktop.appearance` portal, falling back to
+/// dark when unavailable). `Light`/`Dark` force a fixed chrome theme. The
+/// timeline / program-monitor / scopes canvases always stay on their dark
+/// professional palette regardless of this setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThemeMode {
+    System,
+    Light,
+    Dark,
+}
+
+impl Default for ThemeMode {
+    fn default() -> Self {
+        // Preserve the app's historical dark-only look for existing users;
+        // System/Light are opt-in.
+        Self::Dark
+    }
+}
+
+impl ThemeMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "system" => Self::System,
+            "light" => Self::Light,
+            _ => Self::Dark,
+        }
+    }
+}
+
+fn default_accent_color() -> String {
+    "#1565c0".to_string()
+}
+
 /// Controls the compositor output resolution relative to project dimensions.
 /// Lower quality reduces memory and CPU usage for smoother preview playback
 /// on low-end hardware. Export always uses full project resolution.
@@ -1595,6 +1638,13 @@ pub struct PreferencesState {
     /// so HDR sources display at native dynamic range (requires HDR display).
     #[serde(default)]
     pub hdr_preview_passthrough: bool,
+    /// UI chrome appearance: System (follow desktop), Light, or Dark.
+    #[serde(default)]
+    pub theme_mode: ThemeMode,
+    /// Accent color (hex `#rrggbb`) applied to buttons/toggles/progress/focus,
+    /// selection highlights, and the timeline clip-selection border/fill.
+    #[serde(default = "default_accent_color")]
+    pub accent_color: String,
 }
 
 fn default_ai_backend() -> String {
@@ -1645,6 +1695,8 @@ impl Default for PreferencesState {
             show_timeline_minimap: false,
             seen_onboarding_v1: false,
             hdr_preview_passthrough: false,
+            theme_mode: ThemeMode::default(),
+            accent_color: default_accent_color(),
         }
     }
 }
@@ -2262,6 +2314,34 @@ mod tests {
         let json = serde_json::to_string(&prefs).unwrap();
         let decoded: PreferencesState = serde_json::from_str(&json).unwrap();
         assert!(decoded.background_auto_tagging);
+    }
+
+    #[test]
+    fn theme_mode_str_round_trip() {
+        for mode in [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark] {
+            assert_eq!(ThemeMode::from_str(mode.as_str()), mode);
+        }
+        // Unknown ids fall back to Dark (preserves historical look).
+        assert_eq!(ThemeMode::from_str("nonsense"), ThemeMode::Dark);
+        assert_eq!(ThemeMode::default(), ThemeMode::Dark);
+    }
+
+    #[test]
+    fn preferences_theme_round_trip() {
+        let prefs = PreferencesState {
+            theme_mode: ThemeMode::Light,
+            accent_color: "#ff8800".to_string(),
+            ..PreferencesState::default()
+        };
+        let json = serde_json::to_string(&prefs).unwrap();
+        let decoded: PreferencesState = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.theme_mode, ThemeMode::Light);
+        assert_eq!(decoded.accent_color, "#ff8800");
+        // Old preference files without the new keys still load.
+        let legacy = serde_json::json!({}).to_string();
+        let decoded: PreferencesState = serde_json::from_str(&legacy).unwrap();
+        assert_eq!(decoded.theme_mode, ThemeMode::Dark);
+        assert_eq!(decoded.accent_color, "#1565c0");
     }
 
     #[test]

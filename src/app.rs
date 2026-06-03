@@ -59,17 +59,10 @@ pub fn run(mcp_enabled: bool, startup_project_path: Option<String>) {
 }
 
 fn load_css() {
-    // Prefer the dark variant of the system theme (Adwaita-dark on GNOME)
-    if let Some(settings) = gtk4::Settings::default() {
-        settings.set_property("gtk-application-prefer-dark-theme", true);
-    }
-
-    let css = gtk4::CssProvider::new();
-    let css_data = include_str!("style.css");
-    css.load_from_string(css_data);
-    gtk4::style_context_add_provider_for_display(
-        &gdk4::Display::default().expect("no display"),
-        &css,
-        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
+    // Apply the saved appearance preference (theme mode + accent color). This
+    // installs the shared Css provider, picks a light/dark palette, and — for
+    // System mode — starts following the desktop's color-scheme. See
+    // `crate::ui::theme` for the runtime stylesheet builder.
+    let prefs = crate::ui_state::load_preferences_state();
+    crate::ui::theme::init(prefs.theme_mode, &prefs.accent_color);
 }

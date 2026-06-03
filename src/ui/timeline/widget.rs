@@ -11179,7 +11179,7 @@ fn draw_timeline(
             let top = track_row_y(track_idx) + 2.0;
             let height = track_row_height(track) - 4.0;
             if height > 0.0 {
-                let (sr, sg, sb, sa) = crate::ui::colors::COLOR_SELECTION_FILL;
+                let (sr, sg, sb, sa) = crate::ui::colors::selection_fill();
                 cr.set_source_rgba(sr, sg, sb, sa);
                 cr.rectangle(
                     TRACK_LABEL_WIDTH + 1.0,
@@ -11188,7 +11188,7 @@ fn draw_timeline(
                     height,
                 );
                 cr.fill().ok();
-                let (br, bg, bb, ba) = crate::ui::colors::COLOR_SELECTION_BORDER;
+                let (br, bg, bb, ba) = crate::ui::colors::selection_border();
                 cr.set_source_rgba(br, bg, bb, ba);
                 cr.set_line_width(1.2);
                 cr.rectangle(

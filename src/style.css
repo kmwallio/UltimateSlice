@@ -1,54 +1,48 @@
-/* UltimateSlice — dark theme stylesheet */
-
-/* ── Global colours ─────────────────────────────────────────────────────── */
-:root {
-    --bg0:      #131315;
-    --bg1:      #1a1a1c;
-    --bg2:      #242428;
-    --bg3:      #2e2e33;
-    --border:   #333338;
-    --text:     #e0e0e0;
-    --text-dim: #aaaaaa;
-    --accent:   #1565c0;
-    --accent-h: #1976d2;
-}
+/* UltimateSlice — UI chrome stylesheet.
+ *
+ * This is the theme-agnostic rule body. Palette values come from
+ * `@define-color` tokens (`@bg0`, `@text`, `@accent`, …) injected at runtime by
+ * `src/ui/theme.rs`, which selects a light or dark header + the user's accent
+ * before loading this file. Do NOT define palette colors here — add a token to
+ * theme.rs instead. Media-viewport surfaces (`#000`, `#0e0c18`) and saturated
+ * semantic status colors are intentionally left as literals. */
 
 /* ── Base widgets ───────────────────────────────────────────────────────── */
 window,
 .background {
-    background-color: #1a1a1c;
-    color: #e0e0e0;
+    background-color: @bg1;
+    color: @text;
 }
 
 /* Every label inherits the dark foreground */
 label {
-    color: #e0e0e0;
+    color: @text;
 }
 
 /* Generic box / pane backgrounds */
 box,
 grid {
     background-color: transparent;
-    color: #e0e0e0;
+    color: @text;
 }
 
 /* ── Header bar ─────────────────────────────────────────────────────────── */
 headerbar {
-    background-color: #242428;
-    color: #e0e0e0;
-    border-bottom: 1px solid #111;
+    background-color: @bg2;
+    color: @text;
+    border-bottom: 1px solid @border;
     box-shadow: none;
 }
 
 headerbar .title {
-    color: #e0e0e0;
+    color: @text;
     font-weight: bold;
 }
 
 /* ── App toasts ──────────────────────────────────────────────────────────── */
 .app-toast {
-    background-color: rgba(24, 24, 28, 0.96);
-    border: 1px solid #3a3a42;
+    background-color: alpha(@bg2, 0.96);
+    border: 1px solid @border_strong;
     border-radius: 12px;
     padding: 10px 14px;
     box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
@@ -64,11 +58,11 @@ headerbar .title {
 }
 
 .app-toast-info {
-    border-color: #3f76c1;
+    border-color: @accent_hover;
 }
 
 .app-toast-info image {
-    color: #6ea8ff;
+    color: @accent_hover;
 }
 
 .app-toast-success {
@@ -119,7 +113,7 @@ headerbar .title {
 
 /* ── Background job tray ──────────────────────────────────────────────────── */
 .job-tray-button-active {
-    border-color: #3f76c1;
+    border-color: @accent_hover;
 }
 
 .job-tray-popover {
@@ -132,7 +126,7 @@ headerbar .title {
 
 .job-tray-row {
     padding: 8px 0;
-    border-bottom: 1px solid #2a2a2e;
+    border-bottom: 1px solid @bg_hover;
 }
 
 .job-tray-title {
@@ -153,9 +147,9 @@ headerbar .title {
 
 /* ── Buttons (global) ───────────────────────────────────────────────────── */
 button {
-    background-color: #333338;
-    color: #e0e0e0;
-    border: 1px solid #444;
+    background-color: @border;
+    color: @text;
+    border: 1px solid @border_strong;
     border-radius: 5px;
     padding: 4px 10px;
     box-shadow: none;
@@ -163,45 +157,45 @@ button {
 }
 
 button:hover {
-    background-color: #444450;
+    background-color: @border_strong;
 }
 
 button:active {
-    background-color: #222226;
+    background-color: @bg2;
 }
 
 button:disabled {
-    color: #666;
-    background-color: #2a2a2e;
+    color: @text_dim;
+    background-color: @bg_hover;
 }
 
 button.suggested-action {
-    background-color: #1565c0;
+    background-color: @accent;
     color: white;
-    border-color: #0d47a1;
+    border-color: @accent_active;
 }
 
 button.suggested-action:hover {
-    background-color: #1976d2;
+    background-color: @accent_hover;
 }
 
 /* ── Toggle buttons ─────────────────────────────────────────────────────── */
 togglebutton {
-    background-color: #333338;
-    color: #e0e0e0;
-    border: 1px solid #444;
+    background-color: @border;
+    color: @text;
+    border: 1px solid @border_strong;
     border-radius: 5px;
     padding: 4px 10px;
 }
 
 togglebutton:checked {
-    background-color: #1565c0;
+    background-color: @accent;
     color: white;
-    border-color: #0d47a1;
+    border-color: @accent_active;
 }
 
 togglebutton:hover {
-    background-color: #444450;
+    background-color: @border_strong;
 }
 
 /* ── Scrolled windows ───────────────────────────────────────────────────── */
@@ -209,22 +203,22 @@ scrolledwindow,
 scrolledwindow viewport,
 scrolledwindow undershoot,
 scrolledwindow overshoot {
-    background-color: #131315;
-    color: #e0e0e0;
+    background-color: @bg0;
+    color: @text;
 }
 
 /* Scrollbars */
 scrollbar {
-    background-color: #1a1a1c;
+    background-color: @bg1;
 }
 
 scrollbar trough {
-    background-color: #242428;
+    background-color: @bg2;
     border-radius: 4px;
 }
 
 scrollbar slider {
-    background-color: #555560;
+    background-color: @border_strong;
     border: none;
     margin: 0;
     padding: 0;
@@ -234,13 +228,13 @@ scrollbar slider {
 }
 
 scrollbar slider:hover {
-    background-color: #777788;
+    background-color: @text_dim;
 }
 
 /* ── Paned separators ───────────────────────────────────────────────────── */
 paned separator,
 paned > separator {
-    background-color: #333;
+    background-color: @border;
     min-width: 4px;
     min-height: 4px;
 }
@@ -248,26 +242,26 @@ paned > separator {
 /* ── ListBox (media browser) ────────────────────────────────────────────── */
 listbox,
 listview {
-    background-color: #131315;
-    color: #e0e0e0;
+    background-color: @bg0;
+    color: @text;
 }
 
 listbox row,
 listview row {
     background-color: transparent;
-    color: #e0e0e0;
-    border-bottom: 1px solid #2a2a2e;
+    color: @text;
+    border-bottom: 1px solid @bg_hover;
 }
 
 listbox row:selected,
 listview row:selected {
-    background-color: #1565c0;
+    background-color: @accent;
     color: white;
 }
 
 listbox row:hover,
 listview row:hover {
-    background-color: #2a2a2e;
+    background-color: @bg_hover;
 }
 
 /* ── Dialogs ────────────────────────────────────────────────────────────── */
@@ -276,68 +270,68 @@ dialog window,
 dialog .dialog-content-area,
 .dialog-vbox,
 messagedialog {
-    background-color: #1a1a1c;
-    color: #e0e0e0;
+    background-color: @bg1;
+    color: @text;
 }
 
 dialog headerbar {
-    background-color: #242428;
+    background-color: @bg2;
 }
 
 dialog .dialog-action-area button {
-    background-color: #333338;
-    color: #e0e0e0;
+    background-color: @border;
+    color: @text;
 }
 
 /* ── Progress bar ───────────────────────────────────────────────────────── */
 progressbar {
-    background-color: #242428;
+    background-color: @bg2;
     border-radius: 4px;
 }
 
 progressbar trough {
-    background-color: #333338;
+    background-color: @border;
     border-radius: 4px;
     min-height: 8px;
 }
 
 progressbar progress {
-    background-color: #1565c0;
+    background-color: @accent;
     border-radius: 4px;
     min-height: 8px;
 }
 
 progressbar text {
-    color: #e0e0e0;
+    color: @text;
     font-size: 11px;
 }
 
 /* ── Separators ─────────────────────────────────────────────────────────── */
 separator {
-    background-color: #333;
+    background-color: @border;
     min-height: 1px;
     min-width: 1px;
 }
 
 /* ── Entry / text input ─────────────────────────────────────────────────── */
 entry {
-    background-color: #242428;
-    color: #e0e0e0;
-    border: 1px solid #444;
+    background-color: @bg2;
+    color: @text;
+    border: 1px solid @border_strong;
     border-radius: 4px;
     padding: 4px 8px;
-    caret-color: #e0e0e0;
+    caret-color: @text;
 }
 
 entry:focus {
-    border-color: #1565c0;
+    border-color: @accent;
     outline: none;
 }
 
 /* ── Media browser ──────────────────────────────────────────────────────── */
 .browser-header {
     font-weight: bold;
-    color: #b8b8c0;
+    color: @text_dim;
     font-size: 12px;
     letter-spacing: 0.8px;
 }
@@ -347,12 +341,12 @@ entry:focus {
     min-width: 0;
     background-color: transparent;
     border-color: transparent;
-    color: #b8b8c0;
+    color: @text_dim;
 }
 
 .browser-header-import:hover {
-    background-color: #333338;
-    border-color: #555560;
+    background-color: @border;
+    border-color: @border_strong;
 }
 
 .media-filter-box {
@@ -360,23 +354,23 @@ entry:focus {
 }
 
 .media-list row {
-    border-bottom: 1px solid #2a2a2e;
+    border-bottom: 1px solid @bg_hover;
 }
 
 .media-list row:selected {
-    background-color: #1565c0;
+    background-color: @accent;
     color: white;
 }
 
 .clip-name {
     font-size: 12px;
     font-weight: bold;
-    color: #e0e0e0;
+    color: @text;
 }
 
 .clip-path {
     font-size: 10px;
-    color: #888;
+    color: @text_dim;
 }
 
 .offline-label {
@@ -392,12 +386,12 @@ entry:focus {
 
 .media-meta-primary {
     font-size: 10px;
-    color: #c9c9d2;
+    color: @text_dim;
 }
 
 .media-meta-secondary {
     font-size: 10px;
-    color: #9fa0aa;
+    color: @text_dim;
 }
 
 .media-grid flowboxchild:selected .media-meta-primary,
@@ -427,12 +421,12 @@ entry:focus {
 
 /* ── Preview / program monitor panels ──────────────────────────────────── */
 .preview-panel {
-    background-color: #131315;
+    background-color: @bg0;
 }
 
 .preview-header {
-    background-color: #1e1e22;
-    border-bottom: 1px solid #333;
+    background-color: @bg1;
+    border-bottom: 1px solid @border;
     padding: 4px 8px;
 }
 
@@ -445,12 +439,12 @@ entry:focus {
 }
 
 .preview-picture {
-    background-color: #444;
+    background-color: @border_strong;
 }
 
 .transport-bar {
-    background-color: #1e1e22;
-    border-top: 1px solid #333;
+    background-color: @bg1;
+    border-top: 1px solid @border;
     padding: 6px 0;
 }
 
@@ -464,8 +458,8 @@ entry:focus {
 }
 
 .source-keyword-expander {
-    background-color: #1e1e22;
-    border: 1px solid #333338;
+    background-color: @bg1;
+    border: 1px solid @border;
     border-radius: 4px;
     padding: 4px 8px;
 }
@@ -474,32 +468,32 @@ entry:focus {
 .timecode {
     font-family: monospace;
     font-size: 12px;
-    color: #d0d0d0;
+    color: @text;
 }
 
 /* ── Inspector panel ────────────────────────────────────────────────────── */
 .inspector-panel {
-    background-color: #1a1a1c;
+    background-color: @bg1;
 }
 
 .inspector-row label {
-    color: #aaaaaa;
+    color: @text_dim;
 }
 
 .inspector-row entry {
-    background-color: #242428;
+    background-color: @bg2;
 }
 
 /* ── Keyboard shortcut dialog ───────────────────────────────────────────── */
 .shortcut-key {
     font-family: monospace;
-    color: #aaaaaa;
+    color: @text_dim;
     font-size: 12px;
 }
 
 /* ── dim-label helper ───────────────────────────────────────────────────── */
 .dim-label {
-    color: #b8b8c0;
+    color: @text_dim;
     font-size: 12px;
 }
 
@@ -509,7 +503,7 @@ entry:focus {
 }
 
 .panel-empty-state {
-    color: #b8b8c0;
+    color: @text_dim;
     font-size: 12px;
 }
 
@@ -520,7 +514,7 @@ entry:focus {
 }
 .welcome-subtitle {
     font-size: 14px;
-    color: #aaaaaa;
+    color: @text_dim;
 }
 .welcome-card {
     background: rgba(255, 255, 255, 0.035);
@@ -529,8 +523,8 @@ entry:focus {
     padding: 14px;
 }
 .welcome-hero-card {
-    background: rgba(92, 140, 255, 0.08);
-    border-color: rgba(92, 140, 255, 0.22);
+    background: alpha(@accent, 0.08);
+    border-color: alpha(@accent, 0.22);
 }
 .welcome-hero-project {
     font-size: 20px;
@@ -538,16 +532,16 @@ entry:focus {
 }
 .welcome-card-summary {
     font-size: 12px;
-    color: #c3c3cb;
+    color: @text_dim;
 }
 .welcome-card-detail {
     font-size: 11px;
-    color: #9797a0;
+    color: @text_dim;
 }
 .welcome-section-header {
     font-size: 13px;
     font-weight: bold;
-    color: #aaaaaa;
+    color: @text_dim;
     margin-top: 4px;
     margin-bottom: 2px;
 }
@@ -560,7 +554,7 @@ entry:focus {
 }
 .welcome-tip {
     font-size: 11px;
-    color: #888888;
+    color: @text_dim;
 }
 .welcome-recovery-section {
     background: alpha(@warning_color, 0.08);
@@ -583,8 +577,8 @@ entry:focus {
 
 /* ── Source monitor marks bar ──────────────────────────────────────────── */
 .marks-bar {
-    background-color: #1e1e22;
-    border: 1px solid #333338;
+    background-color: @bg1;
+    border: 1px solid @border;
     border-radius: 4px;
     padding: 4px 12px;
 }
@@ -592,7 +586,7 @@ entry:focus {
 .marks-timecode {
     font-family: monospace;
     font-size: 11px;
-    color: #d0d0d0;
+    color: @text;
     letter-spacing: 0.5px;
 }
 
@@ -605,13 +599,13 @@ entry:focus {
 }
 
 .marks-dur {
-    color: #aaaaaa;
+    color: @text_dim;
 }
 
 /* ── Status bar (proxy progress) ──────────────────────────────────────── */
 .status-bar {
-    background-color: #1e1e22;
-    border-top: 1px solid #333338;
+    background-color: @bg1;
+    border-top: 1px solid @border;
     padding: 2px 8px;
     min-height: 24px;
 }
@@ -622,7 +616,7 @@ entry:focus {
 }
 
 .proxy-progress trough {
-    background-color: #2a2a30;
+    background-color: @bg_hover;
     min-height: 8px;
     border-radius: 4px;
 }
@@ -646,8 +640,8 @@ menubutton > button.flat {
 button.flat:hover,
 togglebutton.flat:hover,
 menubutton > button.flat:hover {
-    background-color: #2a2a2e;
-    border-color: #444;
+    background-color: @bg_hover;
+    border-color: @border_strong;
 }
 
 /* Round toggle style used by status-bar eye button */
@@ -696,9 +690,9 @@ button.toolbar-split-toggle {
 .export-split > menubutton.suggested-action,
 .export-split > menubutton.suggested-action > button,
 .export-split > menubutton.suggested-action button {
-    background-color: #1565c0;
+    background-color: @accent;
     color: white;
-    border-color: #0d47a1;
+    border-color: @accent_active;
 }
 
 .export-split > button.suggested-action:hover,
@@ -706,7 +700,7 @@ button.toolbar-split-toggle {
 .export-split > menubutton.suggested-action:hover > button,
 .export-split > menubutton.suggested-action > button:hover,
 .export-split > menubutton.suggested-action button:hover {
-    background-color: #1976d2;
+    background-color: @accent_hover;
 }
 
 .export-split > menubutton.suggested-action > button {
@@ -731,13 +725,13 @@ button.export-split-toggle {
 }
 
 .boxed-list {
-    background-color: #1a1a1c;
-    border: 1px solid #333338;
+    background-color: @bg1;
+    border: 1px solid @border;
     border-radius: 6px;
 }
 
 .boxed-list row {
-    border-bottom: 1px solid #2a2a2e;
+    border-bottom: 1px solid @bg_hover;
 }
 
 .boxed-list row:last-child {
@@ -745,7 +739,7 @@ button.export-split-toggle {
 }
 
 .boxed-list row:hover {
-    background-color: #2a2a2e;
+    background-color: @bg_hover;
 }
 
 /* Media grid cards */
@@ -754,11 +748,11 @@ button.export-split-toggle {
 }
 
 .media-grid flowboxchild:hover {
-    background-color: #2a2a2e;
+    background-color: @bg_hover;
 }
 
 .media-grid flowboxchild:selected {
-    background-color: #1565c0;
+    background-color: @accent;
     color: white;
 }
 
@@ -773,24 +767,24 @@ button.export-split-toggle {
     font-size: 11px;
     border-radius: 4px;
     background: transparent;
-    color: #8ab4f8;
+    color: @accent_hover;
     border: none;
     box-shadow: none;
 }
 
 .bin-breadcrumb-btn:hover {
-    background-color: #2a2a2e;
+    background-color: @bg_hover;
 }
 
 .bin-breadcrumb-sep {
-    color: #666;
+    color: @text_dim;
     font-size: 11px;
 }
 
 .bin-breadcrumb-active {
     font-size: 11px;
     font-weight: bold;
-    color: #e0e0e0;
+    color: @text;
 }
 
 /* Bin folder cells in media grid */
@@ -804,9 +798,9 @@ button.export-split-toggle {
 
 /* Popover menus (Recent projects) */
 popover {
-    background-color: #242428;
-    color: #e0e0e0;
-    border: 1px solid #333338;
+    background-color: @bg2;
+    color: @text;
+    border: 1px solid @border;
     border-radius: 8px;
 }
 
@@ -817,15 +811,15 @@ popover contents {
 /* ComboBoxText and DropDown controls in Preferences/export dialogs */
 combobox > box > button,
 dropdown > button {
-    background-color: #242428;
-    color: #e0e0e0;
-    border: 1px solid #444;
+    background-color: @bg2;
+    color: @text;
+    border: 1px solid @border_strong;
     border-radius: 4px;
 }
 
 combobox > box > button:hover,
 dropdown > button:hover {
-    background-color: #2e2e33;
+    background-color: @bg3;
 }
 
 combobox > box > button:focus,
@@ -833,7 +827,7 @@ dropdown > button:focus,
 entry:focus,
 button:focus,
 togglebutton:focus {
-    border-color: #1565c0;
+    border-color: @accent;
 }
 
 /* Scales used heavily in Inspector and export options */
@@ -845,25 +839,25 @@ slider {
 }
 
 scale trough {
-    background-color: #2a2a2e;
+    background-color: @bg_hover;
     border-radius: 999px;
     min-height: 6px;
 }
 
 scale highlight {
-    background-color: #1565c0;
+    background-color: @accent;
     border-radius: 999px;
 }
 
 scale slider {
-    background-color: #e0e0e0;
+    background-color: @text;
     border-radius: 999px;
     min-width: 14px;
     min-height: 14px;
 }
 
 scale slider:hover {
-    background-color: #ffffff;
+    background-color: @text_bright;
 }
 
 /* Compact spin-buttons alongside inspector sliders */
@@ -893,59 +887,59 @@ button.inspector-reset {
 /* Check/radio controls used across settings panels */
 checkbutton,
 radiobutton {
-    color: #e0e0e0;
+    color: @text;
 }
 
 checkbutton check,
 radiobutton radio {
-    background-color: #242428;
-    border: 1px solid #555560;
+    background-color: @bg2;
+    border: 1px solid @border_strong;
 }
 
 checkbutton:checked check,
 radiobutton:checked radio {
-    background-color: #1565c0;
-    border-color: #0d47a1;
+    background-color: @accent;
+    border-color: @accent_active;
 }
 
 /* Expander headers in Inspector sections */
 expander > title {
-    color: #d0d0d0;
+    color: @text;
     font-weight: 600;
 }
 
 /* Color scopes panel shell */
 .color-scopes-panel {
-    background-color: #131315;
-    border: 1px solid #333338;
+    background-color: @bg0;
+    border: 1px solid @border;
     border-radius: 6px;
 }
 
 /* ── Effects Browser ──────────────────────────────────────────────── */
 
 .effects-list {
-    background-color: #131315;
-    color: #e0e0e0;
+    background-color: @bg0;
+    color: @text;
 }
 
 .effects-list row {
-    border-bottom: 1px solid #2a2a2e;
+    border-bottom: 1px solid @bg_hover;
     padding: 2px 0;
 }
 
 .effects-list row:hover {
-    background-color: #2a2a2e;
+    background-color: @bg_hover;
 }
 
 .effects-list row:selected {
-    background-color: #1565c0;
+    background-color: @accent;
     color: white;
 }
 
 .effects-category-header {
     font-size: 11px;
     font-weight: 700;
-    color: #888;
+    color: @text_dim;
     text-transform: uppercase;
     letter-spacing: 0.5px;
 }
@@ -953,35 +947,35 @@ expander > title {
 .effect-name {
     font-size: 12px;
     font-weight: 600;
-    color: #e0e0e0;
+    color: @text;
 }
 
 .effect-hint {
     font-size: 10px;
-    color: #888;
+    color: @text_dim;
 }
 
 /* ── Applied Effects in Inspector ─────────────────────────────────── */
 
 .applied-effects-list {
-    background-color: #1a1a1c;
+    background-color: @bg1;
 }
 
 .applied-effects-list row {
-    border-bottom: 1px solid #2a2a2e;
+    border-bottom: 1px solid @bg_hover;
     padding: 4px 0;
 }
 
 .applied-effect-name {
     font-size: 12px;
     font-weight: 600;
-    color: #e0e0e0;
+    color: @text;
 }
 
 /* Command palette (Ctrl+Shift+P) */
 .command-palette {
-    background: #1a1a1d;
-    border: 1px solid #2a2a2e;
+    background: @bg1;
+    border: 1px solid @bg_hover;
     border-radius: 8px;
 }
 .command-palette entry {
@@ -994,33 +988,33 @@ expander > title {
     border-radius: 4px;
 }
 .command-palette row:selected {
-    background: #1565c0;
+    background: @accent;
 }
 .command-palette .cmd-category {
-    color: #888;
+    color: @text_dim;
     font-size: 0.85em;
 }
 .command-palette .cmd-shortcut {
-    color: #aaa;
+    color: @text_dim;
     font-family: monospace;
     font-size: 0.85em;
-    background: #2a2a2e;
+    background: @bg_hover;
     padding: 1px 6px;
     border-radius: 4px;
 }
 
 /* Audio mixer panel */
 .mixer-panel {
-    background: #1a1a1d;
+    background: @bg1;
 }
 .mixer-channel-strip {
-    background: #222226;
-    border: 1px solid #2a2a2e;
+    background: @bg2;
+    border: 1px solid @bg_hover;
     border-radius: 4px;
     padding: 4px;
 }
 .mixer-master {
-    border-color: #1565c0;
+    border-color: @accent;
 }
 .mixer-label {
     font-size: 0.85em;
@@ -1029,8 +1023,8 @@ expander > title {
 .mixer-role-badge {
     font-size: 0.75em;
     font-weight: bold;
-    color: #ccc;
-    background: #333;
+    color: @text_dim;
+    background: @border;
     border-radius: 3px;
     padding: 0 4px;
     margin: 2px 0;
@@ -1038,7 +1032,7 @@ expander > title {
 .mixer-db-readout {
     font-size: 0.8em;
     font-family: monospace;
-    color: #bbb;
+    color: @text_dim;
 }
 .mixer-fader trough {
     min-width: 6px;
@@ -1059,5 +1053,5 @@ expander > title {
 }
 .mixer-solo:checked {
     background: #f9a825;
-    color: #1a1a1d;
+    color: @bg1;
 }

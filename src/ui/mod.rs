@@ -23,6 +23,7 @@ pub mod program_monitor;
 pub mod project_health;
 pub mod project_loader;
 pub mod script_wizard;
+pub mod theme;
 pub mod timecode;
 pub mod timeline;
 pub mod title_templates;

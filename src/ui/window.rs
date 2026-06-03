@@ -6850,6 +6850,10 @@ pub fn build_window(
             }
             *preferences_state.borrow_mut() = new_state.clone();
             crate::ui_state::save_preferences_state(&new_state);
+            // Re-theme live (no restart). This re-loads the shared Css provider
+            // with the chosen palette + accent and updates the timeline
+            // selection accent; the global style change redraws the widget tree.
+            crate::ui::theme::apply(new_state.theme_mode, &new_state.accent_color);
             if let Err(e) = player
                 .borrow()
                 .set_hardware_acceleration(new_state.hardware_acceleration_enabled)

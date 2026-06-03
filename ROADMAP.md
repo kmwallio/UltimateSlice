@@ -762,9 +762,9 @@ FCPXML persistence).
 - [ ] Detachable / Multi-Monitor Panels for Scopes, Media Library, and Inspector
 
 **Theming & visual**
-- [ ] Light theme + system-follow option (`src/style.css` is dark-only today)
+- [x] Light theme + system-follow option — Preferences → General → Appearance offers Dark / Light / System. The stylesheet body (`src/style.css`) is now tokenized to `@define-color` refs and rebuilt at runtime by `src/ui/theme.rs` with a light or dark palette; System follows the desktop via the XDG `org.freedesktop.appearance` color-scheme portal (live `SettingChanged` subscription, dark fallback). Switches live with no restart. The timeline / program-monitor / scopes canvases intentionally stay on the dark editing palette.
 - [ ] High-contrast / large-text accessibility theme for dim rooms / vision needs
-- [ ] Accent color preference — pick the highlight color (currently red playhead, teal compound bar, gold audition badge are fixed in `src/ui/colors.rs`)
+- [x] Accent color preference — pick the highlight color from Preferences → General → Appearance. The chosen accent (hex) drives the CSS chrome (buttons, toggles, progress, focus, selection) plus derived hover/active shades, and the timeline clip-selection highlight via runtime accent in `src/ui/colors.rs`. Semantic signal colors (red playhead, audio meters, audio-role colors) stay fixed for clarity.
 - [ ] Icon set audit — replace any remaining stock icons that don't fit the dark theme; ensure all toolbar icons have consistent visual weight
 
 **Export & sharing**
