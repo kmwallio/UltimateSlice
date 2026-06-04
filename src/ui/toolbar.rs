@@ -2763,6 +2763,43 @@ pub fn build_toolbar(
         });
     }
 
+    // -- Export AAF button (audio-post interchange for Pro Tools / Avid) --
+    let btn_export_aaf = gtk::Button::with_label("Export AAF…");
+    btn_export_aaf.add_css_class("flat");
+    {
+        let project = project.clone();
+        let export_pop_weak = export_pop.downgrade();
+        btn_export_aaf.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title("Export AAF");
+            dialog.set_initial_name(Some("timeline.aaf"));
+
+            let filter = gtk::FileFilter::new();
+            filter.add_pattern("*.aaf");
+            filter.set_name(Some("AAF Files (Pro Tools / Avid)"));
+            let filters = gio::ListStore::new::<gtk::FileFilter>();
+            filters.append(&filter);
+            dialog.set_filters(Some(&filters));
+
+            let project = project.clone();
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        match crate::aaf::writer::write_aaf(&project.borrow(), &path) {
+                            Ok(_) => log::info!("AAF exported to {}", path.display()),
+                            Err(e) => log::error!("Failed to export AAF: {e}"),
+                        }
+                    }
+                }
+            });
+        });
+    }
+
     // -- Export OTIO button --
     let btn_export_otio = gtk::Button::with_label("Export OTIO…");
     btn_export_otio.add_css_class("flat");
@@ -2882,6 +2919,7 @@ pub fn build_toolbar(
     export_pop_box.append(&btn_create_snapshot);
     export_pop_box.append(&btn_manage_snapshots);
     export_pop_box.append(&btn_export_edl);
+    export_pop_box.append(&btn_export_aaf);
     export_pop_box.append(&btn_export_otio);
     export_pop_box.append(&btn_restore_backup);
 

@@ -700,7 +700,7 @@ FCPXML persistence).
 - [x] Chapter markers in export (embed project markers as MP4/MKV chapter metadata via ffmpeg FFMETADATA)
 - [x] Still frame export (GUI menu/button to export current Program Monitor frame as PNG/JPEG/PPM via toolbar Export dropdown)
 - [x] EDL export (CMX 3600) — for online editing, color grading handoff, broadcast
-- [ ] AAF export — standard interchange for audio post-production (Pro Tools)
+- [x] AAF export — standard interchange for audio post-production (Pro Tools / Avid). Native-Rust writer (`src/aaf/`): embeds a pyaaf2-generated skeleton (AAF header + full metadictionary + empty Mobs set) and appends the dynamic object graph with the `cfb` crate — a CompositionMob (one slot per audio track as Filler+SourceClip sequences, plus a flattened video-reference slot and a timecode slot) and one SourceMob per source file (PCMDescriptor for audio, ImportDescriptor for the video reference) with NetworkLocators to external `file://` URLs (linked media). Exposed via **Export ▼ → Export AAF…** and the `save_aaf` MCP tool. Output is validated by round-tripping through pyaaf2 (`tools/validate_aaf.py`); clip lengths, gaps, MobID references, linked URLs, and timecode all read back with full fidelity.
 - [x] Export progress dialog with cancel (ProgressBar + status label)
 
 ### Polish

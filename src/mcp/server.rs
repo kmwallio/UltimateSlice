@@ -874,6 +874,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "save_aaf",
+            "description": "Export the timeline to an AAF (.aaf) file for audio post-production (Pro Tools / Avid). Writes all audio tracks plus a flattened video-reference track and a timecode track, with linked (external) media.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path for output .aaf file" }
+                },
+                "required": ["path"]
+            }
+        },
+        {
             "name": "save_otio",
             "description": "Export the current project to an OpenTimelineIO (.otio) JSON file for interchange with DaVinci Resolve, Premiere, Nuke, etc.",
             "inputSchema": {
@@ -3267,6 +3278,11 @@ fn dispatch_tool_payload(
         },
 
         "save_edl" => McpCommand::SaveEdl {
+            path: arg_str!(args, "path"),
+            reply: tx,
+        },
+
+        "save_aaf" => McpCommand::SaveAaf {
             path: arg_str!(args, "path"),
             reply: tx,
         },
