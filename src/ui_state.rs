@@ -650,6 +650,9 @@ pub enum ThemeMode {
     System,
     Light,
     Dark,
+    /// High-contrast dark palette with raised small-text floors and prominent
+    /// focus rings, for low-vision / bright-room use.
+    HighContrast,
 }
 
 impl Default for ThemeMode {
@@ -666,6 +669,7 @@ impl ThemeMode {
             Self::System => "system",
             Self::Light => "light",
             Self::Dark => "dark",
+            Self::HighContrast => "high_contrast",
         }
     }
 
@@ -673,6 +677,7 @@ impl ThemeMode {
         match value {
             "system" => Self::System,
             "light" => Self::Light,
+            "high_contrast" => Self::HighContrast,
             _ => Self::Dark,
         }
     }
@@ -2318,7 +2323,12 @@ mod tests {
 
     #[test]
     fn theme_mode_str_round_trip() {
-        for mode in [ThemeMode::System, ThemeMode::Light, ThemeMode::Dark] {
+        for mode in [
+            ThemeMode::System,
+            ThemeMode::Light,
+            ThemeMode::Dark,
+            ThemeMode::HighContrast,
+        ] {
             assert_eq!(ThemeMode::from_str(mode.as_str()), mode);
         }
         // Unknown ids fall back to Dark (preserves historical look).

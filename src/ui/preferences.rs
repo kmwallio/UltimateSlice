@@ -184,11 +184,14 @@ pub fn show_preferences_dialog(
     theme_combo.append(Some("system"), "System (follow desktop)");
     theme_combo.append(Some("light"), "Light");
     theme_combo.append(Some("dark"), "Dark");
+    theme_combo.append(Some("high_contrast"), "High Contrast (large text)");
     theme_combo.set_active_id(Some(current.theme_mode.as_str()));
     theme_combo.set_halign(gtk::Align::Start);
     let theme_hint = Label::new(Some(
         "Light/Dark switch the app chrome. System follows your desktop's light/dark setting. \
-         The timeline, program monitor, and scopes always use the dark editing palette.",
+         High Contrast uses a pure-black palette with bright borders, stronger focus rings, and \
+         larger small text for low-vision / bright-room use. The timeline, program monitor, and \
+         scopes always use the dark editing palette.",
     ));
     theme_hint.set_halign(gtk::Align::Start);
     theme_hint.add_css_class("dim-label");

@@ -763,7 +763,7 @@ FCPXML persistence).
 
 **Theming & visual**
 - [x] Light theme + system-follow option — Preferences → General → Appearance offers Dark / Light / System. The stylesheet body (`src/style.css`) is now tokenized to `@define-color` refs and rebuilt at runtime by `src/ui/theme.rs` with a light or dark palette; System follows the desktop via the XDG `org.freedesktop.appearance` color-scheme portal (live `SettingChanged` subscription, dark fallback). Switches live with no restart. The timeline / program-monitor / scopes canvases intentionally stay on the dark editing palette.
-- [ ] High-contrast / large-text accessibility theme for dim rooms / vision needs
+- [x] High-contrast / large-text accessibility theme — a **High Contrast** option in Preferences → General → Appearance (`ThemeMode::HighContrast`) renders a pure-black palette with white text and bright borders, prominent keyboard focus rings (`:focus-visible` outlines), and raised small-text floors (the 10/11px utility classes bumped to a readable 13px while display text keeps its hierarchy). Built on the runtime theme system: a dedicated `HC_HEADER` palette plus an `HC_EXTRA` rule block appended only in this mode (`src/ui/theme.rs`).
 - [x] Accent color preference — pick the highlight color from Preferences → General → Appearance. The chosen accent (hex) drives the CSS chrome (buttons, toggles, progress, focus, selection) plus derived hover/active shades, and the timeline clip-selection highlight via runtime accent in `src/ui/colors.rs`. Semantic signal colors (red playhead, audio meters, audio-role colors) stay fixed for clarity.
 - [ ] Icon set audit — replace any remaining stock icons that don't fit the dark theme; ensure all toolbar icons have consistent visual weight
 

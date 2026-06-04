@@ -55,13 +55,57 @@ const LIGHT_HEADER: &str = "\
 @define-color text_dim #5c5c66;\n\
 @define-color text_bright #000000;\n";
 
+/// `@define-color` header for the high-contrast dark palette: pure-black
+/// surfaces, white text, and bright borders for maximum separation.
+const HC_HEADER: &str = "\
+@define-color bg0 #000000;\n\
+@define-color bg1 #000000;\n\
+@define-color bg2 #0b0b0b;\n\
+@define-color bg3 #161616;\n\
+@define-color bg_hover #262626;\n\
+@define-color border #b9b9c4;\n\
+@define-color border_strong #ffffff;\n\
+@define-color text #ffffff;\n\
+@define-color text_dim #d4d4dc;\n\
+@define-color text_bright #ffffff;\n";
+
+/// Extra rules appended only in High Contrast mode. Raises the smallest
+/// utility-text classes to a readable floor (without shrinking display text,
+/// so the type hierarchy is preserved), adds a prominent keyboard focus ring,
+/// and strengthens control borders / separators.
+const HC_EXTRA: &str = "\n\
+/* ── High Contrast accessibility additions ── */\n\
+.media-meta-secondary, .media-meta-primary, .media-offline-badge,\n\
+.clip-path, .welcome-card-detail, .welcome-tip, .marks-timecode,\n\
+.small-btn, .bin-breadcrumb-btn, .bin-breadcrumb-sep, .bin-breadcrumb-active,\n\
+.effects-category-header, .effect-hint, progressbar text {\n\
+    font-size: 13px;\n\
+}\n\
+button:focus-visible, entry:focus-visible, combobox:focus-visible,\n\
+spinbutton:focus-visible, checkbutton:focus-visible, switch:focus-visible,\n\
+scale:focus-visible {\n\
+    outline-color: @accent;\n\
+    outline-style: solid;\n\
+    outline-width: 3px;\n\
+    outline-offset: 1px;\n\
+}\n\
+separator {\n\
+    background-color: @border_strong;\n\
+    min-width: 2px;\n\
+    min-height: 2px;\n\
+}\n\
+button, entry, combobox, spinbutton {\n\
+    border: 1px solid @border_strong;\n\
+}\n";
+
 const DEFAULT_ACCENT: &str = "#1565c0";
 
-/// Concrete light/dark choice after `System` has been resolved.
+/// Concrete palette choice after `System` has been resolved.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Resolved {
     Light,
     Dark,
+    HighContrast,
 }
 
 struct ThemeState {
@@ -122,6 +166,13 @@ fn build_css(resolved: Resolved, accent_hex: &str) -> String {
     let header = match resolved {
         Resolved::Dark => DARK_HEADER,
         Resolved::Light => LIGHT_HEADER,
+        Resolved::HighContrast => HC_HEADER,
+    };
+    // High Contrast appends extra rules (large-text floors, focus rings) after
+    // the shared body; the other palettes use the body unchanged.
+    let extra = match resolved {
+        Resolved::HighContrast => HC_EXTRA,
+        _ => "",
     };
     format!(
         "{header}\
@@ -129,7 +180,7 @@ fn build_css(resolved: Resolved, accent_hex: &str) -> String {
 @define-color accent_hover {hover};\n\
 @define-color accent_active {active};\n\
 @define-color accent_fg #ffffff;\n\
-{BODY}"
+{BODY}{extra}"
     )
 }
 
@@ -145,7 +196,7 @@ fn render(resolved: Resolved, accent: &str) {
     if let Some(settings) = gtk4::Settings::default() {
         settings.set_property(
             "gtk-application-prefer-dark-theme",
-            resolved == Resolved::Dark,
+            matches!(resolved, Resolved::Dark | Resolved::HighContrast),
         );
     }
 }
@@ -154,6 +205,7 @@ fn resolve(mode: ThemeMode) -> Resolved {
     match mode {
         ThemeMode::Light => Resolved::Light,
         ThemeMode::Dark => Resolved::Dark,
+        ThemeMode::HighContrast => Resolved::HighContrast,
         ThemeMode::System => resolve_system().unwrap_or(Resolved::Dark),
     }
 }
@@ -301,6 +353,19 @@ mod tests {
         let light = build_css(Resolved::Light, "#1565c0");
         assert!(light.contains("@define-color bg0 #fafafb;"));
         assert!(light.contains("@define-color text #1c1c20;"));
+    }
+
+    #[test]
+    fn high_contrast_uses_hc_palette_and_appends_extra() {
+        let hc = build_css(Resolved::HighContrast, "#1565c0");
+        assert!(hc.contains("@define-color bg0 #000000;"));
+        assert!(hc.contains("@define-color text #ffffff;"));
+        // The accessibility extras are appended only for high contrast.
+        assert!(hc.contains("High Contrast accessibility additions"));
+        assert!(hc.contains("focus-visible"));
+        // Other palettes do NOT carry the extras.
+        assert!(!build_css(Resolved::Dark, "#1565c0").contains("focus-visible"));
+        assert!(!build_css(Resolved::Light, "#1565c0").contains("focus-visible"));
     }
 
     #[test]
