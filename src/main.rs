@@ -1,4 +1,5 @@
 #![recursion_limit = "1024"]
+mod aaf;
 mod app;
 mod edl;
 mod fcpxml;
