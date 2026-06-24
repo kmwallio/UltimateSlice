@@ -20,10 +20,20 @@
 //!    source-duration frames so those compositing-level operations
 //!    work unchanged.
 //!
-//! Phase 1 scope: the listed pixel-level effects. Chroma key, HSL
-//! qualifier, masks, stabilization, and audio effects are NOT in the
-//! baked scope for now — they continue to apply live on top of the
-//! baked frame.
+//! Baked scope (leaf clips): colour grade + colour keyframes, LUT
+//! stack, blur / denoise / sharpness, frei0r user effects, HSL
+//! qualifier, chroma key (ProRes 4444 alpha), video stabilization
+//! (vidstab), LADSPA audio effects, and static / untracked shape masks
+//! (rectangle / ellipse / path). The matching `neutralize_baked_fields`
+//! (export) and `neutralize_baked_effects_for_sidecar_clips` (preview)
+//! must zero every one of these so the live chain runs as passthrough.
+//!
+//! Stays LIVE on top of the baked frame (NOT in the signature): the
+//! clip transform / opacity / blend / speed / reverse / freeze /
+//! transitions, plus tracked or keyframed masks (their geometry changes
+//! per frame, so a single static bake filter can't represent them), and
+//! masks of any shape combined with chroma key when a path mask is
+//! present (the path `alphamerge` would clobber the keyed alpha).
 
 use crate::model::clip::{Clip, ClipKind};
 use crate::model::project::Project;
@@ -117,6 +127,13 @@ enum RenderReplaceJob {
         /// `vidstabtransform=...` to `video_filter` before the main
         /// bake. `None` skips the pre-pass entirely.
         vidstab: Option<VidstabBakeParams>,
+        /// When present, a path-mask grayscale PGM was written to this
+        /// path; the worker brings it in via `movie`+`scale2ref`+
+        /// `alphamerge` (so the bake needs `-filter_complex` instead of
+        /// `-vf`). Rect/ellipse masks don't use this — they're folded
+        /// into `video_filter` as an inline `geq` alpha. Removed after
+        /// the bake, like the vidstab `.trf` file. `None` = no path mask.
+        mask_pgm_path: Option<String>,
     },
     Compound {
         cache_key: String,
@@ -397,7 +414,7 @@ impl RenderReplaceCache {
 
         self.evict_if_oversized();
 
-        let video_filter = build_bake_video_filter(clip);
+        let mut video_filter = build_bake_video_filter(clip);
         let start_seconds = clip.source_in as f64 / 1_000_000_000.0;
         let duration_seconds =
             clip.source_out.saturating_sub(clip.source_in) as f64 / 1_000_000_000.0;
@@ -426,7 +443,60 @@ impl RenderReplaceCache {
             None
         };
         let audio_filter = crate::media::export::build_ladspa_effects_filter(clip);
-        let needs_alpha = clip.chroma_key_enabled;
+        // Shape masks (Phase 3). Static, untracked masks bake into the
+        // sidecar's alpha; tracked / keyframed masks (and path+chroma
+        // combos) stay live — see `leaf_masks_bakeable`. Masks resolve in
+        // clip-local source space (identity transform) because the leaf
+        // sidecar holds pre-transform source-resolution frames. A fixed
+        // 1920x1080 reference is fine for path rasterization: masks are
+        // normalized [0,1] and `scale2ref` maps the PGM onto whatever the
+        // source decodes to (the normalized fraction is preserved).
+        let mut mask_pgm_path: Option<String> = None;
+        let mut masks_need_alpha = false;
+        if leaf_masks_bakeable(&clip.masks, clip.chroma_key_enabled) {
+            match crate::media::mask_alpha::build_leaf_bake_mask_ffmpeg_alpha(
+                &clip.masks,
+                1920,
+                1080,
+                0,
+            ) {
+                Some(crate::media::mask_alpha::LeafBakeMaskAlpha::Geq(expr)) => {
+                    // Multiply the frame's existing alpha by the mask
+                    // expression. `format=yuva420p` guarantees an alpha
+                    // plane (and composes correctly after a chroma-key
+                    // alpha earlier in the chain for rect/ellipse masks).
+                    let mask_filter = format!(
+                        "format=yuva420p,geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*({expr})'"
+                    );
+                    if video_filter == "null" {
+                        video_filter = mask_filter;
+                    } else {
+                        video_filter.push(',');
+                        video_filter.push_str(&mask_filter);
+                    }
+                    masks_need_alpha = true;
+                }
+                Some(crate::media::mask_alpha::LeafBakeMaskAlpha::Raster {
+                    bytes,
+                    width,
+                    height,
+                }) => {
+                    let pgm = format!("/tmp/ultimateslice-rrbake-{}.pgm", &key);
+                    let mut data = format!("P5\n{width} {height}\n255\n").into_bytes();
+                    data.extend_from_slice(&bytes);
+                    if std::fs::write(&pgm, &data).is_ok() {
+                        mask_pgm_path = Some(pgm);
+                        masks_need_alpha = true;
+                    } else {
+                        log::warn!(
+                            "RenderReplaceCache: failed to write mask PGM for key={key}; baking without mask"
+                        );
+                    }
+                }
+                None => {}
+            }
+        }
+        let needs_alpha = clip.chroma_key_enabled || masks_need_alpha;
         if let Some(ref tx) = self.work_tx {
             let _ = tx.send(RenderReplaceJob::Leaf {
                 cache_key: key,
@@ -439,6 +509,7 @@ impl RenderReplaceCache {
                 duration_seconds,
                 cancel_flag,
                 vidstab,
+                mask_pgm_path,
             });
         }
     }
@@ -786,6 +857,50 @@ impl Drop for RenderReplaceCache {
 
 // ── Signature ──────────────────────────────────────────────────────────────
 
+/// A leaf clip's shape masks are baked into the sidecar (vs. left live)
+/// only when EVERY enabled mask is **static** (no keyframe lanes) and
+/// **untracked** (no motion `tracking_binding`). Animated or tracked
+/// masks change geometry per frame; a single static bake filter would
+/// freeze them, so those stay live on top of the sidecar. Returns false
+/// when there are no enabled masks (nothing to bake).
+///
+/// Path masks combined with chroma key are also kept live: the path
+/// `alphamerge` step replaces the frame's alpha, which would clobber the
+/// chroma-keyed alpha already baked into the same sidecar. Chroma key
+/// still bakes in that case; only the masks stay live.
+pub fn leaf_masks_bakeable(
+    masks: &[crate::model::clip::ClipMask],
+    chroma_key_enabled: bool,
+) -> bool {
+    let active: Vec<&crate::model::clip::ClipMask> =
+        masks.iter().filter(|m| m.enabled).collect();
+    if active.is_empty() {
+        return false;
+    }
+    if !active.iter().all(|m| leaf_mask_is_static(m)) {
+        return false;
+    }
+    if chroma_key_enabled
+        && active
+            .iter()
+            .any(|m| m.shape == crate::model::clip::MaskShape::Path)
+    {
+        return false;
+    }
+    true
+}
+
+fn leaf_mask_is_static(mask: &crate::model::clip::ClipMask) -> bool {
+    mask.tracking_binding.is_none()
+        && mask.center_x_keyframes.is_empty()
+        && mask.center_y_keyframes.is_empty()
+        && mask.width_keyframes.is_empty()
+        && mask.height_keyframes.is_empty()
+        && mask.rotation_keyframes.is_empty()
+        && mask.feather_keyframes.is_empty()
+        && mask.expansion_keyframes.is_empty()
+}
+
 /// Baked-scope field collection used by both `Clip` and `ProgramClip`
 /// signature builders. Keeping both paths going through this helper
 /// guarantees the preview-side lookup (ProgramClip) and the cache
@@ -820,6 +935,7 @@ fn fold_baked_fields(
     chroma_key_color: u32,
     chroma_key_tolerance: f64,
     chroma_key_softness: f64,
+    masks: &[crate::model::clip::ClipMask],
 ) {
     hasher.add_source_fingerprint(source_path);
     hasher.add(source_in).add(source_out);
@@ -916,6 +1032,17 @@ fn fold_baked_fields(
             .add((chroma_key_tolerance * 10_000.0) as i64)
             .add((chroma_key_softness * 10_000.0) as i64);
     }
+    // Shape masks (Phase 3) — folded only when the mask set is bakeable
+    // (all enabled masks static + untracked, and not a path-mask+chroma
+    // combo). Tracked / keyframed masks stay live and are deliberately
+    // excluded from the signature so toggling them doesn't churn the
+    // bake. Reuses the same `fold_clip_masks` hasher the compound path
+    // uses, so a standalone leaf and an inner compound clip with the
+    // same masks share hash bits.
+    hasher.add("leafmasks");
+    if leaf_masks_bakeable(masks, chroma_key_enabled) {
+        fold_clip_masks(hasher, masks);
+    }
 }
 
 fn fold_color_keyframes(
@@ -973,6 +1100,7 @@ pub fn cache_key_for_program_clip_fields(
     chroma_key_color: u32,
     chroma_key_tolerance: f64,
     chroma_key_softness: f64,
+    masks: &[crate::model::clip::ClipMask],
     brightness_kfs: &[crate::model::clip::NumericKeyframe],
     contrast_kfs: &[crate::model::clip::NumericKeyframe],
     saturation_kfs: &[crate::model::clip::NumericKeyframe],
@@ -1007,6 +1135,7 @@ pub fn cache_key_for_program_clip_fields(
         chroma_key_color,
         chroma_key_tolerance,
         chroma_key_softness,
+        masks,
     );
     // Insert color-KF fold between the scalar color block and the
     // denoise/sharpness/blur block, matching cache_key_for_clip's
@@ -1056,6 +1185,7 @@ pub fn cache_key_for_clip(clip: &Clip) -> String {
         clip.chroma_key_color,
         clip.chroma_key_tolerance as f64,
         clip.chroma_key_softness as f64,
+        &clip.masks,
         &clip.brightness_keyframes,
         &clip.contrast_keyframes,
         &clip.saturation_keyframes,
@@ -1470,17 +1600,17 @@ pub fn build_synthetic_project_for_compound(
 /// - for leaf clips, keeps the existing kind and window, but the
 ///   source_in/source_out are reset to `0..(source_out - source_in)`
 ///   because the leaf sidecar is already trimmed during bake;
-/// - zeroes every baked-scope field (brightness / contrast /
-///   saturation / temperature / tint / exposure / black_point /
-///   shadows / highlights / denoise / sharpness / blur / frei0r
-///   effects / LUT stack / color keyframes) so the export pipeline's
-///   `build_*_filter` helpers return empty strings — no double-apply
-///   on top of the baked pixels;
+/// - zeroes every baked-scope field (colour grade + colour keyframes,
+///   denoise / sharpness / blur, frei0r effects, LUT stack, vidstab,
+///   LADSPA audio, HSL qualifier, chroma key, and static / untracked
+///   shape masks) via `neutralize_baked_fields` so the export
+///   pipeline's `build_*_filter` helpers return empty strings — no
+///   double-apply on top of the baked pixels;
 /// - preserves all "live scope" state (transform / opacity / blend /
-///   transitions / speed / reverse / freeze / timeline_start / label
-///   / masks / chroma key / audio effects) so the rendered sidecar
-///   still gets composited on top of the timeline exactly as the user
-///   sees it in the Program Monitor.
+///   transitions / speed / reverse / freeze / timeline_start / label,
+///   plus tracked or keyframed masks that were intentionally NOT baked)
+///   so the rendered sidecar still gets composited on top of the
+///   timeline exactly as the user sees it in the Program Monitor.
 ///
 /// For compound clips the compound's OWN top-level color/effects are
 /// explicitly preserved (they're part of the compound's "live scope"
@@ -1613,6 +1743,9 @@ fn materialize_clip_recursive(clip: &Clip, render_replace_paths: &HashMap<String
 }
 
 fn neutralize_baked_fields(clip: &mut Clip) {
+    // Decide mask baking BEFORE clearing chroma key below — the
+    // path-mask+chroma carve-out in `leaf_masks_bakeable` reads it.
+    let bake_masks = leaf_masks_bakeable(&clip.masks, clip.chroma_key_enabled);
     clip.brightness = 0.0;
     clip.contrast = 1.0;
     clip.saturation = 1.0;
@@ -1651,6 +1784,14 @@ fn neutralize_baked_fields(clip: &mut Clip) {
     // live pipeline from re-keying already-transparent pixels and
     // doubling up the softness transition.
     clip.chroma_key_enabled = false;
+    // Shape masks (Phase 3) — baked into the sidecar's alpha channel for
+    // static, untracked masks. Clear them so the live mask pad probe
+    // doesn't re-apply (and double-feather) the same alpha. Tracked /
+    // keyframed masks were never baked (see `leaf_masks_bakeable`), so
+    // they survive here and keep applying live on top of the sidecar.
+    if bake_masks {
+        clip.masks.clear();
+    }
     // Leaf bakes write ONLY these fields to the sidecar. The clip's
     // render_replace_enabled flag stays set so signatures re-match if
     // the user edits a live-scope field (transform etc.) and the
@@ -1810,6 +1951,7 @@ fn run_render_replace_job(job: RenderReplaceJob) -> JobOutcome {
             duration_seconds,
             cancel_flag,
             vidstab,
+            mask_pgm_path,
             ..
         } => run_leaf_bake(
             &source_path,
@@ -1821,6 +1963,7 @@ fn run_render_replace_job(job: RenderReplaceJob) -> JobOutcome {
             duration_seconds,
             &cancel_flag,
             vidstab.as_ref(),
+            mask_pgm_path.as_deref(),
         ),
         RenderReplaceJob::Compound {
             synthetic_project,
@@ -1873,6 +2016,7 @@ fn run_leaf_bake(
     duration_seconds: f64,
     cancel_flag: &Arc<AtomicBool>,
     vidstab: Option<&VidstabBakeParams>,
+    mask_pgm_path: Option<&str>,
 ) -> JobOutcome {
     let duration = if duration_seconds > 0.001 {
         format!("{:.6}", duration_seconds)
@@ -1939,13 +2083,36 @@ fn run_leaf_bake(
     }
     args.push("-i".into());
     args.push(source_path.to_string());
-    args.push("-map".into());
-    args.push("0:v:0?".into());
-    args.push("-map".into());
-    args.push("0:a?".into());
-    if !composed_filter.is_empty() {
-        args.push("-vf".into());
-        args.push(composed_filter);
+    if let Some(pgm) = mask_pgm_path {
+        // Path mask: bring the rasterized grayscale PGM in via `movie`,
+        // size it to the decoded frame with `scale2ref` (the bake doesn't
+        // know the source resolution up front; masks are normalized so
+        // scaling preserves placement), then `alphamerge` it onto the
+        // (yuva) effect output. `needs_alpha` is already true, so the
+        // encoder is ProRes 4444 and the merged alpha survives.
+        let fx = if composed_filter.is_empty() {
+            "format=yuva420p".to_string()
+        } else {
+            format!("{composed_filter},format=yuva420p")
+        };
+        let complex = format!(
+            "[0:v]{fx}[fxout];movie='{pgm}',format=gray[mkraw];[mkraw][fxout]scale2ref[mk][fx2];[fx2][mk]alphamerge[vout]"
+        );
+        args.push("-filter_complex".into());
+        args.push(complex);
+        args.push("-map".into());
+        args.push("[vout]".into());
+        args.push("-map".into());
+        args.push("0:a?".into());
+    } else {
+        args.push("-map".into());
+        args.push("0:v:0?".into());
+        args.push("-map".into());
+        args.push("0:a?".into());
+        if !composed_filter.is_empty() {
+            args.push("-vf".into());
+            args.push(composed_filter);
+        }
     }
     if !audio_filter.is_empty() {
         args.push("-af".into());
@@ -2014,6 +2181,11 @@ fn run_leaf_bake(
     // wastes /tmp space.
     if let Some(params) = vidstab {
         let _ = std::fs::remove_file(&params.trf_path);
+    }
+    // Remove the path-mask PGM scratch file too — it's only meaningful
+    // for this one bake (same lifecycle as the vidstab `.trf`).
+    if let Some(pgm) = mask_pgm_path {
+        let _ = std::fs::remove_file(pgm);
     }
     outcome
 }
@@ -2672,22 +2844,126 @@ mod tests {
     }
 
     #[test]
-    fn leaf_signature_stable_across_mask_edits() {
-        use crate::model::clip::{ClipMask, MaskShape};
-        // Leaf (non-compound) clips deliberately leave masks LIVE —
-        // the bake only covers the pixel-level effect stack. So adding
-        // or tweaking a mask on a standalone clip must NOT invalidate
-        // the bake. This is a different path from the compound walker.
+    fn leaf_signature_bakes_static_masks_and_keeps_live_masks_out() {
+        use crate::model::clip::{ClipMask, MaskShape, NumericKeyframe, TrackingBinding};
+        // Phase 3: a static, untracked mask on a standalone (leaf) clip
+        // IS baked into the sidecar alpha, so adding or editing one MUST
+        // invalidate the bake.
         let a = make_clip();
         let mut b = a.clone();
         let mut mask = ClipMask::new(MaskShape::Rectangle);
         mask.center_x = 0.4;
         b.masks.push(mask);
-        assert_eq!(
+        assert_ne!(
             cache_key_for_clip(&a),
             cache_key_for_clip(&b),
-            "standalone-clip mask edits must be free — masks stay live, not baked"
+            "a static rect mask is baked, so it must change the leaf signature"
         );
+
+        // Moving the baked mask re-bakes too.
+        let mut c = b.clone();
+        c.masks[0].center_x = 0.6;
+        assert_ne!(
+            cache_key_for_clip(&b),
+            cache_key_for_clip(&c),
+            "moving a baked mask must invalidate the sidecar"
+        );
+
+        // A disabled mask is never baked → no signature movement.
+        let mut d = a.clone();
+        let mut disabled = ClipMask::new(MaskShape::Rectangle);
+        disabled.enabled = false;
+        d.masks.push(disabled);
+        assert_eq!(
+            cache_key_for_clip(&a),
+            cache_key_for_clip(&d),
+            "a disabled mask is never baked, so it must not move the signature"
+        );
+
+        // A tracked mask stays LIVE (per-frame motion can't be a static
+        // bake) → must NOT change the leaf signature.
+        let mut e = a.clone();
+        let mut tracked = ClipMask::new(MaskShape::Rectangle);
+        tracked.center_x = 0.4;
+        tracked.tracking_binding = Some(TrackingBinding::new("src", "trk"));
+        e.masks.push(tracked);
+        assert_eq!(
+            cache_key_for_clip(&a),
+            cache_key_for_clip(&e),
+            "tracked masks stay live and must not invalidate the bake"
+        );
+
+        // A keyframed mask likewise stays live.
+        let mut f = a.clone();
+        let mut animated = ClipMask::new(MaskShape::Rectangle);
+        animated.center_x_keyframes.push(NumericKeyframe {
+            time_ns: 0,
+            value: 0.4,
+            interpolation: Default::default(),
+            bezier_controls: None,
+        });
+        f.masks.push(animated);
+        assert_eq!(
+            cache_key_for_clip(&a),
+            cache_key_for_clip(&f),
+            "keyframed masks stay live and must not invalidate the bake"
+        );
+    }
+
+    #[test]
+    fn leaf_masks_bakeable_carve_outs() {
+        use crate::model::clip::{ClipMask, MaskShape, TrackingBinding};
+        // Static rect/ellipse → bakeable.
+        let rect = ClipMask::new(MaskShape::Rectangle);
+        assert!(leaf_masks_bakeable(std::slice::from_ref(&rect), false));
+        // No enabled masks → not bakeable (nothing to bake).
+        let mut disabled = ClipMask::new(MaskShape::Rectangle);
+        disabled.enabled = false;
+        assert!(!leaf_masks_bakeable(std::slice::from_ref(&disabled), false));
+        // Tracked mask → not bakeable.
+        let mut tracked = ClipMask::new(MaskShape::Rectangle);
+        tracked.tracking_binding = Some(TrackingBinding::new("s", "t"));
+        assert!(!leaf_masks_bakeable(std::slice::from_ref(&tracked), false));
+        // Path mask alone → bakeable; with chroma key → kept live
+        // (alphamerge would clobber the keyed alpha).
+        let path = ClipMask::new(MaskShape::Path);
+        assert!(leaf_masks_bakeable(std::slice::from_ref(&path), false));
+        assert!(!leaf_masks_bakeable(std::slice::from_ref(&path), true));
+        // Rect + chroma key → still bakeable (geq multiplies alpha).
+        assert!(leaf_masks_bakeable(std::slice::from_ref(&rect), true));
+    }
+
+    #[test]
+    fn leaf_bake_mask_alpha_geq_for_rect_raster_for_path() {
+        use crate::media::mask_alpha::{build_leaf_bake_mask_ffmpeg_alpha, LeafBakeMaskAlpha};
+        use crate::model::clip::{ClipMask, MaskShape};
+        // No masks → nothing to emit.
+        assert!(build_leaf_bake_mask_ffmpeg_alpha(&[], 64, 64, 0).is_none());
+        // Rect → inline geq, written against ffmpeg's W/H geq vars so the
+        // bake is correct at the source's native (unknown) resolution.
+        let rect = ClipMask::new(MaskShape::Rectangle);
+        match build_leaf_bake_mask_ffmpeg_alpha(std::slice::from_ref(&rect), 1920, 1080, 0) {
+            Some(LeafBakeMaskAlpha::Geq(expr)) => {
+                assert!(
+                    expr.contains("/W") && expr.contains("/H"),
+                    "rect mask geq must be W/H-relative, got: {expr}"
+                );
+            }
+            other => panic!("expected Geq for a rect mask, got {other:?}"),
+        }
+        // Path → rasterized grayscale buffer at the requested reference res.
+        let path = ClipMask::new(MaskShape::Path);
+        match build_leaf_bake_mask_ffmpeg_alpha(std::slice::from_ref(&path), 64, 48, 0) {
+            Some(LeafBakeMaskAlpha::Raster {
+                bytes,
+                width,
+                height,
+            }) => {
+                assert_eq!((width, height), (64, 48));
+                assert_eq!(bytes.len(), 64 * 48);
+            }
+            other => panic!("expected Raster for a path mask, got {other:?}"),
+        }
     }
 
     #[test]

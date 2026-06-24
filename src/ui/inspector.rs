@@ -4744,12 +4744,14 @@ pub fn build_inspector(
     render_replace_section.append(&Separator::new(Orientation::Horizontal));
     let render_replace_check = CheckButton::with_label("Render and Replace");
     render_replace_check.set_tooltip_text(Some(
-        "Bake this clip's color grade, LUT stack, frei0r effects, and \
-         blur / denoise / sharpness into a high-quality ProRes sidecar \
-         so playback stops re-computing them every frame. Transforms, \
-         opacity, transitions, and speed ramps stay editable. Changing \
-         any baked effect invalidates the sidecar and a fresh bake is \
-         queued in the background.",
+        "Bake this clip's effect stack — colour grade, LUT stack, frei0r \
+         effects, blur / denoise / sharpness, HSL qualifier, chroma key, \
+         stabilization, audio (LADSPA) effects, and static shape masks — \
+         into a high-quality ProRes sidecar so playback stops \
+         re-computing them every frame. Transforms, opacity, transitions, \
+         speed ramps, and tracked / animated masks stay editable. \
+         Changing any baked effect invalidates the sidecar and a fresh \
+         bake is queued in the background.",
     ));
     render_replace_section.append(&render_replace_check);
     // Batch toggle — visible only while the multi-selection holds
