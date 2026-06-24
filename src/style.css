@@ -756,6 +756,28 @@ button.export-split-toggle {
     color: white;
 }
 
+/* Export preset gallery cards */
+.export-preset-card {
+    border-radius: 6px;
+    border: 1px solid @border;
+    background-color: @bg1;
+}
+
+.export-preset-card:hover {
+    background-color: @bg_hover;
+    border-color: @border_strong;
+}
+
+.export-preset-card:selected {
+    background-color: @accent;
+    border-color: @accent_active;
+    color: white;
+}
+
+.export-preset-card:selected .media-meta-secondary {
+    color: rgba(255, 255, 255, 0.92);
+}
+
 /* Bin breadcrumb navigation */
 .bin-breadcrumb-bar {
     min-height: 24px;

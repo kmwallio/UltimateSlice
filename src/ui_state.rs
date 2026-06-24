@@ -1178,6 +1178,79 @@ impl ExportPreset {
             hdr_passthrough: self.hdr_passthrough,
         }
     }
+
+    /// Short video-codec label for the gallery card, e.g. "H.264".
+    pub fn video_codec_label(&self) -> &'static str {
+        match self.video_codec {
+            ExportVideoCodec::H264 => "H.264",
+            ExportVideoCodec::H265 => "H.265",
+            ExportVideoCodec::Vp9 => "VP9",
+            ExportVideoCodec::ProRes => "ProRes",
+            ExportVideoCodec::Av1 => "AV1",
+        }
+    }
+
+    /// Resolution label for the card, with friendly shorthand for common
+    /// sizes. `0` in either axis means "use the project's resolution".
+    pub fn resolution_label(&self) -> String {
+        if self.output_width == 0 || self.output_height == 0 {
+            return "Project size".to_string();
+        }
+        match (self.output_width, self.output_height) {
+            (3840, 2160) => "4K UHD".to_string(),
+            (1920, 1080) => "1080p".to_string(),
+            (1280, 720) => "720p".to_string(),
+            (1080, 1920) => "1080×1920 (9:16)".to_string(),
+            (w, h) => format!("{w}×{h}"),
+        }
+    }
+
+    /// One-line spec summary shown under the preset name on its card,
+    /// e.g. "H.264 · 1080p · CRF 23 · AAC · MP4" or "GIF · 640 wide · 15 fps".
+    pub fn spec_summary(&self) -> String {
+        let container = match self.container {
+            ExportContainer::Mp4 => "MP4",
+            ExportContainer::Mov => "MOV",
+            ExportContainer::WebM => "WebM",
+            ExportContainer::Mkv => "MKV",
+            ExportContainer::Gif => "GIF",
+        };
+        if self.container == ExportContainer::Gif {
+            let fps = self
+                .gif_fps
+                .map(|f| format!(" · {f} fps"))
+                .unwrap_or_default();
+            return format!("GIF · {}{fps}", self.resolution_label());
+        }
+        let audio = match self.audio_codec {
+            ExportAudioCodec::Aac => "AAC",
+            ExportAudioCodec::Opus => "Opus",
+            ExportAudioCodec::Flac => "FLAC",
+            ExportAudioCodec::Pcm => "PCM",
+        };
+        let layout = match self.audio_channel_layout {
+            ExportAudioChannelLayout::Stereo => "",
+            ExportAudioChannelLayout::Surround51 => " 5.1",
+            ExportAudioChannelLayout::Surround71 => " 7.1",
+        };
+        let hdr = if self.hdr_passthrough { " · HDR" } else { "" };
+        format!(
+            "{} · {} · CRF {} · {audio}{layout} · {container}{hdr}",
+            self.video_codec_label(),
+            self.resolution_label(),
+            self.crf,
+        )
+    }
+
+    /// Aspect ratio `(w, h)` for the card's proportional preview box.
+    /// Falls back to 16:9 when the preset follows the project resolution.
+    pub fn card_aspect(&self) -> (u32, u32) {
+        if self.output_width == 0 || self.output_height == 0 {
+            (16, 9)
+        } else {
+            (self.output_width, self.output_height)
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1343,6 +1416,50 @@ fn default_export_presets() -> Vec<ExportPreset> {
             audio_bitrate_kbps: 448,
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Surround51,
+            hdr_passthrough: false,
+        },
+        // Vertical 9:16 for Instagram Reels — 1080×1920 H.264, CRF 23.
+        ExportPreset {
+            name: "Instagram Reel 9:16".to_string(),
+            video_codec: ExportVideoCodec::H264,
+            container: ExportContainer::Mp4,
+            output_width: 1080,
+            output_height: 1920,
+            crf: 23,
+            audio_codec: ExportAudioCodec::Aac,
+            audio_bitrate_kbps: 192,
+            gif_fps: None,
+            audio_channel_layout: ExportAudioChannelLayout::Stereo,
+            hdr_passthrough: false,
+        },
+        // Vertical 9:16 for TikTok — 1080×1920 H.264, slightly higher
+        // bitrate for the platform's re-encode headroom.
+        ExportPreset {
+            name: "TikTok 9:16".to_string(),
+            video_codec: ExportVideoCodec::H264,
+            container: ExportContainer::Mp4,
+            output_width: 1080,
+            output_height: 1920,
+            crf: 22,
+            audio_codec: ExportAudioCodec::Aac,
+            audio_bitrate_kbps: 256,
+            gif_fps: None,
+            audio_channel_layout: ExportAudioChannelLayout::Stereo,
+            hdr_passthrough: false,
+        },
+        // Small, fast 720p H.264 for email / chat / quick web shares —
+        // higher CRF + lower audio bitrate to keep the file tiny.
+        ExportPreset {
+            name: "Web Compressed 720p".to_string(),
+            video_codec: ExportVideoCodec::H264,
+            container: ExportContainer::Mp4,
+            output_width: 1280,
+            output_height: 720,
+            crf: 28,
+            audio_codec: ExportAudioCodec::Aac,
+            audio_bitrate_kbps: 128,
+            gif_fps: None,
+            audio_channel_layout: ExportAudioChannelLayout::Stereo,
             hdr_passthrough: false,
         },
     ]
@@ -2213,6 +2330,70 @@ mod tests {
     }
 
     #[test]
+    fn default_presets_include_vertical_social_and_web_compressed() {
+        let names: Vec<String> = default_export_presets()
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        for expected in [
+            "Instagram Reel 9:16",
+            "TikTok 9:16",
+            "Web Compressed 720p",
+        ] {
+            assert!(
+                names.iter().any(|n| n == expected),
+                "missing built-in preset {expected:?}; have {names:?}"
+            );
+        }
+        // The two vertical presets must actually be portrait 9:16.
+        for p in default_export_presets() {
+            if p.name.contains("9:16") {
+                assert!(
+                    p.output_height > p.output_width,
+                    "{} should be portrait, got {}x{}",
+                    p.name,
+                    p.output_width,
+                    p.output_height
+                );
+                assert_eq!(p.card_aspect(), (1080, 1920));
+            }
+        }
+    }
+
+    #[test]
+    fn spec_summary_is_human_readable() {
+        let reel = default_export_presets()
+            .into_iter()
+            .find(|p| p.name == "Instagram Reel 9:16")
+            .unwrap();
+        let s = reel.spec_summary();
+        assert!(s.contains("H.264"), "{s}");
+        assert!(s.contains("9:16"), "{s}");
+        assert!(s.contains("AAC"), "{s}");
+        // ProRes archive surfaces 4K + container.
+        let prores = default_export_presets()
+            .into_iter()
+            .find(|p| p.name == "Archive ProRes 4K")
+            .unwrap();
+        let ps = prores.spec_summary();
+        assert!(ps.contains("ProRes") && ps.contains("4K") && ps.contains("MOV"), "{ps}");
+        // GIF gets the fps-flavored summary, never a CRF/audio line.
+        let gif = default_export_presets()
+            .into_iter()
+            .find(|p| p.name == "Animated GIF")
+            .unwrap();
+        let gs = gif.spec_summary();
+        assert!(gs.starts_with("GIF"), "{gs}");
+        assert!(gs.contains("fps") && !gs.contains("CRF"), "{gs}");
+        // Project-size fallback + 16:9 card aspect when resolution is 0.
+        let mut proj = reel.clone();
+        proj.output_width = 0;
+        proj.output_height = 0;
+        assert_eq!(proj.resolution_label(), "Project size");
+        assert_eq!(proj.card_aspect(), (16, 9));
+    }
+
+    #[test]
     fn ui_state_defaults_missing_export_presets_field() {
         let parsed: UiState =
             serde_json::from_str(r#"{"preferences":{"hardware_acceleration_enabled":true}}"#)
@@ -2232,6 +2413,9 @@ mod tests {
                 "WebM VP9 1080p",
                 "Animated GIF",
                 "Cinema H.264 5.1 1080p",
+                "Instagram Reel 9:16",
+                "TikTok 9:16",
+                "Web Compressed 720p",
             ]
         );
         assert!(parsed.export_presets.last_used_preset.is_none());

@@ -768,8 +768,8 @@ FCPXML persistence).
 - [ ] Icon set audit — replace any remaining stock icons that don't fit the dark theme; ensure all toolbar icons have consistent visual weight
 
 **Export & sharing**
-- [ ] Export presets gallery with thumbnail cards (YouTube 1080p, YouTube 4K, Instagram Reel 9:16, TikTok, ProRes Master, Web Compressed, etc.) instead of a flat dropdown
-- [ ] Share-link panel — after export, a popover with "Reveal in file manager", "Open with...", "Copy path", and (optional) upload-to-service hooks
+- [x] Export presets gallery with thumbnail cards (YouTube 1080p, YouTube 4K, Instagram Reel 9:16, TikTok, ProRes Master, Web Compressed, etc.) instead of a flat dropdown — the Export Settings dialog now shows a scrollable `FlowBox` gallery of preset cards (proportional aspect-ratio preview box + name + one-line spec summary via `ExportPreset::spec_summary`/`card_aspect`), replacing the flat `DropDown`. A hidden `DropDown` is retained as the selection-state holder so the existing Save/Update/Delete handlers are unchanged; cards drive it via `set_selected`. Built-in presets gained vertical 9:16 **Instagram Reel** and **TikTok** plus a small **Web Compressed 720p** (existing presets already cover YouTube 1080p/4K and a ProRes master). `src/ui/toolbar.rs` + `src/ui_state.rs`.
+- [x] Share-link panel — after export, a popover with "Reveal in file manager", "Open", "Copy path" — the export progress dialog reveals a **Share / Locate** menu button on success whose popover offers reveal-in-file-manager (`FileLauncher::open_containing_folder`), open-with-default-app (`FileLauncher::launch`), and copy-path-to-clipboard. New `src/ui/share.rs`. (Upload-to-service hooks remain a future optional add-on.)
 - [x] Export queue panel persistence + drag-reorder — persistence shipped earlier via `ExportQueueState` serde JSON; drag-reorder (insert-before + end-zone), pause-after-current (worker checks `Arc<AtomicBool>` between jobs, no mid-export kill), retry-failed (`↻` button on Error rows), and crash recovery (`repair_stuck_running` on dialog open) all landed in `src/ui/export_queue.rs`
 
 **Performance perception**

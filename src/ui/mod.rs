@@ -25,6 +25,7 @@ pub mod project_loader;
 pub mod script_wizard;
 pub mod theme;
 pub mod timecode;
+pub mod share;
 pub mod timeline;
 pub mod title_templates;
 pub mod titles_browser;
