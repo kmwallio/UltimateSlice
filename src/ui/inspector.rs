@@ -1655,7 +1655,8 @@ impl InspectorView {
             let rk = mid_zone.1.to_string();
             let gk = mid_zone.2.to_string();
             let bk = mid_zone.3.to_string();
-            build_color_wheel(160, (mid_r, mid_g, mid_b), move |r, g, b| {
+            let mid_neutral = (mid_zone.4, mid_zone.4, mid_zone.4);
+            build_color_wheel(160, (mid_r, mid_g, mid_b), mid_neutral, move |r, g, b| {
                 if *updating.borrow() {
                     return;
                 }
@@ -1705,7 +1706,8 @@ impl InspectorView {
                 let rk = zone.1.to_string();
                 let gk = zone.2.to_string();
                 let bk = zone.3.to_string();
-                build_color_wheel(120, (zone_r, zone_g, zone_b), move |r, g, b| {
+                let zone_neutral = (zone.4, zone.4, zone.4);
+                build_color_wheel(120, (zone_r, zone_g, zone_b), zone_neutral, move |r, g, b| {
                     if *updating.borrow() {
                         return;
                     }
