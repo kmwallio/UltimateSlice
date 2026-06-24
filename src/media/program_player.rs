@@ -5639,7 +5639,12 @@ impl ProgramPlayer {
         let clamped = db.clamp(-24.0, 24.0);
         let linear = 10.0_f64.powf(clamped / 20.0);
         if let Some(ref vol) = self.master_volume_element {
-            vol.set_property("volume", linear);
+            // Use `volume-full-range`: the plain `volume` property caps at
+            // 10.0 (≈ +20 dB), so +20..+24 dB would be silently clamped and
+            // the top of the loudness-normalize range would be a no-op.
+            // `volume-full-range` accepts the full linear value (15.85× at
+            // +24 dB), matching the ffmpeg `volume=` export path.
+            vol.set_property("volume-full-range", linear);
         }
     }
 
@@ -15779,8 +15784,13 @@ impl ProgramPlayer {
                         .build()
                         .ok()?;
                     for (param, &val) in &effect.params {
-                        if elem.find_property(param).is_some() {
-                            elem.set_property_from_str(param, &val.to_string());
+                        if let Some(pspec) = elem.find_property(param) {
+                            // Clamp to the control port's declared range so an
+                            // out-of-range value from a project file / MCP
+                            // doesn't reach the LADSPA plugin raw (matches the
+                            // slider + export clamping).
+                            let clamped = clamp_f64_to_pspec(&pspec, val);
+                            elem.set_property_from_str(param, &clamped.to_string());
                         }
                     }
                     Some(elem)
@@ -16252,6 +16262,26 @@ impl ProgramPlayer {
     }
 }
 
+/// Clamp `val` to a numeric GObject property's declared `[minimum, maximum]`
+/// range. Handles `gdouble` / `gfloat` specs (LADSPA control ports and frei0r
+/// scalars); returns `val` unchanged for other types or when the spec reports
+/// non-finite / inverted bounds. Used so values arriving from project files or
+/// MCP (which bypass the UI sliders) can't exceed a plugin's limits.
+fn clamp_f64_to_pspec(pspec: &glib::ParamSpec, val: f64) -> f64 {
+    if let Some(ps) = pspec.downcast_ref::<glib::ParamSpecDouble>() {
+        let (lo, hi) = (ps.minimum(), ps.maximum());
+        if lo.is_finite() && hi.is_finite() && lo < hi {
+            return val.clamp(lo, hi);
+        }
+    } else if let Some(ps) = pspec.downcast_ref::<glib::ParamSpecFloat>() {
+        let (lo, hi) = (ps.minimum() as f64, ps.maximum() as f64);
+        if lo.is_finite() && hi.is_finite() && lo < hi {
+            return val.clamp(lo, hi);
+        }
+    }
+    val
+}
+
 /// Set a frei0r element property with correct GLib type conversion.
 ///
 /// Frei0r parameters are stored as f64 in our model, but the actual GStreamer
@@ -16280,10 +16310,12 @@ fn set_frei0r_property(elem: &gst::Element, param: &str, val: f64) {
                 if pmin.is_finite() && pmax.is_finite() && pmin < pmax {
                     val.clamp(pmin, pmax)
                 } else {
-                    val
+                    // No usable range from the plugin — fall back to frei0r's
+                    // normalized [0,1] convention instead of sending raw.
+                    val.clamp(0.0, 1.0)
                 }
             } else {
-                val
+                val.clamp(0.0, 1.0)
             };
             elem.set_property(param, clamped);
         } else if vtype == glib::Type::F32 {
@@ -16293,10 +16325,10 @@ fn set_frei0r_property(elem: &gst::Element, param: &str, val: f64) {
                 if pmin.is_finite() && pmax.is_finite() && pmin < pmax {
                     (val as f32).clamp(pmin, pmax)
                 } else {
-                    val as f32
+                    (val as f32).clamp(0.0, 1.0)
                 }
             } else {
-                val as f32
+                (val as f32).clamp(0.0, 1.0)
             };
             elem.set_property(param, clamped);
         } else if vtype == glib::Type::STRING {

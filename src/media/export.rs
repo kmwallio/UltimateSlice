@@ -4023,36 +4023,50 @@ fn format_frei0r_native_param<P: AsRef<str>>(
 ) -> String {
     use crate::media::frei0r_registry::Frei0rNativeType;
 
+    // frei0r normalized params are all in [0,1]; clamp so a value from a
+    // project file / MCP that exceeds that convention doesn't reach the
+    // ffmpeg frei0r filter_params string raw.
+    let norm = |v: f64| v.clamp(0.0, 1.0);
     match native_type {
         Frei0rNativeType::Color => {
-            let r = gst_properties
-                .first()
-                .and_then(|k| effect.params.get(k.as_ref()))
-                .copied()
-                .unwrap_or(0.0);
-            let g = gst_properties
-                .get(1)
-                .and_then(|k| effect.params.get(k.as_ref()))
-                .copied()
-                .unwrap_or(0.0);
-            let b = gst_properties
-                .get(2)
-                .and_then(|k| effect.params.get(k.as_ref()))
-                .copied()
-                .unwrap_or(0.0);
+            let r = norm(
+                gst_properties
+                    .first()
+                    .and_then(|k| effect.params.get(k.as_ref()))
+                    .copied()
+                    .unwrap_or(0.0),
+            );
+            let g = norm(
+                gst_properties
+                    .get(1)
+                    .and_then(|k| effect.params.get(k.as_ref()))
+                    .copied()
+                    .unwrap_or(0.0),
+            );
+            let b = norm(
+                gst_properties
+                    .get(2)
+                    .and_then(|k| effect.params.get(k.as_ref()))
+                    .copied()
+                    .unwrap_or(0.0),
+            );
             format!("{r:.6}/{g:.6}/{b:.6}")
         }
         Frei0rNativeType::Position => {
-            let x = gst_properties
-                .first()
-                .and_then(|k| effect.params.get(k.as_ref()))
-                .copied()
-                .unwrap_or(0.0);
-            let y = gst_properties
-                .get(1)
-                .and_then(|k| effect.params.get(k.as_ref()))
-                .copied()
-                .unwrap_or(0.0);
+            let x = norm(
+                gst_properties
+                    .first()
+                    .and_then(|k| effect.params.get(k.as_ref()))
+                    .copied()
+                    .unwrap_or(0.0),
+            );
+            let y = norm(
+                gst_properties
+                    .get(1)
+                    .and_then(|k| effect.params.get(k.as_ref()))
+                    .copied()
+                    .unwrap_or(0.0),
+            );
             format!("{x:.6}/{y:.6}")
         }
         Frei0rNativeType::NativeString => {
@@ -4070,7 +4084,7 @@ fn format_frei0r_native_param<P: AsRef<str>>(
         }
         Frei0rNativeType::Double => {
             let prop = gst_properties.first().map(|s| s.as_ref()).unwrap_or("");
-            let val = effect.params.get(prop).copied().unwrap_or(0.0);
+            let val = norm(effect.params.get(prop).copied().unwrap_or(0.0));
             format!("{val:.6}")
         }
     }
@@ -4148,10 +4162,15 @@ pub(crate) fn build_frei0r_effects_filter(clip: &crate::model::clip::Clip) -> St
                 .join("|")
         } else {
             // No registry info — fall back to deterministic property-name order.
+            // Clamp to frei0r's normalized [0,1] convention (no per-param
+            // range available here).
             let mut keys: Vec<_> = effect.params.keys().collect();
             keys.sort_unstable();
             keys.into_iter()
-                .map(|k| format!("{:.6}", effect.params.get(k).copied().unwrap_or(0.0)))
+                .map(|k| {
+                    let v = effect.params.get(k).copied().unwrap_or(0.0).clamp(0.0, 1.0);
+                    format!("{v:.6}")
+                })
                 .collect::<Vec<_>>()
                 .join("|")
         };
@@ -5807,8 +5826,13 @@ fn build_pitch_filter(clip: &crate::model::clip::Clip) -> String {
 
     // FFmpeg rubberband filter: pitch= is a ratio (2^(semitones/12)),
     // tempo= is the speed factor (only used for pitch-preserved speed changes).
+    // Clamp to ±12 semitones to match the preview path (program_player's
+    // rubberband element clamps the same way); without this an out-of-range
+    // value loaded from a project/OTIO/FCPXML/MCP would export a wildly
+    // different pitch than the Program Monitor previews.
     let pitch_ratio = if has_pitch_shift {
-        2.0_f64.powf(clip.pitch_shift_semitones / 12.0)
+        let semis = clip.pitch_shift_semitones.clamp(-12.0, 12.0);
+        2.0_f64.powf(semis / 12.0)
     } else {
         1.0
     };
@@ -6116,11 +6140,16 @@ pub(crate) fn build_ladspa_effects_filter(clip: &crate::model::clip::Clip) -> St
                     .params
                     .iter()
                     .map(|p| {
+                        // Clamp to the port's declared range so a value from a
+                        // project file / MCP that exceeds the plugin's bounds
+                        // doesn't reach the ffmpeg ladspa filter raw (matches
+                        // the slider + preview clamping).
                         let val = effect
                             .params
                             .get(&p.name)
                             .copied()
-                            .unwrap_or(p.default_value);
+                            .unwrap_or(p.default_value)
+                            .clamp(p.min, p.max);
                         format!("{val:.6}")
                     })
                     .collect();
@@ -6827,7 +6856,8 @@ mod tests {
         build_adjustment_layer_filter_graph, build_adjustment_scope_alpha_expression,
         build_audio_crossfade_filters, build_color_filter, build_crop_filter,
         build_export_snapshot_project, build_grading_filter, build_hsl_qualifier_filter,
-        build_keyframed_property_expression, build_pan_expression, build_rotation_filter,
+        build_keyframed_property_expression, build_pan_expression, build_pitch_filter,
+        build_rotation_filter,
         build_scale_position_filter, build_subtitle_filter_composited,
         build_surround_lfe_tap_filter, build_surround_upmix_filter, build_temperature_tint_filter,
         build_timing_filter, build_title_filter, build_volume_filter,
@@ -6850,6 +6880,34 @@ mod tests {
     use crate::ui_state::CrossfadeCurve;
     use gstreamer as gst;
     use std::process::Command;
+
+    #[test]
+    fn export_pitch_clamps_to_twelve_semitones() {
+        // Regression: the export rubberband pitch must clamp to ±12 semitones
+        // like the preview path, so an out-of-range value from a project file /
+        // OTIO / FCPXML / MCP can't export a wildly different pitch than the
+        // Program Monitor previews. 100 semitones must behave like 12, not
+        // 2^(100/12) ≈ 257×.
+        let mut clip = Clip::new("/tmp/test.mp4", 5_000_000_000, 0, ClipKind::Audio);
+        clip.pitch_shift_semitones = 100.0;
+        let f = build_pitch_filter(&clip);
+        assert!(
+            f.contains("pitch=2.000000"),
+            "expected clamped pitch ratio 2.0 (12 semitones), got: {f}"
+        );
+        // Symmetric on the low side.
+        clip.pitch_shift_semitones = -100.0;
+        let f = build_pitch_filter(&clip);
+        assert!(
+            f.contains("pitch=0.500000"),
+            "expected clamped pitch ratio 0.5 (-12 semitones), got: {f}"
+        );
+        // In-range values are unaffected (1 octave up = +12 already, pick +7).
+        clip.pitch_shift_semitones = 7.0;
+        let f = build_pitch_filter(&clip);
+        let expected = format!("pitch={:.6}", 2.0_f64.powf(7.0 / 12.0));
+        assert!(f.contains(&expected), "in-range pitch changed: {f} vs {expected}");
+    }
 
     fn extract_colorbalance_component(filter: &str, key: &str) -> f32 {
         let needle = format!("{key}=");
