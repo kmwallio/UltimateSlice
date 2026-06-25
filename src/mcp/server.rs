@@ -992,6 +992,11 @@ fn tools_list() -> Value {
                         "type": "string",
                         "enum": ["stereo", "surround_5_1", "surround_7_1"],
                         "description": "Output audio channel layout. Optional; defaults to stereo."
+                    },
+                    "hevc_pixel_profile": {
+                        "type": "string",
+                        "enum": ["main8", "main10", "main422_10"],
+                        "description": "HEVC pixel profile, only used when video_codec is h265: main8 (8-bit 4:2:0), main10 (10-bit 4:2:0), main422_10 (10-bit 4:2:2 mastering). Optional; defaults to main8."
                     }
                 },
                 "required": ["name", "video_codec", "container", "output_width", "output_height", "crf", "audio_codec", "audio_bitrate_kbps"]
@@ -3359,6 +3364,7 @@ fn dispatch_tool_payload(
             audio_codec: arg_str!(args, "audio_codec", "aac"),
             audio_bitrate_kbps: arg_u64!(args, "audio_bitrate_kbps", 192) as u32,
             audio_channel_layout: arg_str!(args, "audio_channel_layout", "stereo"),
+            hevc_pixel_profile: arg_str!(args, "hevc_pixel_profile", "main8"),
             reply: tx,
         },
 

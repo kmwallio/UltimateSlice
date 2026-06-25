@@ -4770,6 +4770,7 @@ pub(crate) fn handle_mcp_command(
             audio_codec,
             audio_bitrate_kbps,
             audio_channel_layout,
+            hevc_pixel_profile,
             reply,
         } => {
             let video_codec = match video_codec.as_str() {
@@ -4831,7 +4832,9 @@ pub(crate) fn handle_mcp_command(
                 // MCP-driven exports honour the user's saved hw_encoder_mode
                 // preference automatically — no per-call override yet.
                 hw_encoder_mode: preferences_state.borrow().hw_encoder_mode,
-                hevc_pixel_profile: crate::ui_state::HevcPixelProfile::Main8,
+                hevc_pixel_profile: crate::ui_state::HevcPixelProfile::from_str(
+                    &hevc_pixel_profile,
+                ),
             };
             let mut state = crate::ui_state::load_export_presets_state();
             match state.upsert_preset(crate::ui_state::ExportPreset::from_export_options(

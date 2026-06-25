@@ -396,6 +396,10 @@ pub enum McpCommand {
         audio_bitrate_kbps: u32,
         /// Advanced audio mode: see ExportMp4 for accepted values.
         audio_channel_layout: String,
+        /// HEVC pixel profile (only meaningful when video_codec = "h265"):
+        /// "main8" (8-bit 4:2:0), "main10" (10-bit 4:2:0), "main422_10"
+        /// (10-bit 4:2:2). Defaults to "main8".
+        hevc_pixel_profile: String,
         reply: SyncSender<Value>,
     },
     DeleteExportPreset {

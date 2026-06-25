@@ -2145,6 +2145,33 @@ pub fn save_inspector_sections_state(state: &HashMap<String, bool>) {
 mod tests {
     use super::*;
 
+    #[test]
+    fn hevc_pixel_profile_str_round_trip_and_mcp_aliases() {
+        for p in [
+            HevcPixelProfile::Main8,
+            HevcPixelProfile::Main10,
+            HevcPixelProfile::Main422_10,
+        ] {
+            assert_eq!(HevcPixelProfile::from_str(p.as_str()), p);
+        }
+        // MCP / preset token aliases all resolve to 10-bit 4:2:2.
+        assert_eq!(
+            HevcPixelProfile::from_str("main422_10"),
+            HevcPixelProfile::Main422_10
+        );
+        assert_eq!(
+            HevcPixelProfile::from_str("main422-10"),
+            HevcPixelProfile::Main422_10
+        );
+        assert_eq!(
+            HevcPixelProfile::from_str("main422"),
+            HevcPixelProfile::Main422_10
+        );
+        // Unknown / empty falls back to the safe 8-bit default.
+        assert_eq!(HevcPixelProfile::from_str("bogus"), HevcPixelProfile::Main8);
+        assert_eq!(HevcPixelProfile::from_str(""), HevcPixelProfile::Main8);
+    }
+
     fn pending(id: &str) -> ExportQueueJob {
         ExportQueueJob {
             id: id.to_string(),
