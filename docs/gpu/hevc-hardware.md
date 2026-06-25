@@ -53,11 +53,32 @@ is gated on the preference, VA-API availability, and `vapostproc` — so machine
 without them keep the software path. The preview compositor is still 8-bit RGBA,
 so this is a **performance** win, not a precision one.
 
-### Program Monitor / export
+### Program Monitor (timeline preview)
 
-The Program Monitor and **export** still decode HEVC in **software** today;
-extending the hardware path to them is a follow-up. True 10-bit/HDR preview
-requires the separate libplacebo pipeline (`docs/HDR-Buildout.md`).
+The Program Monitor uses the same GPU-resident approach, gated on the same
+**Hardware acceleration** preference. Each per-clip decode branch inserts a
+`vapostproc` between the decoder and the effects bin, but **only when the pad is
+actually hardware-decoded** — the pad-added handler queries each pad's
+capability for `memory:VAMemory` / `memory:DMABuf` (which only a hardware
+decoder advertises) and routes software-decoded sources (ProRes, images)
+straight to the effects bin, so they never pay a needless GPU upload round-trip.
+`vapostproc` scales the VA surface to project resolution on the GPU and the
+effects bin's existing converter does the colorimetry-correct YUV→RGBA, so the
+colour/LUT pipeline is unchanged.
+
+When the preference is **off**, branches set `force-sw-decoders` so the global
+VA-API decoder ranks (raised by the Source Monitor's HardwareFast mode) can't
+leak in and trigger a hardware-decode-then-CPU-download path that is slower than
+plain software decode. Proxies remain the path for sustained real-time playback
+of very large sources; this primarily improves raw-clip scrubbing with proxies
+off. Measured ~2× faster end-to-end on a 6K HEVC source on Intel Arc.
+
+### Export
+
+**Export** still decodes HEVC in **software** today (no input-side `-hwaccel`);
+extending the hardware path to the export filtergraph is a follow-up. True
+10-bit/HDR preview requires the separate libplacebo pipeline
+(`docs/HDR-Buildout.md`).
 
 ## Checking your hardware
 

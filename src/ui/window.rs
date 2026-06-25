@@ -6730,6 +6730,7 @@ pub fn build_window(
         prog_player_raw.set_frame_rate(p.frame_rate.numerator, p.frame_rate.denominator);
     }
     prog_player_raw.set_playback_priority(initial_playback_priority);
+    prog_player_raw.set_hardware_acceleration(initial_hw_accel);
     prog_player_raw.set_proxy_enabled(initial_proxy_mode.is_enabled());
     {
         let p = project.borrow();
@@ -6900,6 +6901,9 @@ pub fn build_window(
             prog_player
                 .borrow_mut()
                 .set_playback_priority(new_state.playback_priority.clone());
+            prog_player
+                .borrow_mut()
+                .set_hardware_acceleration(new_state.hardware_acceleration_enabled);
             prog_player
                 .borrow_mut()
                 .set_proxy_enabled(new_state.proxy_mode.is_enabled());
