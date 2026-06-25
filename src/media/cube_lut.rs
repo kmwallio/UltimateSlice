@@ -128,22 +128,36 @@ impl CubeLut {
     /// Trilinear interpolation for a single pixel (0–255 per channel).
     /// Returns clamped 0–255 output.
     #[inline]
-    fn interpolate(&self, r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+    /// Precompute the grid coordinate (`0..=size-1`) for every possible input
+    /// byte value on one channel.  The normalise → domain → grid math depends
+    /// only on the input byte, so doing it once per channel (256 values) lifts
+    /// 3 divides + 3 clamps out of the multi-million-pixel hot loop.
+    fn build_coord_table(&self, ch: usize) -> [f32; 256] {
         let n = self.size as f32 - 1.0;
-        // Normalise 0–255 → domain range → 0–(size-1) grid coords.
-        let fr = ((r as f32 / 255.0 - self.domain_min[0])
-            / (self.domain_max[0] - self.domain_min[0]))
-            .clamp(0.0, 1.0)
-            * n;
-        let fg = ((g as f32 / 255.0 - self.domain_min[1])
-            / (self.domain_max[1] - self.domain_min[1]))
-            .clamp(0.0, 1.0)
-            * n;
-        let fb = ((b as f32 / 255.0 - self.domain_min[2])
-            / (self.domain_max[2] - self.domain_min[2]))
-            .clamp(0.0, 1.0)
-            * n;
+        let lo = self.domain_min[ch];
+        let span = self.domain_max[ch] - self.domain_min[ch];
+        let inv = if span.abs() > f32::EPSILON {
+            1.0 / span
+        } else {
+            0.0
+        };
+        let mut table = [0.0_f32; 256];
+        for (v, slot) in table.iter_mut().enumerate() {
+            *slot = ((v as f32 / 255.0 - lo) * inv).clamp(0.0, 1.0) * n;
+        }
+        table
+    }
 
+    fn interpolate(&self, r: u8, g: u8, b: u8) -> (u8, u8, u8) {
+        let fr = self.build_coord_table(0)[r as usize];
+        let fg = self.build_coord_table(1)[g as usize];
+        let fb = self.build_coord_table(2)[b as usize];
+        self.interpolate_coords(fr, fg, fb)
+    }
+
+    /// Trilinear interpolation given precomputed grid coordinates.
+    #[inline]
+    fn interpolate_coords(&self, fr: f32, fg: f32, fb: f32) -> (u8, u8, u8) {
         let r0 = (fr as usize).min(self.size - 2);
         let g0 = (fg as usize).min(self.size - 2);
         let b0 = (fb as usize).min(self.size - 2);
@@ -191,8 +205,48 @@ impl CubeLut {
             data.len() % 4 == 0,
             "RGBA buffer length must be multiple of 4"
         );
+        // Trilinear LUT interpolation is per-pixel independent and, at preview
+        // resolution, the single biggest CPU cost in the live preview chain
+        // (~127 ms/frame single-threaded for a 1080x1920 RGBA frame — well below
+        // realtime).  Split it across CPU cores so LUT'd footage (e.g. V-Log +
+        // a creative LUT) plays back smoothly.  Runs on the GStreamer streaming
+        // thread, so a per-frame scoped fan-out is fine — no pool needed.
+        let pixels = data.len() / 4;
+        let threads = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(16);
+        // Coordinate tables are read-only and shared across all worker threads.
+        let tables = [
+            self.build_coord_table(0),
+            self.build_coord_table(1),
+            self.build_coord_table(2),
+        ];
+        // Below this size the thread-spawn overhead outweighs the win.
+        if threads <= 1 || pixels < 32_768 {
+            self.apply_to_rgba_chunk(data, &tables);
+            return;
+        }
+        // Even pixel split; chunk_px * 4 keeps each chunk RGBA-aligned.
+        let chunk_px = pixels.div_ceil(threads);
+        let chunk_bytes = chunk_px * 4;
+        std::thread::scope(|scope| {
+            for chunk in data.chunks_mut(chunk_bytes) {
+                let tables = &tables;
+                scope.spawn(move || self.apply_to_rgba_chunk(chunk, tables));
+            }
+        });
+    }
+
+    /// Serial trilinear application over one RGBA slice (alpha preserved),
+    /// using precomputed per-channel coordinate tables.
+    fn apply_to_rgba_chunk(&self, data: &mut [u8], tables: &[[f32; 256]; 3]) {
         for pixel in data.chunks_exact_mut(4) {
-            let (r_out, g_out, b_out) = self.interpolate(pixel[0], pixel[1], pixel[2]);
+            let (r_out, g_out, b_out) = self.interpolate_coords(
+                tables[0][pixel[0] as usize],
+                tables[1][pixel[1] as usize],
+                tables[2][pixel[2] as usize],
+            );
             pixel[0] = r_out;
             pixel[1] = g_out;
             pixel[2] = b_out;
@@ -239,6 +293,35 @@ impl CubeLut {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "manual perf bench: cargo test --release bench_lut_1080x1920 -- --ignored --nocapture"]
+    fn bench_lut_1080x1920() {
+        // Mirrors the live Program-Monitor LUT cost: per-pixel trilinear on a
+        // project-resolution RGBA frame.  Uses a 33^3 cube (the common creative
+        // LUT size) so the bench is self-contained and portable.
+        let lut = CubeLut::parse(&identity_cube(33)).expect("parse cube");
+        let (w, h) = (1080usize, 1920usize);
+        // Varied pixels (not a uniform buffer) so the LUT-table cache behaviour
+        // reflects real footage rather than a best-case all-same-pixel buffer.
+        let mut buf = vec![0u8; w * h * 4];
+        for (i, b) in buf.iter_mut().enumerate() {
+            *b = ((i.wrapping_mul(2654435761)) >> 13) as u8;
+        }
+        // warmup
+        lut.apply_to_rgba_buffer(&mut buf);
+        let n = 60;
+        let t0 = std::time::Instant::now();
+        for _ in 0..n {
+            lut.apply_to_rgba_buffer(&mut buf);
+        }
+        let dt = t0.elapsed().as_secs_f64();
+        eprintln!(
+            "LUT {w}x{h} RGBA: {:.2} ms/frame  -> {:.1} fps",
+            dt / n as f64 * 1000.0,
+            n as f64 / dt
+        );
+    }
 
     fn identity_cube(size: usize) -> String {
         let mut lines = format!("LUT_3D_SIZE {}\n", size);
