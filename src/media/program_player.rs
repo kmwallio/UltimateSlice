@@ -10486,6 +10486,27 @@ impl ProgramPlayer {
             return false;
         }
 
+        // Full swap (nothing retained but new clips entering): the realtime path
+        // keeps the display alive by leaving the departing clip(s) in the
+        // pipeline at alpha 0 while the entering clip preroll/seeks — but that
+        // only works when at least one *visible* slot is retained to keep the
+        // compositor producing.  With nothing retained the compositor's only
+        // input is the now-transparent departing slot, so the picture freezes on
+        // that hidden frame until (if ever) the entering clip's frames arrive at
+        // the right running-time — which is the "video freezes, audio continues"
+        // hang seen entering a compound clip whose children fully replace the
+        // outgoing clip.  Fall back to the full rebuild, which tears down,
+        // prerolls, and waits for the entering clip's first frame before
+        // resuming (a brief hitch instead of an indefinite freeze).
+        if retained.is_empty() && !added.is_empty() {
+            log::info!(
+                "try_realtime_boundary: full swap (retained empty, added={:?}) — \
+                 deferring to full rebuild to avoid a frozen compositor",
+                added
+            );
+            return false;
+        }
+
         let rebuild_started = Instant::now();
         self.teardown_prepreroll_sidecars();
         log::info!(
