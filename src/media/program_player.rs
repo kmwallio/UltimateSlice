@@ -7302,9 +7302,13 @@ impl ProgramPlayer {
             Some(clip.lut_paths.join("|"))
         };
         if self.proxy_enabled {
+            // Proxies are LUT-agnostic — the LUT is applied live on the proxy
+            // frame in preview (see realtime_lut), so the lookup key must NOT
+            // include the LUT (matches collect_unique_proxy_variants passing
+            // None). This means one proxy per source serves every LUT/grade.
             let key = crate::media::proxy_cache::proxy_key_with_vidstab(
                 &clip.source_path,
-                lut_composite.as_deref(),
+                None,
                 clip.vidstab_enabled,
                 clip.vidstab_smoothing,
             );
@@ -13057,13 +13061,21 @@ impl ProgramPlayer {
         let (proc_w, proc_h) = self.preview_processing_dimensions();
 
         // Apply first LUT in realtime preview; full stack applied in prerender/export.
-        let realtime_lut = if !using_proxy {
+        // Proxies are LUT-agnostic (the LUT is no longer baked into them), so the
+        // LUT must be applied live here even when using_proxy — it runs on the
+        // small proxy frame, so the cost is minor. The only case where the LUT is
+        // already in the source media is the preview-LUT feature (a project-res
+        // baked media used when proxy mode is OFF); skip there to avoid a
+        // double-apply.
+        let lut_baked_in_source =
+            !self.proxy_enabled && self.preview_luts && !clip.lut_paths.is_empty();
+        let realtime_lut = if lut_baked_in_source {
+            None
+        } else {
             clip.lut_paths
                 .first()
                 .filter(|p| !p.is_empty())
                 .and_then(|p| self.get_or_parse_lut(p))
-        } else {
-            None
         };
 
         // Build per-slot effects bin.

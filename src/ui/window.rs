@@ -3327,6 +3327,35 @@ pub(crate) fn overwrite_clip_range_on_track(
 mod tests {
     use super::*;
 
+    #[test]
+    fn proxy_variants_are_lut_agnostic() {
+        use crate::media::proxy_cache::ProxyScale;
+        use crate::model::clip::{Clip, ClipKind};
+        use crate::model::project::Project;
+        use crate::model::track::Track;
+        use crate::ui_state::ProxyCodec;
+
+        let mut project = Project::new("t");
+        project.tracks.clear();
+        let mut track = Track::new_video("V1");
+        let mut clip = Clip::new("/x/src.mov", 5_000_000_000, 0, ClipKind::Video);
+        clip.lut_paths = vec!["/luts/foo.cube".to_string()];
+        track.clips.push(clip);
+        project.tracks.push(track);
+
+        let variants =
+            collect_unique_proxy_variants(&project, ProxyScale::MaxHeight(1080), ProxyCodec::H264);
+        assert_eq!(variants.len(), 1);
+        // The LUT must NOT be folded into the proxy variant — it's applied live
+        // on the proxy frame instead, so a LUT/grade change never invalidates
+        // the proxy (one proxy per source).
+        assert_eq!(
+            variants[0].lut_key(),
+            None,
+            "downscale proxy variant must be LUT-agnostic"
+        );
+    }
+
     fn test_source_info(
         is_audio_only: bool,
         has_audio: bool,
@@ -5690,10 +5719,14 @@ fn collect_unique_proxy_variants(
         for c in &track.clips {
             // Regular clip (or any clip with a source path).
             if !c.source_path.is_empty() {
+                // LUT is applied live on the (small) proxy frame in preview, NOT
+                // baked into the proxy — so one proxy per source survives LUT/grade
+                // changes instead of triggering a full re-transcode. Pass None so
+                // the proxy key/filename is LUT-independent.
                 let spec = crate::media::proxy_cache::ProxyVariantSpec::with_codec(
                     c.source_path.clone(),
                     scale,
-                    c.lut_key(),
+                    None,
                     codec,
                     c.vidstab_enabled,
                     c.vidstab_smoothing,
@@ -5818,7 +5851,8 @@ fn collect_near_playhead_proxy_variants(
             } else {
                 0
             };
-            // Regular clip
+            // Regular clip. LUT-agnostic proxy (LUT applied live in preview),
+            // so pass None to match collect_unique_proxy_variants.
             if !c.source_path.is_empty() {
                 candidates.push((
                     distance,
@@ -5826,7 +5860,7 @@ fn collect_near_playhead_proxy_variants(
                     crate::media::proxy_cache::ProxyVariantSpec::new(
                         c.source_path.clone(),
                         scale,
-                        c.lut_key(),
+                        None,
                         c.vidstab_enabled,
                         c.vidstab_smoothing,
                     ),
