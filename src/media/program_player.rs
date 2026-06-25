@@ -2805,7 +2805,12 @@ impl ProgramPlayer {
     /// pad-added handler inserts a GPU-resident vapostproc scale.
     fn configure_video_branch_decoder(&self, decoder: &gst::Element) {
         if decoder.has_property("force-sw-decoders") {
-            decoder.set_property("force-sw-decoders", !self.hardware_acceleration_enabled);
+            // Only allow hardware decoders when we can actually consume their
+            // GPU surfaces via vapostproc.  If hardware acceleration is off, or
+            // vapostproc is unavailable, force software — otherwise a hardware
+            // decoder's full-resolution frame would be downloaded to the CPU for
+            // the effects bin, which is slower than plain software decode.
+            decoder.set_property("force-sw-decoders", !self.hw_video_postproc_active());
         }
     }
 

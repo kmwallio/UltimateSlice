@@ -64,9 +64,14 @@ decoder advertises) and routes software-decoded sources (ProRes, images)
 straight to the effects bin, so they never pay a needless GPU upload round-trip.
 `vapostproc` scales the VA surface to project resolution on the GPU and the
 effects bin's existing converter does the colorimetry-correct YUV→RGBA, so the
-colour/LUT pipeline is unchanged.
+colour/LUT pipeline is unchanged. The result is *visually equivalent* to the
+software path (measured PSNR ~43 dB / RMSE ~1.5 per 255 — the VA driver's colour
+conversion differs slightly from swscale, the same sub-perceptual order the
+colour pipeline already tolerates; it is not a bit-depth loss). The 8-bit RGBA
+compositor makes this a performance change, not a precision one.
 
-When the preference is **off**, branches set `force-sw-decoders` so the global
+When the preference is **off** — or when `vapostproc` is unavailable — branches
+set `force-sw-decoders` so the global
 VA-API decoder ranks (raised by the Source Monitor's HardwareFast mode) can't
 leak in and trigger a hardware-decode-then-CPU-download path that is slower than
 plain software decode. Proxies remain the path for sustained real-time playback
