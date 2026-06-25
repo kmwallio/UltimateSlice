@@ -2821,9 +2821,24 @@ impl ProgramPlayer {
     }
 
     /// True when the GPU-resident Program Monitor decode path should be used for
-    /// new video branches (hardware acceleration enabled and vapostproc present).
+    /// new video branches.
+    ///
+    /// DISABLED: the GPU path inserted `vapostproc` dynamically inside the
+    /// `pad-added` callback, which called `sync_state_with_parent()` on the
+    /// decoder's streaming thread.  At a mid-playback *clip boundary* (the
+    /// pipeline is already PLAYING) that blocking state change stalls the
+    /// streaming thread, freezing playback at every clip transition — it only
+    /// happened to be benign at initial single-clip preroll.  Until the
+    /// insertion is re-implemented without a blocking state change on the
+    /// streaming thread, the Program Monitor decodes video in software (with
+    /// `force-sw-decoders` so the Source Monitor's raised VA ranks can't leak in
+    /// and trigger a GPU-decode→CPU-download path).  Proxies (now higher
+    /// quality) plus the parallel LUT keep heavy-source playback smooth, and the
+    /// Source Monitor's static-filter HW path is unaffected.
     fn hw_video_postproc_active(&self) -> bool {
-        self.hardware_acceleration_enabled && self.vapostproc_available
+        // Retain the fields for a future safe re-enable.
+        let _ = (self.hardware_acceleration_enabled, self.vapostproc_available);
+        false
     }
 
     /// Try to link a hardware-decoded video pad to `effects_sink` through a
@@ -2838,6 +2853,12 @@ impl ProgramPlayer {
     /// hardware-decoded — so software-decoded sources (ProRes, images) keep the
     /// direct link and never pay an upload round-trip.  Returns true if the GPU
     /// path linked; false to fall back to a direct pad→effects_sink link.
+    ///
+    /// Currently unreachable — gated off by `hw_video_postproc_active()` because
+    /// the `sync_state_with_parent()` here stalls when run from `pad-added` at a
+    /// mid-playback clip boundary.  Retained for a future re-implementation that
+    /// performs the state change off the streaming thread.
+    #[allow(dead_code)]
     fn try_link_hw_video_postproc(
         pipeline: &gst::Bin,
         pad: &gst::Pad,
