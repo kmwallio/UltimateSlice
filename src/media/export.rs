@@ -107,6 +107,151 @@ pub(crate) fn pick_export_encoder_with_caps(
         }
     }
 }
+
+/// Concrete HEVC encoder chosen for an export, after reconciling the user's
+/// hardware preference with the requested pixel profile. 4:2:2 narrows the
+/// field to QSV (`y210le`, Intel) or libx265 (software); `hevc_vaapi` /
+/// `hevc_nvenc` can't do 4:2:2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HevcEncoderChoice {
+    Libx265,
+    Qsv,
+    Nvenc,
+    Vaapi,
+}
+
+/// Pick the HEVC encoder. `family` is what `pick_export_encoder` resolved
+/// (Nvenc / Vaapi / None) for the user's mode; `hw_wanted` is `mode != Off`;
+/// `qsv_422_usable` is [`hwaccel::hevc_qsv_422_10_usable`] (passed in so this
+/// stays a pure, testable function).
+pub(crate) fn choose_hevc_encoder(
+    family: Option<crate::media::hwaccel::HwEncoderFamily>,
+    profile: crate::ui_state::HevcPixelProfile,
+    hw_wanted: bool,
+    qsv_422_usable: bool,
+) -> HevcEncoderChoice {
+    use crate::media::hwaccel::HwEncoderFamily;
+    if profile.is_422() {
+        // Only QSV or libx265 can encode 4:2:2; vaapi/nvenc can't, so the
+        // resolved family is ignored here.
+        if hw_wanted && qsv_422_usable {
+            HevcEncoderChoice::Qsv
+        } else {
+            HevcEncoderChoice::Libx265
+        }
+    } else {
+        match family {
+            Some(HwEncoderFamily::Nvenc) => HevcEncoderChoice::Nvenc,
+            Some(HwEncoderFamily::Vaapi) => HevcEncoderChoice::Vaapi,
+            None => HevcEncoderChoice::Libx265,
+        }
+    }
+}
+
+fn hevc_hdr_color_args() -> Vec<String> {
+    [
+        "-color_primaries",
+        "bt2020",
+        "-color_trc",
+        "smpte2084",
+        "-colorspace",
+        "bt2020nc",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
+/// Build the ffmpeg encoder args for an HEVC export. Pure (no I/O) so the
+/// pixel-format / profile matrix is unit-tested. `hdr` forces ≥ 10-bit and
+/// adds BT.2020 PQ tags.
+pub(crate) fn hevc_encoder_args(
+    choice: HevcEncoderChoice,
+    crf: u32,
+    profile: crate::ui_state::HevcPixelProfile,
+    hdr: bool,
+) -> Vec<String> {
+    let ten_bit = profile.is_ten_bit() || hdr;
+    let is_422 = profile.is_422();
+    let mut a: Vec<String> = Vec::new();
+    let push = |a: &mut Vec<String>, s: &str| a.push(s.to_string());
+    match choice {
+        HevcEncoderChoice::Libx265 => {
+            let (pix, prof) = if is_422 {
+                ("yuv422p10le", "main422-10")
+            } else if ten_bit {
+                ("yuv420p10le", "main10")
+            } else {
+                ("yuv420p", "main")
+            };
+            push(&mut a, "-c:v");
+            push(&mut a, "libx265");
+            push(&mut a, "-crf");
+            a.push(crf.to_string());
+            push(&mut a, "-pix_fmt");
+            push(&mut a, pix);
+            push(&mut a, "-profile:v");
+            push(&mut a, prof);
+            if hdr {
+                push(&mut a, "-x265-params");
+                push(
+                    &mut a,
+                    "hdr-opt=1:repeat-headers=1:colorprim=bt2020:\
+                     transfer=smpte2084:colormatrix=bt2020nc",
+                );
+                a.extend(hevc_hdr_color_args());
+            }
+        }
+        HevcEncoderChoice::Qsv => {
+            let pix = if is_422 {
+                "y210le"
+            } else if ten_bit {
+                "p010le"
+            } else {
+                "nv12"
+            };
+            push(&mut a, "-c:v");
+            push(&mut a, "hevc_qsv");
+            push(&mut a, "-pix_fmt");
+            push(&mut a, pix);
+            push(&mut a, "-global_quality");
+            a.push(crf.to_string());
+            if hdr {
+                a.extend(hevc_hdr_color_args());
+            }
+        }
+        HevcEncoderChoice::Nvenc => {
+            // NVENC HEVC tops out at 4:2:0 (Main/Main10); 4:2:2 never routes
+            // here (choose_hevc_encoder sends it to QSV/libx265).
+            push(&mut a, "-c:v");
+            push(&mut a, "hevc_nvenc");
+            push(&mut a, "-preset");
+            push(&mut a, "p5");
+            push(&mut a, "-pix_fmt");
+            push(&mut a, if ten_bit { "p010le" } else { "yuv420p" });
+            push(&mut a, "-cq");
+            a.push(crf.to_string());
+            push(&mut a, "-rc");
+            push(&mut a, "constqp");
+            if hdr {
+                a.extend(hevc_hdr_color_args());
+            }
+        }
+        HevcEncoderChoice::Vaapi => {
+            // hevc_vaapi negotiates its surface pixel format with the driver
+            // (p010 on modern Intel/AMD for 10-bit); 4:2:2 never routes here.
+            push(&mut a, "-c:v");
+            push(&mut a, "hevc_vaapi");
+            push(&mut a, "-qp");
+            a.push(crf.to_string());
+            if hdr {
+                a.extend(hevc_hdr_color_args());
+            }
+        }
+    }
+    a
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum AudioCodec {
     Aac,
@@ -256,6 +401,10 @@ pub struct ExportOptions {
     /// is wired in; other codecs and VA-API export-side encoding are
     /// follow-up work.
     pub hw_encoder_mode: crate::ui_state::HwEncoderMode,
+    /// HEVC output pixel profile (bit depth + chroma). Only consulted for
+    /// `VideoCodec::H265`; ignored by other codecs. Default `Main8`
+    /// (8-bit 4:2:0). `hdr_passthrough` implies at least 10-bit.
+    pub hevc_pixel_profile: crate::ui_state::HevcPixelProfile,
 }
 
 impl Default for ExportOptions {
@@ -272,6 +421,7 @@ impl Default for ExportOptions {
             audio_channel_layout: AudioChannelLayout::Stereo,
             hdr_passthrough: false,
             hw_encoder_mode: crate::ui_state::HwEncoderMode::Off,
+            hevc_pixel_profile: crate::ui_state::HevcPixelProfile::Main8,
         }
     }
 }
@@ -747,7 +897,15 @@ pub fn export_project_with_cancel(
     // family that actually fits this codec — e.g. for VP9 / ProRes there
     // is no usable HW path, so it returns `None` and the SW branch
     // handles the encode unchanged.
-    let export_hw_family = pick_export_encoder(options.video_codec, options.hw_encoder_mode);
+    let mut export_hw_family = pick_export_encoder(options.video_codec, options.hw_encoder_mode);
+    // 4:2:2 HEVC can't go through hevc_vaapi / hevc_nvenc (they're 4:2:0
+    // only). Drop the resolved family so the upstream VAAPI device + nv12
+    // hwupload plumbing below doesn't engage; the H.265 branch then routes
+    // 4:2:2 to hevc_qsv (software-frame input) or libx265, both of which
+    // take ordinary CPU frames.
+    if options.video_codec == VideoCodec::H265 && options.hevc_pixel_profile.is_422() {
+        export_hw_family = None;
+    }
     if matches!(
         export_hw_family,
         Some(crate::media::hwaccel::HwEncoderFamily::Vaapi)
@@ -2076,60 +2234,31 @@ pub fn export_project_with_cancel(
                 }
             }
             VideoCodec::H265 => {
-                use crate::media::hwaccel::HwEncoderFamily;
-                match export_hw_family {
-                    Some(HwEncoderFamily::Nvenc) => {
-                        log::info!("export: using hevc_nvenc");
-                        cmd.arg("-c:v").arg("hevc_nvenc").arg("-preset").arg("p5");
-                        if options.hdr_passthrough {
-                            // NVENC HEVC supports 10-bit Main10 directly.
-                            cmd.arg("-pix_fmt").arg("p010le");
-                            cmd.arg("-color_primaries").arg("bt2020");
-                            cmd.arg("-color_trc").arg("smpte2084");
-                            cmd.arg("-colorspace").arg("bt2020nc");
-                        } else {
-                            cmd.arg("-pix_fmt").arg("yuv420p");
-                        }
-                        cmd.arg("-cq")
-                            .arg(options.crf.to_string())
-                            .arg("-rc")
-                            .arg("constqp");
-                    }
-                    Some(HwEncoderFamily::Vaapi) => {
-                        log::info!("export: using hevc_vaapi");
-                        cmd.arg("-c:v")
-                            .arg("hevc_vaapi")
-                            .arg("-qp")
-                            .arg(options.crf.to_string());
-                        if options.hdr_passthrough {
-                            // hevc_vaapi accepts p010 input on most modern
-                            // Intel/AMD VAAPI implementations. Older drivers
-                            // may need yuv420p10le; if users hit that, the
-                            // session-level HW encoder blacklist will fall
-                            // them back to libx265 automatically.
-                            cmd.arg("-color_primaries").arg("bt2020");
-                            cmd.arg("-color_trc").arg("smpte2084");
-                            cmd.arg("-colorspace").arg("bt2020nc");
-                        }
-                    }
-                    None => {
-                        cmd.arg("-c:v")
-                            .arg("libx265")
-                            .arg("-crf")
-                            .arg(options.crf.to_string());
-                        if options.hdr_passthrough {
-                            cmd.arg("-pix_fmt").arg("yuv420p10le");
-                            cmd.arg("-x265-params").arg(
-                                "hdr-opt=1:repeat-headers=1:colorprim=bt2020:\
-                                 transfer=smpte2084:colormatrix=bt2020nc",
-                            );
-                            cmd.arg("-color_primaries").arg("bt2020");
-                            cmd.arg("-color_trc").arg("smpte2084");
-                            cmd.arg("-colorspace").arg("bt2020nc");
-                        } else {
-                            cmd.arg("-pix_fmt").arg("yuv420p");
-                        }
-                    }
+                // Reconcile the resolved HW family with the requested pixel
+                // profile: 4:2:2 narrows to QSV (Intel) or libx265, while
+                // 4:2:0 keeps the nvenc/vaapi family. The actual arg matrix
+                // (pix_fmt + profile + HDR tags) lives in pure, unit-tested
+                // helpers.
+                let hw_wanted =
+                    options.hw_encoder_mode != crate::ui_state::HwEncoderMode::Off;
+                let choice = choose_hevc_encoder(
+                    export_hw_family,
+                    options.hevc_pixel_profile,
+                    hw_wanted,
+                    crate::media::hwaccel::hevc_qsv_422_10_usable(),
+                );
+                log::info!(
+                    "export: hevc encoder={choice:?} profile={:?} hdr={}",
+                    options.hevc_pixel_profile,
+                    options.hdr_passthrough
+                );
+                for arg in hevc_encoder_args(
+                    choice,
+                    options.crf,
+                    options.hevc_pixel_profile,
+                    options.hdr_passthrough,
+                ) {
+                    cmd.arg(arg);
                 }
             }
             VideoCodec::Vp9 => {
@@ -6512,6 +6641,7 @@ pub fn analyze_project_loudness(project: &Project) -> Result<LoudnessReport> {
         // Loudness analysis is deterministic-by-codec; HW encoder choice
         // doesn't affect the audio probe, so leave it Off.
         hw_encoder_mode: crate::ui_state::HwEncoderMode::Off,
+        hevc_pixel_profile: crate::ui_state::HevcPixelProfile::Main8,
     };
 
     let (tx, _rx) = mpsc::channel();
@@ -6880,6 +7010,73 @@ mod tests {
     use crate::ui_state::CrossfadeCurve;
     use gstreamer as gst;
     use std::process::Command;
+
+    #[test]
+    fn choose_hevc_encoder_routes_422_and_420() {
+        use crate::media::hwaccel::HwEncoderFamily;
+        use crate::ui_state::HevcPixelProfile::{Main10, Main422_10, Main8};
+        use super::{choose_hevc_encoder, HevcEncoderChoice};
+
+        // 4:2:2 with QSV usable + hardware wanted → QSV.
+        assert_eq!(
+            choose_hevc_encoder(Some(HwEncoderFamily::Vaapi), Main422_10, true, true),
+            HevcEncoderChoice::Qsv
+        );
+        // 4:2:2 with QSV unusable → libx265 regardless of family.
+        assert_eq!(
+            choose_hevc_encoder(Some(HwEncoderFamily::Nvenc), Main422_10, true, false),
+            HevcEncoderChoice::Libx265
+        );
+        // 4:2:2 with hardware off → libx265.
+        assert_eq!(
+            choose_hevc_encoder(None, Main422_10, false, true),
+            HevcEncoderChoice::Libx265
+        );
+        // 4:2:0 keeps the resolved family.
+        assert_eq!(
+            choose_hevc_encoder(Some(HwEncoderFamily::Nvenc), Main10, true, true),
+            HevcEncoderChoice::Nvenc
+        );
+        assert_eq!(
+            choose_hevc_encoder(Some(HwEncoderFamily::Vaapi), Main8, true, true),
+            HevcEncoderChoice::Vaapi
+        );
+        assert_eq!(
+            choose_hevc_encoder(None, Main8, false, false),
+            HevcEncoderChoice::Libx265
+        );
+    }
+
+    #[test]
+    fn hevc_encoder_args_matrix() {
+        use crate::ui_state::HevcPixelProfile::{Main10, Main422_10, Main8};
+        use super::{hevc_encoder_args, HevcEncoderChoice};
+        let joined = |c, p, hdr| hevc_encoder_args(c, 18, p, hdr).join(" ");
+
+        // libx265 across the three profiles.
+        let s = joined(HevcEncoderChoice::Libx265, Main8, false);
+        assert!(s.contains("libx265") && s.contains("yuv420p") && s.contains("main"), "{s}");
+        let s = joined(HevcEncoderChoice::Libx265, Main10, false);
+        assert!(s.contains("yuv420p10le") && s.contains("main10"), "{s}");
+        let s = joined(HevcEncoderChoice::Libx265, Main422_10, false);
+        assert!(s.contains("yuv422p10le") && s.contains("main422-10"), "{s}");
+
+        // QSV 4:2:2 → y210le; 4:2:0 10-bit → p010le; 8-bit → nv12.
+        let s = joined(HevcEncoderChoice::Qsv, Main422_10, false);
+        assert!(s.contains("hevc_qsv") && s.contains("y210le"), "{s}");
+        let s = joined(HevcEncoderChoice::Qsv, Main10, false);
+        assert!(s.contains("p010le"), "{s}");
+        let s = joined(HevcEncoderChoice::Qsv, Main8, false);
+        assert!(s.contains("nv12"), "{s}");
+
+        // HDR forces 10-bit + BT.2020 PQ tags even from an 8-bit profile.
+        let s = joined(HevcEncoderChoice::Libx265, Main8, true);
+        assert!(s.contains("yuv420p10le") && s.contains("smpte2084") && s.contains("bt2020"), "{s}");
+
+        // NVENC never emits a 4:2:2 format (it isn't routed 4:2:2; 4:2:0 only).
+        let s = joined(HevcEncoderChoice::Nvenc, Main10, false);
+        assert!(s.contains("hevc_nvenc") && s.contains("p010le") && !s.contains("y210le"), "{s}");
+    }
 
     #[test]
     fn export_pitch_clamps_to_twelve_semitones() {
@@ -9651,6 +9848,7 @@ mod tests {
             qsv_init_ok: true,
             nvenc_h264: true,
             nvenc_h265: true,
+            qsv_h265: true,
             hwaccels_available: vec!["cuda".into(), "qsv".into(), "vaapi".into()],
         }
     }

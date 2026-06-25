@@ -4831,6 +4831,7 @@ pub(crate) fn handle_mcp_command(
                 // MCP-driven exports honour the user's saved hw_encoder_mode
                 // preference automatically — no per-call override yet.
                 hw_encoder_mode: preferences_state.borrow().hw_encoder_mode,
+                hevc_pixel_profile: crate::ui_state::HevcPixelProfile::Main8,
             };
             let mut state = crate::ui_state::load_export_presets_state();
             match state.upsert_preset(crate::ui_state::ExportPreset::from_export_options(
@@ -7412,6 +7413,7 @@ pub(crate) fn handle_mcp_command(
                         gif_fps: None,
                         audio_channel_layout: crate::ui_state::ExportAudioChannelLayout::Stereo,
                         hdr_passthrough: false,
+                        hevc_pixel_profile: crate::ui_state::HevcPixelProfile::Main8,
                     })
             };
             let job = crate::ui_state::ExportQueueJob::new(&output_path, preset);

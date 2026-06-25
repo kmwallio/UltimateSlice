@@ -938,6 +938,51 @@ impl ProxyCodec {
     }
 }
 
+/// HEVC (H.265) export pixel profile — bit depth + chroma subsampling.
+///
+/// - `Main8`     — 8-bit 4:2:0 (`yuv420p`, profile `main`). Universal default.
+/// - `Main10`    — 10-bit 4:2:0 (`yuv420p10le`, profile `main10`).
+/// - `Main422_10`— 10-bit 4:2:2 (`yuv422p10le`, profile `main422-10`). Encoded
+///   by libx265 everywhere, or `hevc_qsv` (`y210le`) on capable Intel GPUs;
+///   `hevc_vaapi` / `hevc_nvenc` can't do 4:2:2, so that case falls back to
+///   libx265 software.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HevcPixelProfile {
+    #[default]
+    Main8,
+    Main10,
+    Main422_10,
+}
+
+impl HevcPixelProfile {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Main8 => "main8",
+            Self::Main10 => "main10",
+            Self::Main422_10 => "main422_10",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "main10" => Self::Main10,
+            "main422_10" | "main422-10" | "main422" => Self::Main422_10,
+            _ => Self::Main8,
+        }
+    }
+
+    /// True for any 10-bit profile (Main10 or Main422-10).
+    pub fn is_ten_bit(&self) -> bool {
+        !matches!(self, Self::Main8)
+    }
+
+    /// True only for the 4:2:2 profile.
+    pub fn is_422(&self) -> bool {
+        matches!(self, Self::Main422_10)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CrossfadeCurve {
@@ -1138,6 +1183,11 @@ pub struct ExportPreset {
     /// Preserve HDR metadata and skip tone mapping on export.
     #[serde(default)]
     pub hdr_passthrough: bool,
+    /// HEVC output pixel profile (bit depth + chroma). Only meaningful when
+    /// `video_codec == H265`. `#[serde(default)]` keeps legacy presets loading
+    /// as `Main8`.
+    #[serde(default)]
+    pub hevc_pixel_profile: HevcPixelProfile,
 }
 
 impl ExportPreset {
@@ -1156,6 +1206,7 @@ impl ExportPreset {
                 &options.audio_channel_layout,
             ),
             hdr_passthrough: options.hdr_passthrough,
+            hevc_pixel_profile: options.hevc_pixel_profile,
         }
     }
 
@@ -1176,6 +1227,7 @@ impl ExportPreset {
             // preset. Default to Off here so test loads stay deterministic.
             hw_encoder_mode: HwEncoderMode::Off,
             hdr_passthrough: self.hdr_passthrough,
+            hevc_pixel_profile: self.hevc_pixel_profile,
         }
     }
 
@@ -1349,6 +1401,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
             hdr_passthrough: false,
+            hevc_pixel_profile: HevcPixelProfile::Main8,
         },
         ExportPreset {
             name: "High Quality H.264 4K".to_string(),
@@ -1362,6 +1415,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
             hdr_passthrough: false,
+            hevc_pixel_profile: HevcPixelProfile::Main8,
         },
         ExportPreset {
             name: "Archive ProRes 4K".to_string(),
@@ -1375,6 +1429,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
             hdr_passthrough: false,
+            hevc_pixel_profile: HevcPixelProfile::Main8,
         },
         ExportPreset {
             name: "WebM VP9 1080p".to_string(),
@@ -1388,6 +1443,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
             hdr_passthrough: false,
+            hevc_pixel_profile: HevcPixelProfile::Main8,
         },
         ExportPreset {
             name: "Animated GIF".to_string(),
@@ -1401,6 +1457,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             gif_fps: Some(15),
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
             hdr_passthrough: false,
+            hevc_pixel_profile: HevcPixelProfile::Main8,
         },
         // Cinema-style 5.1 surround at 1080p / 448 kbps AAC. Auto-routes
         // dialogue to Front Center, music to Front L/R, and effects to
@@ -1417,6 +1474,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Surround51,
             hdr_passthrough: false,
+            hevc_pixel_profile: HevcPixelProfile::Main8,
         },
         // Vertical 9:16 for Instagram Reels — 1080×1920 H.264, CRF 23.
         ExportPreset {
@@ -1431,6 +1489,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
             hdr_passthrough: false,
+            hevc_pixel_profile: HevcPixelProfile::Main8,
         },
         // Vertical 9:16 for TikTok — 1080×1920 H.264, slightly higher
         // bitrate for the platform's re-encode headroom.
@@ -1446,6 +1505,7 @@ fn default_export_presets() -> Vec<ExportPreset> {
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
             hdr_passthrough: false,
+            hevc_pixel_profile: HevcPixelProfile::Main8,
         },
         // Small, fast 720p H.264 for email / chat / quick web shares —
         // higher CRF + lower audio bitrate to keep the file tiny.
@@ -1461,6 +1521,25 @@ fn default_export_presets() -> Vec<ExportPreset> {
             gif_fps: None,
             audio_channel_layout: ExportAudioChannelLayout::Stereo,
             hdr_passthrough: false,
+            hevc_pixel_profile: HevcPixelProfile::Main8,
+        },
+        // 10-bit 4:2:2 HEVC mastering/interchange preset. libx265 encodes
+        // `main422-10` everywhere; on capable Intel GPUs the export path
+        // hardware-accelerates it via `hevc_qsv` (`y210le`). MOV + PCM keeps
+        // it a clean intermediate for grading/handoff.
+        ExportPreset {
+            name: "HEVC 10-bit 4:2:2 (Mastering)".to_string(),
+            video_codec: ExportVideoCodec::H265,
+            container: ExportContainer::Mov,
+            output_width: 1920,
+            output_height: 1080,
+            crf: 18,
+            audio_codec: ExportAudioCodec::Pcm,
+            audio_bitrate_kbps: 320,
+            gif_fps: None,
+            audio_channel_layout: ExportAudioChannelLayout::Stereo,
+            hdr_passthrough: false,
+            hevc_pixel_profile: HevcPixelProfile::Main422_10,
         },
     ]
 }
@@ -2244,6 +2323,7 @@ mod tests {
             audio_channel_layout: AudioChannelLayout::Surround51,
             hdr_passthrough: false,
             hw_encoder_mode: HwEncoderMode::Off,
+            hevc_pixel_profile: HevcPixelProfile::Main8,
         };
         let preset = ExportPreset::from_export_options("High Quality", &options);
         assert_eq!(preset.name, "High Quality");
@@ -2416,6 +2496,7 @@ mod tests {
                 "Instagram Reel 9:16",
                 "TikTok 9:16",
                 "Web Compressed 720p",
+                "HEVC 10-bit 4:2:2 (Mastering)",
             ]
         );
         assert!(parsed.export_presets.last_used_preset.is_none());

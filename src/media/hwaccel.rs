@@ -63,6 +63,11 @@ pub struct HwEncoderCaps {
     pub qsv_init_ok: bool,
     pub nvenc_h264: bool,
     pub nvenc_h265: bool,
+    /// True iff ffmpeg lists the `hevc_qsv` encoder. Whether it's actually
+    /// *usable* additionally requires `qsv_init_ok` (the device init probe);
+    /// on Linux QSV bridges through libva/oneVPL and can be listed yet fail
+    /// to initialise. Used for the 10-bit 4:2:2 HEVC export path on Intel.
+    pub qsv_h265: bool,
     /// FFmpeg `-hwaccels` method names available in this build (e.g.
     /// `vaapi`, `cuda`, `qsv`, `vdpau`, `videotoolbox`). Used as the value
     /// of the `-hwaccel` flag at decode time.
@@ -353,6 +358,7 @@ pub fn parse_ffmpeg_encoders_lines(output: &str) -> HwEncoderCaps {
             "hevc_vaapi" => caps.vaapi_h265 = true,
             "h264_nvenc" | "nvenc_h264" => caps.nvenc_h264 = true,
             "hevc_nvenc" | "nvenc_hevc" => caps.nvenc_h265 = true,
+            "hevc_qsv" => caps.qsv_h265 = true,
             _ => {}
         }
     }
@@ -508,6 +514,46 @@ pub fn pick_decode_hwaccel_with_caps_and_runtime(
     }
 }
 
+/// Parse the "Supported pixel formats:" line from `ffmpeg -h encoder=<name>`
+/// output into a list of format tokens (e.g. `["nv12", "p010le", "y210le"]`).
+/// Returns empty when the line is absent.
+pub fn parse_encoder_pixfmts(help: &str) -> Vec<String> {
+    for line in help.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("Supported pixel formats:") {
+            return rest.split_whitespace().map(str::to_string).collect();
+        }
+    }
+    Vec::new()
+}
+
+fn encoder_supports_pixfmt(ffmpeg: &str, encoder: &str, pixfmt: &str) -> bool {
+    let help = Command::new(ffmpeg)
+        .args(["-hide_banner", "-h", &format!("encoder={encoder}")])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    parse_encoder_pixfmts(&help).iter().any(|f| f == pixfmt)
+}
+
+static CACHED_HEVC_QSV_422: OnceLock<bool> = OnceLock::new();
+
+/// True iff `hevc_qsv` can encode 10-bit 4:2:2 (`y210le`) AND the QSV device
+/// actually initialises on this machine. Used by the export path to choose
+/// hardware-accelerated 4:2:2 HEVC on Intel Arc/iGPU; everything else falls
+/// back to libx265 software (which always supports `yuv422p10le`).
+///
+/// Gated on `qsv_init_ok` because ffmpeg lists `hevc_qsv` (and advertises
+/// `y210le` in its `-h encoder=` output) even on machines where the QSV
+/// device can't initialise — exactly the case on some bleeding-edge Arc
+/// drivers, where the encoder would fail at runtime.
+pub fn hevc_qsv_422_10_usable() -> bool {
+    *CACHED_HEVC_QSV_422.get_or_init(|| {
+        let caps = detect();
+        caps.qsv_h265 && caps.qsv_init_ok && encoder_supports_pixfmt("ffmpeg", "hevc_qsv", "y210le")
+    })
+}
+
 /// Stable string identity for cache signatures. Distinct from `as_str` in
 /// that this also covers the software case.
 pub fn encoder_signature(family: Option<HwEncoderFamily>) -> &'static str {
@@ -534,6 +580,7 @@ Encoders:
  V..... hevc_vaapi           H.265/HEVC (Intel VA-API)
  V..... h264_nvenc           NVIDIA NVENC H.264 encoder
  V..... hevc_nvenc           NVIDIA NVENC HEVC encoder
+ V..... hevc_qsv             HEVC (Intel Quick Sync Video)
  A..... aac                  AAC (Advanced Audio Coding)
 ";
 
@@ -544,6 +591,24 @@ Encoders:
         assert!(caps.vaapi_h265);
         assert!(caps.nvenc_h264);
         assert!(caps.nvenc_h265);
+        assert!(caps.qsv_h265);
+    }
+
+    #[test]
+    fn parses_encoder_pixfmts_line() {
+        let help = "\
+Encoder hevc_qsv [HEVC (Intel Quick Sync Video)]:
+    General capabilities: dr1 delay hardware
+    Threading capabilities: none
+    Supported pixel formats: nv12 p010le p012le yuyv422 y210le qsv
+";
+        let fmts = parse_encoder_pixfmts(help);
+        assert!(fmts.contains(&"y210le".to_string()));
+        assert!(fmts.contains(&"p010le".to_string()));
+        assert!(fmts.contains(&"nv12".to_string()));
+        assert!(!fmts.contains(&"yuv420p10le".to_string()));
+        // Absent line → empty.
+        assert!(parse_encoder_pixfmts("Encoder x:\n  no formats here\n").is_empty());
     }
 
     #[test]

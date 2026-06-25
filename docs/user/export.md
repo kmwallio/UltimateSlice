@@ -255,8 +255,15 @@ New installs (and older UI-state files missing export preset config) start with 
 | **Instagram Reel 9:16** | Vertical 1080×1920 H.264 |
 | **TikTok 9:16** | Vertical 1080×1920 H.264, higher bitrate |
 | **Web Compressed 720p** | Small, fast 720p for email / chat |
+| **HEVC 10-bit 4:2:2 (Mastering)** | 10-bit 4:2:2 H.265 (`main422-10`) in MOV — a high-quality intermediate for grading/handoff |
 
 Preset data is stored in local UI state and persists across app restarts.
+
+### 10-bit 4:2:2 HEVC export
+
+The **HEVC 10-bit 4:2:2 (Mastering)** preset (and any H.265 export configured for it) outputs 10-bit 4:2:2 H.265 (profile `main422-10`), which preserves more colour detail than the usual 8-bit 4:2:0 — useful as a grading/interchange master. It encodes with `libx265` on any machine; on Intel GPUs whose Quick Sync (QSV) HEVC encoder supports 10-bit 4:2:2 it is hardware-accelerated via `hevc_qsv`, and falls back to `libx265` automatically when the hardware can't do 4:2:2 (including AMD, where the video engine generally lacks 4:2:2).
+
+Pick the depth/chroma directly in the Export Settings dialog: when the **Video Codec** is **H.265 / HEVC**, a **Color Depth / Chroma** dropdown appears with **8-bit 4:2:0 (Main)**, **10-bit 4:2:0 (Main 10)**, and **10-bit 4:2:2 (Main 4:2:2 10 / Rext)**. The choice is saved with the preset. You can also reach the mastering profile from the preset gallery or, for automation, the `export_with_preset` MCP tool.
 
 ## Share / Locate a finished export
 

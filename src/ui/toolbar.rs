@@ -670,6 +670,25 @@ fn selected_from_video_codec(codec: &VideoCodec) -> u32 {
     }
 }
 
+fn hevc_pixel_profile_from_selected(selected: u32) -> crate::ui_state::HevcPixelProfile {
+    use crate::ui_state::HevcPixelProfile;
+    match selected {
+        0 => HevcPixelProfile::Main8,
+        1 => HevcPixelProfile::Main10,
+        2 => HevcPixelProfile::Main422_10,
+        _ => HevcPixelProfile::Main8,
+    }
+}
+
+fn selected_from_hevc_pixel_profile(profile: &crate::ui_state::HevcPixelProfile) -> u32 {
+    use crate::ui_state::HevcPixelProfile;
+    match profile {
+        HevcPixelProfile::Main8 => 0,
+        HevcPixelProfile::Main10 => 1,
+        HevcPixelProfile::Main422_10 => 2,
+    }
+}
+
 fn container_from_selected(selected: u32) -> Container {
     match selected {
         0 => Container::Mp4,
@@ -758,6 +777,7 @@ fn collect_export_options(
     gif_fps_spin: &gtk::SpinButton,
     cl_combo: &gtk::DropDown,
     hw_encoder_mode: crate::ui_state::HwEncoderMode,
+    hevc_pixel_profile: crate::ui_state::HevcPixelProfile,
 ) -> ExportOptions {
     let (output_width, output_height) = output_resolution_from_selected(or_combo.selected());
     let container = container_from_selected(ct_combo.selected());
@@ -778,6 +798,7 @@ fn collect_export_options(
         audio_channel_layout: audio_channel_layout_from_selected(cl_combo.selected()),
         hdr_passthrough: false,
         hw_encoder_mode,
+        hevc_pixel_profile,
     }
 }
 
@@ -791,7 +812,9 @@ fn apply_export_options(
     ab_entry: &gtk::Entry,
     gif_fps_spin: &gtk::SpinButton,
     cl_combo: &gtk::DropDown,
+    pp_combo: &gtk::DropDown,
 ) {
+    pp_combo.set_selected(selected_from_hevc_pixel_profile(&options.hevc_pixel_profile));
     vc_combo.set_selected(selected_from_video_codec(&options.video_codec));
     ct_combo.set_selected(selected_from_container(&options.container));
     or_combo.set_selected(selected_from_output_resolution(
@@ -1916,6 +1939,26 @@ pub fn build_toolbar(
             grid.attach(&crf_label, 0, 4, 1, 1);
             grid.attach(&crf_box, 1, 4, 1, 1);
 
+            // HEVC color depth / chroma (shown only when codec = H.265).
+            // libx265 covers every option in software; 10-bit 4:2:2 is the
+            // mastering path (also QSV-accelerated on Intel where available).
+            let pp_label = gtk::Label::new(Some("Color Depth / Chroma:"));
+            pp_label.set_halign(gtk::Align::End);
+            let pp_combo = gtk::DropDown::from_strings(&[
+                "8-bit 4:2:0  (Main)",
+                "10-bit 4:2:0  (Main 10)",
+                "10-bit 4:2:2  (Main 4:2:2 10 / Rext)",
+            ]);
+            pp_combo.set_selected(0);
+            pp_combo.set_tooltip_text(Some(
+                "HEVC pixel format. 8-bit 4:2:0 is the universal default; 10-bit \
+                 reduces banding; 10-bit 4:2:2 preserves chroma for mastering / \
+                 color work. Encoded by libx265 everywhere, and hardware-\
+                 accelerated via Intel QSV when available (otherwise libx265).",
+            ));
+            grid.attach(&pp_label, 0, 5, 1, 1);
+            grid.attach(&pp_combo, 1, 5, 1, 1);
+
             // GIF frame rate (shown only for GIF container)
             let gif_fps_label = gtk::Label::new(Some("GIF Frame Rate:"));
             gif_fps_label.set_halign(gtk::Align::End);
@@ -1924,8 +1967,8 @@ pub fn build_toolbar(
             gif_fps_spin.set_tooltip_text(Some(
                 "Frames per second for the animated GIF (lower = smaller file)",
             ));
-            grid.attach(&gif_fps_label, 0, 5, 1, 1);
-            grid.attach(&gif_fps_spin, 1, 5, 1, 1);
+            grid.attach(&gif_fps_label, 0, 6, 1, 1);
+            grid.attach(&gif_fps_spin, 1, 6, 1, 1);
             gif_fps_label.set_visible(false);
             gif_fps_spin.set_visible(false);
 
@@ -1939,8 +1982,8 @@ pub fn build_toolbar(
                 "PCM (uncompressed)",
             ]);
             ac_combo.set_selected(0);
-            grid.attach(&ac_label, 0, 6, 1, 1);
-            grid.attach(&ac_combo, 1, 6, 1, 1);
+            grid.attach(&ac_label, 0, 7, 1, 1);
+            grid.attach(&ac_combo, 1, 7, 1, 1);
 
             // Audio bitrate (hidden for GIF)
             let ab_label = gtk::Label::new(Some("Audio Bitrate:"));
@@ -1948,8 +1991,8 @@ pub fn build_toolbar(
             let ab_entry = gtk::Entry::new();
             ab_entry.set_text("192");
             ab_entry.set_tooltip_text(Some("Audio bitrate in kbps (ignored for FLAC/PCM)"));
-            grid.attach(&ab_label, 0, 7, 1, 1);
-            grid.attach(&ab_entry, 1, 7, 1, 1);
+            grid.attach(&ab_label, 0, 8, 1, 1);
+            grid.attach(&ab_entry, 1, 8, 1, 1);
 
             // Audio channel layout — Stereo (default) / 5.1 / 7.1 surround.
             // Hidden for GIF (no audio).
@@ -1963,8 +2006,21 @@ pub fn build_toolbar(
                  with an automatic LFE bass tap. Per-track overrides live in the \
                  Inspector. Supported by AAC / Opus / FLAC / PCM. Not used for GIF.",
             ));
-            grid.attach(&cl_label, 0, 8, 1, 1);
-            grid.attach(&cl_combo, 1, 8, 1, 1);
+            grid.attach(&cl_label, 0, 9, 1, 1);
+            grid.attach(&cl_combo, 1, 9, 1, 1);
+
+            // Show the HEVC depth/chroma row only when H.265 is the codec.
+            {
+                let pp_label = pp_label.clone();
+                let pp_combo = pp_combo.clone();
+                let sync_pp_visible = move |vc: &gtk::DropDown| {
+                    let is_h265 = vc.selected() == 1;
+                    pp_label.set_visible(is_h265);
+                    pp_combo.set_visible(is_h265);
+                };
+                sync_pp_visible(&vc_combo);
+                vc_combo.connect_selected_notify(sync_pp_visible);
+            }
 
             // Connect container selection to show/hide GIF-specific and audio rows
             {
@@ -1980,6 +2036,8 @@ pub fn build_toolbar(
                 let cl_combo = cl_combo.clone();
                 let vc_label = vc_label.clone();
                 let vc_combo = vc_combo.clone();
+                let pp_label = pp_label.clone();
+                let pp_combo = pp_combo.clone();
                 ct_combo.connect_selected_notify(move |ct| {
                     let is_gif = ct.selected() == 4;
                     gif_fps_label.set_visible(is_gif);
@@ -1989,6 +2047,10 @@ pub fn build_toolbar(
                     vc_combo.set_visible(!is_gif);
                     crf_label.set_visible(!is_gif);
                     crf_box.set_visible(!is_gif);
+                    // HEVC depth/chroma row only when not GIF *and* codec is H.265.
+                    let show_pp = !is_gif && vc_combo.selected() == 1;
+                    pp_label.set_visible(show_pp);
+                    pp_combo.set_visible(show_pp);
                     ac_label.set_visible(!is_gif);
                     ac_combo.set_visible(!is_gif);
                     ab_label.set_visible(!is_gif);
@@ -2017,6 +2079,7 @@ pub fn build_toolbar(
                             &ab_entry,
                             &gif_fps_spin,
                             &cl_combo,
+                            &pp_combo,
                         );
                     }
                 }
@@ -2036,6 +2099,7 @@ pub fn build_toolbar(
                 let ab_entry = ab_entry.clone();
                 let gif_fps_spin = gif_fps_spin.clone();
                 let cl_combo = cl_combo.clone();
+                let pp_combo = pp_combo.clone();
                 let btn_update_preset = btn_update_preset.clone();
                 let btn_delete_preset = btn_delete_preset.clone();
                 preset_dropdown.connect_selected_notify(move |dropdown| {
@@ -2064,6 +2128,7 @@ pub fn build_toolbar(
                         &ab_entry,
                         &gif_fps_spin,
                         &cl_combo,
+                        &pp_combo,
                     );
                 });
             }
@@ -2080,6 +2145,7 @@ pub fn build_toolbar(
                 let ab_entry = ab_entry.clone();
                 let gif_fps_spin = gif_fps_spin.clone();
                 let cl_combo = cl_combo.clone();
+                let pp_combo = pp_combo.clone();
                 btn_save_preset.connect_clicked(move |_| {
                     let dialog = gtk::Dialog::builder()
                         .title("Save Export Preset")
@@ -2103,6 +2169,7 @@ pub fn build_toolbar(
                         let ab_entry = ab_entry.clone();
                         let gif_fps_spin = gif_fps_spin.clone();
                         let cl_combo = cl_combo.clone();
+                        let pp_combo = pp_combo.clone();
                         move |d, resp| {
                             if resp == gtk::ResponseType::Accept {
                                 let name = entry.text().to_string();
@@ -2119,6 +2186,7 @@ pub fn build_toolbar(
                                     // pick a stable Off so the preset hash is
                                     // deterministic across sessions.
                                     crate::ui_state::HwEncoderMode::Off,
+                                    hevc_pixel_profile_from_selected(pp_combo.selected()),
                                 );
                                 let ok = {
                                     let mut state = presets_state.borrow_mut();
@@ -2161,6 +2229,7 @@ pub fn build_toolbar(
                 let ab_entry = ab_entry.clone();
                 let gif_fps_spin = gif_fps_spin.clone();
                 let cl_combo = cl_combo.clone();
+                let pp_combo = pp_combo.clone();
                 btn_update_preset.connect_clicked(move |_| {
                     let selected = preset_dropdown.selected();
                     if selected == 0 {
@@ -2185,6 +2254,7 @@ pub fn build_toolbar(
                             &gif_fps_spin,
                             &cl_combo,
                             crate::ui_state::HwEncoderMode::Off,
+                            hevc_pixel_profile_from_selected(pp_combo.selected()),
                         );
                         let ok = state
                             .upsert_preset(ExportPreset::from_export_options(
@@ -2270,6 +2340,7 @@ pub fn build_toolbar(
                     &gif_fps_spin,
                     &cl_combo,
                     hw_mode,
+                    hevc_pixel_profile_from_selected(pp_combo.selected()),
                 );
                 let mut state = presets_state.borrow_mut();
                 state.last_used_preset = if preset_dropdown.selected() > 0 {
@@ -3455,5 +3526,32 @@ mod tests {
     fn toolbar_tool_metadata_matches_expected_labels() {
         assert_eq!(toolbar_tool_label(ActiveTool::Razor), "✂ Razor");
         assert_eq!(toolbar_tool_tooltip(ActiveTool::Slip), "Slip edit tool (Y)");
+    }
+
+    #[test]
+    fn hevc_pixel_profile_combo_round_trips() {
+        use crate::ui_state::HevcPixelProfile;
+        for profile in [
+            HevcPixelProfile::Main8,
+            HevcPixelProfile::Main10,
+            HevcPixelProfile::Main422_10,
+        ] {
+            let idx = selected_from_hevc_pixel_profile(&profile);
+            assert_eq!(hevc_pixel_profile_from_selected(idx), profile);
+        }
+        // Dropdown order matches the export-dialog labels (8-bit, 10-bit, 4:2:2).
+        assert_eq!(
+            hevc_pixel_profile_from_selected(0),
+            HevcPixelProfile::Main8
+        );
+        assert_eq!(
+            hevc_pixel_profile_from_selected(2),
+            HevcPixelProfile::Main422_10
+        );
+        // Out-of-range falls back to the safe default.
+        assert_eq!(
+            hevc_pixel_profile_from_selected(99),
+            HevcPixelProfile::Main8
+        );
     }
 }
