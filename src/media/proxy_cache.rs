@@ -1339,6 +1339,12 @@ fn legacy_lut_hash(lut_path: &str) -> u32 {
     hasher.finish() as u32
 }
 
+/// Bumped whenever the proxy *encode settings* change in a way that should
+/// invalidate previously-cached proxies (so users automatically get
+/// re-rendered proxies instead of keeping stale ones at the old quality).
+/// v2: balanced quality (veryfast/CRF 25) replacing ultrafast/CRF 28.
+const PROXY_ENCODE_VERSION: u32 = 2;
+
 fn source_variant_hash(
     source_path: &str,
     scale: ProxyScale,
@@ -1356,7 +1362,11 @@ fn source_variant_hash(
         .add(normalized_vidstab_smoothing_hundredths(
             vidstab_enabled,
             vidstab_smoothing,
-        ));
+        ))
+        // Participates in the on-disk filename, so bumping PROXY_ENCODE_VERSION
+        // changes every proxy path and old-quality proxies are ignored and
+        // re-rendered in the background.
+        .add(PROXY_ENCODE_VERSION);
     // Codec only participates when it deviates from the historical H.264
     // default. This keeps the variant hash stable for users who never
     // touch the new HEVC preference, so their existing cache survives.
@@ -1687,12 +1697,12 @@ fn run_transcode_command(
         (Some(HwEncoderFamily::Vaapi), ProxyCodec::H264) => {
             cmd.arg("-c:v")
                 .arg("h264_vaapi")
-                // qp ~ CRF in spirit; 28 keeps proxy bitrate similar to libx264 CRF 28.
+                // qp ~ CRF in spirit; 25 matches the libx264 balanced-quality CRF.
                 .arg("-qp")
-                .arg("28");
+                .arg("25");
         }
         (Some(HwEncoderFamily::Vaapi), ProxyCodec::Hevc) => {
-            cmd.arg("-c:v").arg("hevc_vaapi").arg("-qp").arg("28");
+            cmd.arg("-c:v").arg("hevc_vaapi").arg("-qp").arg("25");
         }
         (Some(HwEncoderFamily::Nvenc), ProxyCodec::H264) => {
             cmd.arg("-c:v")
@@ -1704,7 +1714,7 @@ fn run_transcode_command(
                 .arg("-rc")
                 .arg("constqp")
                 .arg("-cq")
-                .arg("28")
+                .arg("25")
                 .arg("-pix_fmt")
                 .arg("yuv420p");
         }
@@ -1718,23 +1728,25 @@ fn run_transcode_command(
                 .arg("-rc")
                 .arg("constqp")
                 .arg("-cq")
-                .arg("28")
+                .arg("25")
                 .arg("-pix_fmt")
                 .arg("yuv420p");
         }
         (None, ProxyCodec::H264) => {
+            // Balanced quality: veryfast/CRF 25 instead of ultrafast/CRF 28.
+            // The old settings (plus -tune fastdecode -bf 0 -refs 1) produced
+            // ~833 kbps at 1080p — heavily blocky, and especially visible on
+            // log footage where a live LUT stretches contrast and amplifies the
+            // macroblock artifacts.  veryfast/CRF 25 (~3-4 Mbps) keeps proxies
+            // small-ish while removing the visible blocking; deblocking and a
+            // few B-frames are cheap to decode at 1080p (and proxies can use the
+            // hardware decode path too).
             cmd.arg("-c:v")
                 .arg("libx264")
                 .arg("-preset")
-                .arg("ultrafast")
-                .arg("-tune")
-                .arg("fastdecode")
+                .arg("veryfast")
                 .arg("-crf")
-                .arg("28")
-                .arg("-bf")
-                .arg("0")
-                .arg("-refs")
-                .arg("1")
+                .arg("25")
                 .arg("-pix_fmt")
                 .arg("yuv420p");
         }
@@ -1742,11 +1754,11 @@ fn run_transcode_command(
             cmd.arg("-c:v")
                 .arg("libx265")
                 .arg("-preset")
-                .arg("ultrafast")
+                .arg("veryfast")
                 .arg("-x265-params")
                 .arg("log-level=error")
                 .arg("-crf")
-                .arg("28")
+                .arg("25")
                 .arg("-pix_fmt")
                 .arg("yuv420p");
         }
