@@ -268,6 +268,9 @@ fn estimate_bpm(frames: &[Frame], sample_rate: f32) -> Option<f32> {
     // Frame rate of the onset envelope.
     let frame_rate = sample_rate / FFT_HOP as f32;
     let min_lag = ((60.0 / 200.0) * frame_rate).round() as usize; // 200 BPM
+    // 60.0 / 60.0 is kept in the literal "60 sec / BPM" form to parallel the
+    // 200 BPM line above; clippy's eq_op would otherwise flag the 60.0/60.0.
+    #[allow(clippy::eq_op)]
     let max_lag = ((60.0 / 60.0) * frame_rate).round() as usize; // 60 BPM
     if min_lag == 0 || max_lag >= centered.len() {
         return None;

@@ -2803,14 +2803,20 @@ impl ProgramPlayer {
     /// downloaded to the CPU for the effects bin — a path measured *slower* than
     /// plain software decode.  When on, leave hardware decoders enabled; the
     /// pad-added handler inserts a GPU-resident vapostproc scale.
-    fn configure_video_branch_decoder(&self, decoder: &gst::Element) {
+    /// `allow_hardware` should be false for branches that have no GPU-scale
+    /// path wired (so a hardware decoder's full-resolution frame would be
+    /// downloaded to the CPU — slower than software) or for content the GPU
+    /// path can't handle correctly (HDR — see the call site).
+    fn configure_video_branch_decoder(&self, decoder: &gst::Element, allow_hardware: bool) {
         if decoder.has_property("force-sw-decoders") {
             // Only allow hardware decoders when we can actually consume their
-            // GPU surfaces via vapostproc.  If hardware acceleration is off, or
-            // vapostproc is unavailable, force software — otherwise a hardware
-            // decoder's full-resolution frame would be downloaded to the CPU for
-            // the effects bin, which is slower than plain software decode.
-            decoder.set_property("force-sw-decoders", !self.hw_video_postproc_active());
+            // GPU surfaces via vapostproc.  If hardware acceleration is off,
+            // vapostproc is unavailable, or the caller opts out, force software —
+            // otherwise a hardware decoder's full-resolution frame would be
+            // downloaded to the CPU for the effects bin, which is slower than
+            // plain software decode.
+            let force_sw = !self.hw_video_postproc_active() || !allow_hardware;
+            decoder.set_property("force-sw-decoders", force_sw);
         }
     }
 
@@ -8110,7 +8116,7 @@ impl ProgramPlayer {
         };
         // Warm the same decoder the live branch will use (HW or forced-SW), so
         // the prewarmed codec/init state matches what the main branch plugs.
-        self.configure_video_branch_decoder(&decoder);
+        self.configure_video_branch_decoder(&decoder, !clip.is_hdr);
         let Ok(fakesink) = gst::ElementFactory::make("fakesink")
             .property("sync", false)
             .build()
@@ -12238,6 +12244,11 @@ impl ProgramPlayer {
             .property("uri", &uri)
             .build()
             .ok()?;
+        // Prerender has no GPU-scale (vapostproc) path wired into its pad-added
+        // handler, so allowing a hardware decoder here would just download every
+        // full-resolution frame to the CPU — slower than software.  Force
+        // software for this offscreen branch.
+        self.configure_video_branch_decoder(&decoder, false);
         if self.pipeline.add(&decoder).is_err() {
             return None;
         }
@@ -13532,7 +13543,12 @@ impl ProgramPlayer {
                 return None;
             }
         };
-        self.configure_video_branch_decoder(&decoder);
+        // HDR clips opt out of the GPU path: vapostproc would downconvert the
+        // 10-bit BT.2020/PQ surface to 8-bit before the effects bin's HDR
+        // tone-mapping runs, clipping wide-gamut range the software path keeps
+        // as 10-bit up to the tone-map.  HDR preview is approximate either way
+        // (true HDR is the separate libplacebo pipeline).
+        self.configure_video_branch_decoder(&decoder, !clip.is_hdr);
 
         // Add to pipeline.
         if self.pipeline.add(&decoder).is_err() {
@@ -13872,7 +13888,9 @@ impl ProgramPlayer {
         let audio_linked_for_cb = audio_linked.clone();
         let clip_id_for_cb = clip.id.clone();
         let pipeline_for_cb: gst::Bin = self.pipeline.clone().upcast();
-        let hw_postproc = self.hw_video_postproc_active();
+        // HDR clips stay on software decode (see configure_video_branch_decoder),
+        // so they also never take the vapostproc insertion below.
+        let hw_postproc = self.hw_video_postproc_active() && !clip.is_hdr;
         let proj_w_for_cb = self.project_width;
         let proj_h_for_cb = self.project_height;
         decoder.connect_pad_added(move |_dec, pad| {
