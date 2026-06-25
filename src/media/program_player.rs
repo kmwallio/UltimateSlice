@@ -9308,6 +9308,14 @@ impl ProgramPlayer {
     /// Spin-wait (with short sleeps) until every slot's compositor-arrival
     /// counter has advanced beyond the snapshot taken before the seek.
     /// Returns true if all slots advanced within the timeout, false otherwise.
+    /// True when a slot is a self-generating video source (a title clip's
+    /// `videotestsrc`) rather than a decoded media source.  Such slots produce
+    /// frames on demand once PLAYING and never preroll a first frame during the
+    /// paused boundary window, so the boundary must not block waiting for them.
+    fn slot_is_generator(&self, slot: &VideoSlot) -> bool {
+        self.clips.get(slot.clip_idx).is_some_and(|c| c.is_title)
+    }
+
     fn wait_for_compositor_arrivals(&self, baseline: &[u64], timeout_ms: u64) -> bool {
         let effective_timeout_ms = self.effective_wait_timeout_ms(timeout_ms);
         log::debug!(
@@ -9327,6 +9335,14 @@ impl ProgramPlayer {
             let all_arrived = self.slots.iter().zip(baseline.iter()).all(|(slot, &base)| {
                 // Audio-only slots have no compositor pad — always "arrived".
                 slot.compositor_pad.is_none()
+                    // Title/generator slots are a continuous videotestsrc that
+                    // produces frames on demand once PLAYING — they don't preroll
+                    // a first frame during the paused boundary window, so blocking
+                    // the whole boundary on them froze video for the full timeout
+                    // (~700ms) while the real clips were already ready.  Treat them
+                    // as arrived; the generated title appears a frame later on
+                    // resume instead of stalling the cut.
+                    || self.slot_is_generator(slot)
                     || slot.comp_arrival_seq.load(Ordering::Relaxed) > base
             });
             if all_arrived {
@@ -9344,6 +9360,7 @@ impl ProgramPlayer {
                     .enumerate()
                     .filter(|(_, (slot, &base))| {
                         slot.compositor_pad.is_some()
+                            && !self.slot_is_generator(slot)
                             && slot.comp_arrival_seq.load(Ordering::Relaxed) <= base
                     })
                     .map(|(i, (slot, _))| (i, slot.video_linked.load(Ordering::Relaxed)))
