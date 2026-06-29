@@ -834,6 +834,109 @@ fn refresh_preset_dropdown(
     dropdown.set_selected(selected);
 }
 
+/// Trace a rounded-rectangle path on a cairo context (for preset cards).
+fn rr_path(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {
+    let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
+    let pi = std::f64::consts::PI;
+    cr.new_sub_path();
+    cr.arc(x + w - r, y + r, r, -pi / 2.0, 0.0);
+    cr.arc(x + w - r, y + h - r, r, 0.0, pi / 2.0);
+    cr.arc(x + r, y + h - r, r, pi / 2.0, pi);
+    cr.arc(x + r, y + r, r, pi, 1.5 * pi);
+    cr.close_path();
+}
+
+/// Build one export-preset gallery card. `None` => the "(Custom)" card at
+/// index 0 (manual settings, no stored preset). The card shows an
+/// aspect-ratio preview box, the preset name, and a one-line spec summary.
+fn build_preset_card(preset: Option<&ExportPreset>) -> gtk::FlowBoxChild {
+    let cell = gtk::Box::new(gtk::Orientation::Vertical, 3);
+    cell.set_margin_start(4);
+    cell.set_margin_end(4);
+    cell.set_margin_top(4);
+    cell.set_margin_bottom(4);
+
+    let (aw, ah) = preset.map(|p| p.card_aspect()).unwrap_or((16, 9));
+    let is_custom = preset.is_none();
+    let area = gtk::DrawingArea::new();
+    area.set_content_width(132);
+    area.set_content_height(74);
+    area.set_draw_func(move |_, cr, w, h| {
+        let w = w as f64;
+        let h = h as f64;
+        let pad = 10.0;
+        let avail_w = (w - 2.0 * pad).max(1.0);
+        let avail_h = (h - 2.0 * pad).max(1.0);
+        let ar = aw as f64 / ah as f64;
+        let (bw, bh) = if avail_w / avail_h > ar {
+            (avail_h * ar, avail_h)
+        } else {
+            (avail_w, avail_w / ar)
+        };
+        let x = (w - bw) / 2.0;
+        let y = (h - bh) / 2.0;
+        rr_path(cr, x, y, bw, bh, 4.0);
+        if is_custom {
+            cr.set_source_rgb(0.16, 0.16, 0.19);
+            let _ = cr.fill_preserve();
+            cr.set_source_rgb(0.55, 0.55, 0.62);
+            cr.set_line_width(1.5);
+            cr.set_dash(&[4.0, 3.0], 0.0);
+            let _ = cr.stroke();
+        } else {
+            cr.set_source_rgb(0.18, 0.40, 0.66);
+            let _ = cr.fill_preserve();
+            cr.set_source_rgb(0.42, 0.66, 0.95);
+            cr.set_line_width(1.0);
+            let _ = cr.stroke();
+        }
+    });
+    cell.append(&area);
+
+    let name = gtk::Label::new(Some(preset.map(|p| p.name.as_str()).unwrap_or("Custom")));
+    name.add_css_class("clip-name");
+    name.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    name.set_max_width_chars(18);
+    name.set_halign(gtk::Align::Center);
+    cell.append(&name);
+
+    let spec_text = preset
+        .map(|p| p.spec_summary())
+        .unwrap_or_else(|| "Manual settings".to_string());
+    let spec = gtk::Label::new(Some(&spec_text));
+    spec.add_css_class("media-meta-secondary");
+    spec.set_wrap(true);
+    spec.set_justify(gtk::Justification::Center);
+    spec.set_halign(gtk::Align::Center);
+    spec.set_max_width_chars(20);
+    cell.append(&spec);
+
+    let child = gtk::FlowBoxChild::new();
+    child.set_child(Some(&cell));
+    child.add_css_class("export-preset-card");
+    child
+}
+
+/// Rebuild the preset gallery from `state`: a "(Custom)" card at index 0
+/// followed by one card per preset, then select `selected_index`
+/// (0 = Custom) to mirror the hidden DropDown's selection convention.
+fn rebuild_preset_gallery(
+    flowbox: &gtk::FlowBox,
+    state: &ExportPresetsState,
+    selected_index: u32,
+) {
+    while let Some(child) = flowbox.first_child() {
+        flowbox.remove(&child);
+    }
+    flowbox.append(&build_preset_card(None));
+    for preset in &state.presets {
+        flowbox.append(&build_preset_card(Some(preset)));
+    }
+    if let Some(child) = flowbox.child_at_index(selected_index as i32) {
+        flowbox.select_child(&child);
+    }
+}
+
 #[allow(deprecated)]
 pub fn confirm_unsaved_then(
     window: Option<gtk::Window>,
@@ -1686,9 +1789,32 @@ pub fn build_toolbar(
             // Preset controls
             let preset_label = gtk::Label::new(Some("Preset:"));
             preset_label.set_halign(gtk::Align::End);
-            let preset_box = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            preset_label.set_valign(gtk::Align::Start);
+            let preset_box = gtk::Box::new(gtk::Orientation::Vertical, 6);
+            // Hidden DropDown retained as the single source of truth for the
+            // selected preset index (0 = Custom). The visible card gallery
+            // below drives it via set_selected(), so every existing
+            // Save/Update/Delete handler keeps reading preset_dropdown.selected()
+            // unchanged.
             let preset_dropdown = gtk::DropDown::from_strings(&["(Custom)"]);
-            preset_dropdown.set_hexpand(true);
+            preset_dropdown.set_visible(false);
+
+            // Gallery of preset cards (replaces the old flat dropdown UI).
+            let preset_flow = gtk::FlowBox::new();
+            preset_flow.set_selection_mode(gtk::SelectionMode::Single);
+            preset_flow.set_homogeneous(true);
+            preset_flow.set_min_children_per_line(2);
+            preset_flow.set_max_children_per_line(u32::MAX);
+            preset_flow.set_column_spacing(6);
+            preset_flow.set_row_spacing(6);
+            preset_flow.add_css_class("export-preset-gallery");
+            let preset_scroll = gtk::ScrolledWindow::new();
+            preset_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+            preset_scroll.set_min_content_height(176);
+            preset_scroll.set_max_content_height(176);
+            preset_scroll.set_hexpand(true);
+            preset_scroll.set_child(Some(&preset_flow));
+
             let btn_save_preset = gtk::Button::with_label("Save As…");
             let btn_update_preset = gtk::Button::with_label("Update");
             let btn_delete_preset = gtk::Button::with_label("Delete");
@@ -1699,12 +1825,38 @@ pub fn build_toolbar(
             btn_delete_preset.set_tooltip_text(Some("Delete the selected export preset"));
             btn_update_preset.set_sensitive(false);
             btn_delete_preset.set_sensitive(false);
+            let preset_btn_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+            preset_btn_row.set_halign(gtk::Align::End);
+            preset_btn_row.append(&btn_save_preset);
+            preset_btn_row.append(&btn_update_preset);
+            preset_btn_row.append(&btn_delete_preset);
+
+            preset_box.append(&preset_scroll);
+            preset_box.append(&preset_btn_row);
             preset_box.append(&preset_dropdown);
-            preset_box.append(&btn_save_preset);
-            preset_box.append(&btn_update_preset);
-            preset_box.append(&btn_delete_preset);
             grid.attach(&preset_label, 0, 0, 1, 1);
             grid.attach(&preset_box, 1, 0, 1, 1);
+
+            // Card click → drive the hidden DropDown selection, which fires
+            // the existing selected-notify handler (apply options, toggle
+            // Update/Delete sensitivity, persist last-used). select_child()
+            // used elsewhere for highlight does NOT emit child-activated, so
+            // there is no feedback loop.
+            {
+                let preset_dropdown = preset_dropdown.clone();
+                preset_flow.connect_child_activated(move |_fb, child| {
+                    preset_dropdown.set_selected(child.index() as u32);
+                });
+            }
+
+            // Shared "rebuild the gallery from current state and highlight
+            // index N" helper, called at init and after Save/Update/Delete.
+            let rebuild_gallery: Rc<dyn Fn(&ExportPresetsState, u32)> = {
+                let preset_flow = preset_flow.clone();
+                Rc::new(move |state: &ExportPresetsState, sel: u32| {
+                    rebuild_preset_gallery(&preset_flow, state, sel);
+                })
+            };
 
             // Video codec
             let vc_label = gtk::Label::new(Some("Video Codec:"));
@@ -1868,6 +2020,7 @@ pub fn build_toolbar(
                         );
                     }
                 }
+                rebuild_gallery(&state, preset_dropdown.selected());
             }
             let preset_selected = preset_dropdown.selected() > 0;
             btn_update_preset.set_sensitive(preset_selected);
@@ -1918,6 +2071,7 @@ pub fn build_toolbar(
             {
                 let presets_state = presets_state.clone();
                 let preset_dropdown = preset_dropdown.clone();
+                let rebuild_gallery = rebuild_gallery.clone();
                 let vc_combo = vc_combo.clone();
                 let ct_combo = ct_combo.clone();
                 let or_combo = or_combo.clone();
@@ -1940,6 +2094,7 @@ pub fn build_toolbar(
                     dialog.connect_response({
                         let presets_state = presets_state.clone();
                         let preset_dropdown = preset_dropdown.clone();
+                        let rebuild_gallery = rebuild_gallery.clone();
                         let vc_combo = vc_combo.clone();
                         let ct_combo = ct_combo.clone();
                         let or_combo = or_combo.clone();
@@ -1984,6 +2139,7 @@ pub fn build_toolbar(
                                         &state,
                                         state.last_used_preset.as_deref(),
                                     );
+                                    rebuild_gallery(&state, preset_dropdown.selected());
                                 }
                             }
                             d.close();
@@ -1996,6 +2152,7 @@ pub fn build_toolbar(
             {
                 let presets_state = presets_state.clone();
                 let preset_dropdown = preset_dropdown.clone();
+                let rebuild_gallery = rebuild_gallery.clone();
                 let vc_combo = vc_combo.clone();
                 let ct_combo = ct_combo.clone();
                 let or_combo = or_combo.clone();
@@ -2047,6 +2204,7 @@ pub fn build_toolbar(
                             &state,
                             state.last_used_preset.as_deref(),
                         );
+                        rebuild_gallery(&state, preset_dropdown.selected());
                     }
                 });
             }
@@ -2054,6 +2212,7 @@ pub fn build_toolbar(
             {
                 let presets_state = presets_state.clone();
                 let preset_dropdown = preset_dropdown.clone();
+                let rebuild_gallery = rebuild_gallery.clone();
                 btn_delete_preset.connect_clicked(move |_| {
                     let selected = preset_dropdown.selected();
                     if selected == 0 {
@@ -2077,6 +2236,7 @@ pub fn build_toolbar(
                     if ok {
                         let state = presets_state.borrow();
                         refresh_preset_dropdown(&preset_dropdown, &state, None);
+                        rebuild_gallery(&state, preset_dropdown.selected());
                     }
                 });
             }
@@ -2242,9 +2402,23 @@ pub fn build_toolbar(
                             let close_btn = gtk::Button::with_label("Cancel");
                             close_btn.set_halign(gtk::Align::End);
 
+                            // Post-export share/locate actions, revealed only
+                            // once the render finishes successfully.
+                            let share_btn = crate::ui::share::build_share_button(
+                                &progress_dialog,
+                                output.clone(),
+                            );
+                            share_btn.set_halign(gtk::Align::End);
+                            share_btn.set_visible(false);
+
+                            let btn_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+                            btn_row.set_halign(gtk::Align::End);
+                            btn_row.append(&share_btn);
+                            btn_row.append(&close_btn);
+
                             vbox.append(&status_label);
                             vbox.append(&progress_bar);
-                            vbox.append(&close_btn);
+                            vbox.append(&btn_row);
                             progress_dialog.set_child(Some(&vbox));
                             progress_dialog.present();
 
@@ -2273,6 +2447,7 @@ pub fn build_toolbar(
                                                 progress_bar.set_text(Some("Done!"));
                                                 status_label.set_text("Export complete.");
                                                 close_btn.set_label("Close");
+                                                share_btn.set_visible(true);
                                                 return glib::ControlFlow::Break;
                                             }
                                             ExportProgress::Error(e) => {
@@ -2763,6 +2938,43 @@ pub fn build_toolbar(
         });
     }
 
+    // -- Export AAF button (audio-post interchange for Pro Tools / Avid) --
+    let btn_export_aaf = gtk::Button::with_label("Export AAF…");
+    btn_export_aaf.add_css_class("flat");
+    {
+        let project = project.clone();
+        let export_pop_weak = export_pop.downgrade();
+        btn_export_aaf.connect_clicked(move |btn| {
+            if let Some(pop) = export_pop_weak.upgrade() {
+                pop.popdown();
+            }
+
+            let dialog = gtk::FileDialog::new();
+            dialog.set_title("Export AAF");
+            dialog.set_initial_name(Some("timeline.aaf"));
+
+            let filter = gtk::FileFilter::new();
+            filter.add_pattern("*.aaf");
+            filter.set_name(Some("AAF Files (Pro Tools / Avid)"));
+            let filters = gio::ListStore::new::<gtk::FileFilter>();
+            filters.append(&filter);
+            dialog.set_filters(Some(&filters));
+
+            let project = project.clone();
+            let window = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok());
+            dialog.save(window.as_ref(), gio::Cancellable::NONE, move |result| {
+                if let Ok(file) = result {
+                    if let Some(path) = file.path() {
+                        match crate::aaf::writer::write_aaf(&project.borrow(), &path) {
+                            Ok(_) => log::info!("AAF exported to {}", path.display()),
+                            Err(e) => log::error!("Failed to export AAF: {e}"),
+                        }
+                    }
+                }
+            });
+        });
+    }
+
     // -- Export OTIO button --
     let btn_export_otio = gtk::Button::with_label("Export OTIO…");
     btn_export_otio.add_css_class("flat");
@@ -2882,6 +3094,7 @@ pub fn build_toolbar(
     export_pop_box.append(&btn_create_snapshot);
     export_pop_box.append(&btn_manage_snapshots);
     export_pop_box.append(&btn_export_edl);
+    export_pop_box.append(&btn_export_aaf);
     export_pop_box.append(&btn_export_otio);
     export_pop_box.append(&btn_restore_backup);
 

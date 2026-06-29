@@ -1,7 +1,7 @@
 use crate::ui_state::{
     clamp_prerender_crf, AutoScrollMode, CrossfadeCurve, GskRenderer, HwEncoderMode,
     PlaybackPriority, PreferencesState, PrerenderEncodingPreset, PreviewQuality, ProxyCodec,
-    ProxyMode, MAX_PRERENDER_CRF, MIN_PRERENDER_CRF,
+    ProxyMode, ThemeMode, MAX_PRERENDER_CRF, MIN_PRERENDER_CRF,
 };
 use gtk4::prelude::*;
 use gtk4::{
@@ -171,6 +171,48 @@ pub fn show_preferences_dialog(
     let general_label = Label::new(Some("General preferences will appear here."));
     general_label.set_halign(gtk::Align::Start);
     general_box.append(&general_label);
+
+    // ── Appearance ──────────────────────────────────────────────────────
+    let appearance_label = Label::new(Some("Appearance"));
+    appearance_label.set_halign(gtk::Align::Start);
+    appearance_label.add_css_class("title-4");
+    general_box.append(&appearance_label);
+
+    let theme_label = Label::new(Some("Theme"));
+    theme_label.set_halign(gtk::Align::Start);
+    let theme_combo = gtk4::ComboBoxText::new();
+    theme_combo.append(Some("system"), "System (follow desktop)");
+    theme_combo.append(Some("light"), "Light");
+    theme_combo.append(Some("dark"), "Dark");
+    theme_combo.append(Some("high_contrast"), "High Contrast (large text)");
+    theme_combo.set_active_id(Some(current.theme_mode.as_str()));
+    theme_combo.set_halign(gtk::Align::Start);
+    let theme_hint = Label::new(Some(
+        "Light/Dark switch the app chrome. System follows your desktop's light/dark setting. \
+         High Contrast uses a pure-black palette with bright borders, stronger focus rings, and \
+         larger small text for low-vision / bright-room use. The timeline, program monitor, and \
+         scopes always use the dark editing palette.",
+    ));
+    theme_hint.set_halign(gtk::Align::Start);
+    theme_hint.add_css_class("dim-label");
+    theme_hint.set_wrap(true);
+    theme_hint.set_max_width_chars(60);
+    general_box.append(&theme_label);
+    general_box.append(&theme_combo);
+    general_box.append(&theme_hint);
+
+    let accent_row = GBox::new(Orientation::Horizontal, 8);
+    let accent_label = Label::new(Some("Accent color"));
+    accent_label.set_halign(gtk::Align::Start);
+    let accent_button = gtk4::ColorDialogButton::new(Some(gtk4::ColorDialog::new()));
+    if let Some((r, g, b)) = crate::ui::colors::parse_hex_rgb(&current.accent_color) {
+        accent_button.set_rgba(&gdk4::RGBA::new(r as f32, g as f32, b as f32, 1.0));
+    }
+    accent_button.set_valign(gtk::Align::Center);
+    accent_row.append(&accent_label);
+    accent_row.append(&accent_button);
+    general_box.append(&accent_row);
+
     let about_btn = gtk::Button::with_label("About & Open-source credits");
     about_btn.set_halign(gtk::Align::Start);
     {
@@ -1617,6 +1659,18 @@ pub fn show_preferences_dialog(
                 },
                 seen_onboarding_v1: current.seen_onboarding_v1,
                 hdr_preview_passthrough: current.hdr_preview_passthrough,
+                theme_mode: ThemeMode::from_str(
+                    theme_combo.active_id().as_deref().unwrap_or("dark"),
+                ),
+                accent_color: {
+                    let c = accent_button.rgba();
+                    format!(
+                        "#{:02x}{:02x}{:02x}",
+                        (c.red() * 255.0).round().clamp(0.0, 255.0) as u8,
+                        (c.green() * 255.0).round().clamp(0.0, 255.0) as u8,
+                        (c.blue() * 255.0).round().clamp(0.0, 255.0) as u8,
+                    )
+                },
             };
             new_state.set_proxy_mode(ProxyMode::from_str(
                 proxy_mode.active_id().as_deref().unwrap_or("off"),

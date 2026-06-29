@@ -170,6 +170,31 @@ Video stabilization compensates camera shake using ffmpeg's libvidstab (two-pass
 
 ---
 
+## Render and Replace
+
+The **Render and Replace** checkbox (in the Effects section, above the Frei0r chain) bakes a clip's heavy effect stack into a high-quality ProRes sidecar in the background, so the Program Monitor stops re-computing those effects every frame. Both preview and MP4 export play the sidecar instead of re-running the filters, and the baked effects are suppressed so each one is applied exactly once.
+
+**What gets baked** (changing any of these re-bakes the sidecar in the background):
+
+- Colour grade + colour keyframes, LUT stack, exposure / shadows / highlights
+- Blur / denoise / sharpness, frei0r effects
+- HSL qualifier (secondary colour correction)
+- Chroma key (baked into the sidecar's alpha — the bake switches to ProRes 4444)
+- Stabilization (vidstab) and LADSPA audio effects
+- **Static shape masks** — rectangle, ellipse, and bezier-path masks that are not tracked and have no keyframes
+
+**What stays live on top of the sidecar** (edit these freely without re-baking):
+
+- Transform (scale / position / rotation), opacity, blend mode, transitions, speed / reverse / freeze, timeline position
+- **Tracked or keyframed (animated) masks** — their geometry changes per frame, so they can't be a single static bake; they keep applying live
+- Masks combined with chroma key when a **path** mask is present — the chroma key still bakes, but the masks stay live (the path alpha-merge would otherwise clobber the keyed alpha)
+
+**Apply to selected** — when more than one bakeable clip is selected, an **Apply to selected** button appears beneath the checkbox; clicking it toggles Render-and-Replace on every selected clip in one undoable step.
+
+The status row under the checkbox shows **Baking… / Sidecar ready / Bake failed**, and the Jobs tray surfaces overall progress. Sidecars live under `$XDG_CACHE_HOME/ultimateslice/render_replace/` and are LRU-evicted. MCP: `set_clip_render_replace`.
+
+---
+
 ## Audio
 
 | Slider | Range | Default | Effect |

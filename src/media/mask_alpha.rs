@@ -1290,6 +1290,68 @@ pub fn build_combined_mask_ffmpeg_alpha(
     Some(FfmpegMaskAlphaResult::GeqExpression(combined))
 }
 
+/// Mask alpha for a Render-and-Replace **leaf** bake. The leaf sidecar
+/// holds the clip's source-resolution, pre-transform frames (the clip's
+/// scale / position / rotation stay LIVE and are applied by the
+/// compositor on top of the sidecar), so the mask must be evaluated in
+/// clip-local / source space with an identity transform — NOT in the
+/// output-canvas space `build_combined_mask_ffmpeg_alpha` uses.
+///
+/// The bake runs at the source's native resolution, which isn't known at
+/// filter-build time. So the rect/ellipse geq expression is written in
+/// terms of ffmpeg's `W` / `H` geq variables (resolution- and
+/// aspect-independent) using the same `(coord+0.5)/dim` sampling as the
+/// live preview's [`apply_masks_to_rgba_buffer`]. Path masks rasterize to
+/// a reference-resolution grayscale buffer; because masks are defined in
+/// normalized [0,1] space, scaling that buffer to the actual frame
+/// (via `scale2ref` at the call site) preserves the mapping exactly.
+#[derive(Debug)]
+pub enum LeafBakeMaskAlpha {
+    /// Inline `geq` alpha sub-expression (rect / ellipse). Multiply the
+    /// frame's existing alpha by this.
+    Geq(String),
+    /// Raw grayscale (0..255) buffer for a path mask, `width`×`height`
+    /// pixels, row-major. The caller writes it as a P5/PGM and brings it
+    /// into the graph via `movie`+`scale2ref`+`alphamerge`.
+    Raster { bytes: Vec<u8>, width: u32, height: u32 },
+}
+
+pub fn build_leaf_bake_mask_ffmpeg_alpha(
+    masks: &[ClipMask],
+    raster_w: u32,
+    raster_h: u32,
+    local_time_ns: u64,
+) -> Option<LeafBakeMaskAlpha> {
+    // Identity transform: masks resolve in clip-local normalized space.
+    let prepared = prepare_canvas_masks(masks, local_time_ns, 1.0, 0.0, 0.0, 0.0)?;
+    if prepared.masks.is_empty() {
+        return None;
+    }
+    if prepared.has_path_masks() {
+        let bytes = prepared.rasterize_to_grayscale(raster_w as usize, raster_h as usize);
+        return Some(LeafBakeMaskAlpha::Raster {
+            bytes,
+            width: raster_w,
+            height: raster_h,
+        });
+    }
+    // `(X+0.5)/W` / `(Y+0.5)/H` mirror the preview's per-pixel sampling
+    // and stay correct at whatever resolution the source decodes to.
+    let npx = "((X+0.5)/W)";
+    let npy = "((Y+0.5)/H)";
+    let exprs: Vec<String> = prepared
+        .masks
+        .iter()
+        .map(|mask| mask.build_ffmpeg_expression(npx, npy))
+        .collect();
+    let combined = if exprs.len() == 1 {
+        exprs.into_iter().next().unwrap_or_else(|| "1".to_string())
+    } else {
+        exprs.join("*")
+    };
+    Some(LeafBakeMaskAlpha::Geq(combined))
+}
+
 fn build_rect_geq_expr_for_coords(
     px_expr: &str,
     py_expr: &str,

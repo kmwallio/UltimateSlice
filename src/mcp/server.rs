@@ -874,6 +874,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "save_aaf",
+            "description": "Export the timeline to an AAF (.aaf) file for audio post-production (Pro Tools / Avid). Writes all audio tracks plus a flattened video-reference track and a timecode track, with linked (external) media.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute path for output .aaf file" }
+                },
+                "required": ["path"]
+            }
+        },
+        {
             "name": "save_otio",
             "description": "Export the current project to an OpenTimelineIO (.otio) JSON file for interchange with DaVinci Resolve, Premiere, Nuke, etc.",
             "inputSchema": {
@@ -1386,7 +1397,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_clip_render_replace",
-            "description": "Toggle per-clip Render-and-Replace (Phase 1 foundation). When enabled, the RenderReplaceCache bakes this clip's primary pixel-level effect stack (color grade, LUT stack, frei0r effects, blur / denoise / sharpness) into a ProRes 422 HQ sidecar cached under $XDG_CACHE_HOME/ultimateslice/render_replace/. Phase 1 only persists the flag and signature; preview swap and effect-chain suppression land in Phase 1b.",
+            "description": "Toggle per-clip Render-and-Replace. When enabled, the RenderReplaceCache bakes this clip's effect stack — colour grade + colour keyframes, LUT stack, frei0r effects, blur / denoise / sharpness, HSL qualifier, chroma key, video stabilization, LADSPA audio effects, and static (untracked, non-keyframed) shape masks — into a ProRes sidecar (422 HQ, or 4444 when alpha is produced) cached under $XDG_CACHE_HOME/ultimateslice/render_replace/. Both the Program Monitor preview and MP4 export swap in the sidecar and suppress the baked effects so they apply exactly once. Transforms, opacity, blend, transitions, speed, and tracked/keyframed masks stay live on top. Editing any baked field invalidates the sidecar and re-bakes in the background.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -3267,6 +3278,11 @@ fn dispatch_tool_payload(
         },
 
         "save_edl" => McpCommand::SaveEdl {
+            path: arg_str!(args, "path"),
+            reply: tx,
+        },
+
+        "save_aaf" => McpCommand::SaveAaf {
             path: arg_str!(args, "path"),
             reply: tx,
         },

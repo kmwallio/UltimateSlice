@@ -4359,5 +4359,31 @@
         "contents": "[source.vendored-sources]\ndirectory = \"cargo/vendor\"\n\n[source.crates-io]\nreplace-with = \"vendored-sources\"\n",
         "dest": "cargo",
         "dest-filename": "config"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/cfb/cfb-0.14.0.crate",
+        "sha256": "a347dcabdae9c31b0825fd6a8bed285ec9c2acb89c47827126d52fa4f59cece3",
+        "dest": "cargo/vendor/cfb-0.14.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"a347dcabdae9c31b0825fd6a8bed285ec9c2acb89c47827126d52fa4f59cece3\", \"files\": {}}",
+        "dest": "cargo/vendor/cfb-0.14.0",
+        "dest-filename": ".cargo-checksum.json"
+    },
+    {
+        "type": "archive",
+        "archive-type": "tar-gzip",
+        "url": "https://static.crates.io/crates/web-time/web-time-1.1.0.crate",
+        "sha256": "5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb",
+        "dest": "cargo/vendor/web-time-1.1.0"
+    },
+    {
+        "type": "inline",
+        "contents": "{\"package\": \"5a6580f308b1fad9207618087a65c04e7a10bc77e02c8e84e9b00dd4b12fa0bb\", \"files\": {}}",
+        "dest": "cargo/vendor/web-time-1.1.0",
+        "dest-filename": ".cargo-checksum.json"
     }
 ]

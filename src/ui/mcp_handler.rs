@@ -4408,6 +4408,21 @@ pub(crate) fn handle_mcp_command(
             }
         }
 
+        McpCommand::SaveAaf { path, reply } => {
+            let result = {
+                let proj = project.borrow();
+                crate::aaf::writer::write_aaf(&proj, std::path::Path::new(&path))
+            };
+            match result {
+                Ok(_) => {
+                    let _ = reply.send(json!({"success": true, "path": path}));
+                }
+                Err(e) => {
+                    let _ = reply.send(json!({"success": false, "error": e.to_string()}));
+                }
+            }
+        }
+
         McpCommand::SaveOtio {
             path,
             path_mode,

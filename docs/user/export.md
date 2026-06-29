@@ -234,16 +234,39 @@ Title text export also resolves the selected Pango font into structured fontconf
 
 ## Export Presets
 
-Use the **Preset** row in the Export dialog to save and reuse named export configurations:
+The top of the Export dialog shows a **gallery of preset cards** instead of a flat dropdown. Each card has a proportional preview box (wide 16:9, vertical 9:16, square, etc. — drawn from the preset's output resolution), the preset name, and a one-line spec summary such as *"H.264 · 1080p · CRF 23 · AAC · MP4"*.
 
-- **Save As…** stores the current dialog settings as a named preset.
-- **Update** overwrites the currently selected preset with current widget values.
-- **Delete** removes the selected preset.
-- Selecting a preset immediately applies its codec/container/resolution/CRF/audio settings.
-- **(Custom)** means no saved preset is currently selected.
-- New installs (and older UI-state files missing export preset config) start with bundled defaults: **Web H.264 1080p**, **High Quality H.264 4K**, **Archive ProRes 4K**, **WebM VP9 1080p**, and **Animated GIF**.
+- **Click a card** to immediately apply its codec/container/resolution/CRF/audio settings.
+- The first card, **Custom**, represents "no saved preset" (manual settings).
+- **Save As…** stores the current dialog settings as a new named preset card.
+- **Update** overwrites the selected preset card with the current widget values.
+- **Delete** removes the selected preset card.
+
+New installs (and older UI-state files missing export preset config) start with bundled defaults:
+
+| Preset | Output |
+|---|---|
+| **Web H.264 1080p** | YouTube-style 1080p H.264 / AAC |
+| **High Quality H.264 4K** | 2160p H.264 at CRF 18 |
+| **Archive ProRes 4K** | ProRes master, 2160p, PCM audio |
+| **WebM VP9 1080p** | VP9 / Opus for the web |
+| **Animated GIF** | 640-wide looping GIF |
+| **Cinema H.264 5.1 1080p** | 1080p with a 5.1 surround mix |
+| **Instagram Reel 9:16** | Vertical 1080×1920 H.264 |
+| **TikTok 9:16** | Vertical 1080×1920 H.264, higher bitrate |
+| **Web Compressed 720p** | Small, fast 720p for email / chat |
 
 Preset data is stored in local UI state and persists across app restarts.
+
+## Share / Locate a finished export
+
+When an export completes successfully, the progress dialog reveals a **Share / Locate** button next to **Close**. Its popover offers:
+
+- **Reveal in file manager** — opens the output's folder (highlighting the file when the desktop supports it).
+- **Open** — plays the exported file in your default video player.
+- **Copy path** — copies the full output path to the clipboard.
+
+These actions use the desktop portal, so they work inside the Flatpak sandbox.
 
 ### MCP preset tools
 

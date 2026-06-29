@@ -3118,6 +3118,7 @@ impl ProgramPlayer {
                 c.chroma_key_color,
                 c.chroma_key_tolerance as f64,
                 c.chroma_key_softness as f64,
+                &c.masks,
                 &c.brightness_keyframes,
                 &c.contrast_keyframes,
                 &c.saturation_keyframes,
@@ -3131,9 +3132,19 @@ impl ProgramPlayer {
             if !sidecar_ready {
                 return;
             }
-            // Zero all Phase 1b baked-scope fields so the live GStreamer
-            // chain runs as passthrough for them. The sidecar replaces
-            // `source_path` upstream via resolve_source_path_for_clip.
+            // Decide mask baking before clearing chroma key below — the
+            // path-mask+chroma carve-out reads the chroma flag.
+            let bake_masks = crate::media::render_replace_cache::leaf_masks_bakeable(
+                &c.masks,
+                c.chroma_key_enabled,
+            );
+            // Zero all baked-scope fields so the live GStreamer chain runs
+            // as passthrough for them. The sidecar replaces `source_path`
+            // upstream via resolve_source_path_for_clip. This must stay in
+            // lock-step with the export-side neutralize_baked_fields in
+            // render_replace_cache.rs — otherwise an effect baked into the
+            // sidecar would also be applied live, double-applying in the
+            // Program Monitor.
             c.brightness = 0.0;
             c.contrast = 1.0;
             c.saturation = 1.0;
@@ -3153,6 +3164,30 @@ impl ProgramPlayer {
             c.tint_keyframes.clear();
             c.lut_paths.clear();
             c.frei0r_effects.clear();
+            // Phase 3 baked-scope fields. The cache key above already folds
+            // these (so the sidecar lookup matches), but the live chain must
+            // also stop applying them once the sidecar is in use.
+            //
+            // Vidstab: the sidecar's frames are already stabilized; a second
+            // pass would smear motion.
+            c.vidstab_enabled = false;
+            c.vidstab_smoothing = 0.0;
+            // LADSPA audio effects are baked into the sidecar's PCM stream;
+            // clearing them stops the live audio graph from running the
+            // plugin chain a second time.
+            c.ladspa_effects.clear();
+            // HSL qualifier secondary grade is baked into the sidecar pixels.
+            c.hsl_qualifier = None;
+            // Chroma key is baked into the sidecar's alpha (ProRes 4444);
+            // clearing it stops the live pipeline re-keying already-keyed
+            // pixels and doubling the softness transition.
+            c.chroma_key_enabled = false;
+            // Shape masks (Phase 3) baked into the sidecar alpha. Clear
+            // them so the live mask pad probe doesn't double-apply.
+            // Tracked / keyframed masks were never baked and survive.
+            if bake_masks {
+                c.masks.clear();
+            }
         };
         for c in self.clips.iter_mut() {
             neutralize(c, &paths);
@@ -3225,6 +3260,7 @@ impl ProgramPlayer {
             clip.chroma_key_color,
             clip.chroma_key_tolerance as f64,
             clip.chroma_key_softness as f64,
+            &clip.masks,
             &clip.brightness_keyframes,
             &clip.contrast_keyframes,
             &clip.saturation_keyframes,

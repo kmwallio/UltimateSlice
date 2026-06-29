@@ -34,6 +34,7 @@ resvg = "0.47.0"
 png = "0.17"
 fuzzy-matcher = "0.3"
 sha2 = "0.10"
+cfb = "0.14"
 
 [features]
 default = ["speech-to-text", "ai-inference"]

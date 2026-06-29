@@ -351,6 +351,10 @@ pub enum McpCommand {
         path: String,
         reply: SyncSender<Value>,
     },
+    SaveAaf {
+        path: String,
+        reply: SyncSender<Value>,
+    },
     SaveOtio {
         path: String,
         path_mode: String,
