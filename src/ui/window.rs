@@ -11090,43 +11090,39 @@ pub fn build_window(
 
             source_patch_controls.updating.set(true);
 
-            source_patch_controls.video_combo.remove_all();
+            let mut video_entries = vec![
+                ("__source_patch_auto__".to_string(), "Auto".to_string()),
+                ("__source_patch_off__".to_string(), "Off".to_string()),
+            ];
+            video_entries.extend(
+                video_tracks
+                    .iter()
+                    .map(|(id, label)| (id.clone(), label.clone())),
+            );
             source_patch_controls
                 .video_combo
-                .append(Some("__source_patch_auto__"), "Auto");
-            source_patch_controls
-                .video_combo
-                .append(Some("__source_patch_off__"), "Off");
-            for (track_id, label) in &video_tracks {
-                source_patch_controls
-                    .video_combo
-                    .append(Some(track_id.as_str()), label);
-            }
+                .set_entries(&video_entries, video_selection.combo_id());
 
-            source_patch_controls.audio_combo.remove_all();
+            let mut audio_entries = vec![
+                ("__source_patch_auto__".to_string(), "Auto".to_string()),
+                ("__source_patch_off__".to_string(), "Off".to_string()),
+            ];
+            audio_entries.extend(
+                audio_tracks
+                    .iter()
+                    .map(|(id, label)| (id.clone(), label.clone())),
+            );
             source_patch_controls
                 .audio_combo
-                .append(Some("__source_patch_auto__"), "Auto");
-            source_patch_controls
-                .audio_combo
-                .append(Some("__source_patch_off__"), "Off");
-            for (track_id, label) in &audio_tracks {
-                source_patch_controls
-                    .audio_combo
-                    .append(Some(track_id.as_str()), label);
-            }
+                .set_entries(&audio_entries, audio_selection.combo_id());
 
             source_patch_controls
                 .video_combo
-                .set_active_id(Some(video_selection.combo_id()));
-            source_patch_controls
-                .audio_combo
-                .set_active_id(Some(audio_selection.combo_id()));
-            source_patch_controls
-                .video_combo
+                .dropdown
                 .set_sensitive(has_source && can_patch_video);
             source_patch_controls
                 .audio_combo
+                .dropdown
                 .set_sensitive(has_source && can_patch_audio);
             source_patch_controls
                 .routing_button

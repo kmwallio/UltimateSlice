@@ -3,11 +3,13 @@ use crate::model::media_library::SourceMarks;
 use glib;
 use gtk4::prelude::*;
 use gtk4::{
-    self as gtk, Box as GBox, Button, ComboBoxText, DrawingArea, EventControllerKey, GestureDrag,
-    Label, Orientation, Picture, Popover, Separator, Stack,
+    self as gtk, Box as GBox, Button, DrawingArea, EventControllerKey, GestureDrag, Label,
+    Orientation, Picture, Popover, Separator, Stack,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+
+use crate::ui::id_dropdown::IdDropDown;
 
 use crate::units::NS_PER_SECOND_F as NS_PER_SECOND;
 /// Default frame duration at 24 fps (nanoseconds)
@@ -41,8 +43,8 @@ pub struct SourcePatchRouting {
 pub struct SourcePatchControls {
     pub state: Rc<RefCell<SourcePatchRouting>>,
     pub updating: Rc<Cell<bool>>,
-    pub video_combo: ComboBoxText,
-    pub audio_combo: ComboBoxText,
+    pub video_combo: IdDropDown,
+    pub audio_combo: IdDropDown,
     pub routing_button: Button,
 }
 
@@ -55,8 +57,8 @@ impl SourcePatchTarget {
         }
     }
 
-    fn from_combo_id(active_id: Option<glib::GString>) -> Self {
-        match active_id.as_deref() {
+    fn from_id(id: Option<&str>) -> Self {
+        match id {
             Some(SOURCE_PATCH_AUTO_ID) | None => Self::Auto,
             Some(SOURCE_PATCH_OFF_ID) => Self::Off,
             Some(track_id) => Self::TrackId(track_id.to_string()),
@@ -66,16 +68,14 @@ impl SourcePatchTarget {
 
 fn update_routing_button_summary(
     routing_button: &Button,
-    video_combo: &ComboBoxText,
-    audio_combo: &ComboBoxText,
+    video_combo: &IdDropDown,
+    audio_combo: &IdDropDown,
 ) {
     let video = video_combo
-        .active_text()
-        .map(|text| text.to_string())
+        .active_label()
         .unwrap_or_else(|| "Auto".to_string());
     let audio = audio_combo
-        .active_text()
-        .map(|text| text.to_string())
+        .active_label()
         .unwrap_or_else(|| "Auto".to_string());
     let is_custom = video != "Auto" || audio != "Auto";
     routing_button.set_label(if is_custom { "Routing*" } else { "Routing…" });
@@ -624,16 +624,20 @@ pub fn build_preview(
     video_patch_label.set_xalign(0.0);
     video_patch_row.append(&video_patch_label);
 
-    let video_patch_combo = ComboBoxText::new();
-    video_patch_combo.append(Some(SOURCE_PATCH_AUTO_ID), "Auto");
-    video_patch_combo.append(Some(SOURCE_PATCH_OFF_ID), "Off");
-    video_patch_combo.set_active_id(Some(SOURCE_PATCH_AUTO_ID));
-    video_patch_combo.set_hexpand(true);
-    video_patch_combo.set_sensitive(false);
-    video_patch_combo.set_tooltip_text(Some(
+    let video_patch_combo = IdDropDown::new();
+    video_patch_combo.set_entries(
+        &[
+            (SOURCE_PATCH_AUTO_ID.to_string(), "Auto".to_string()),
+            (SOURCE_PATCH_OFF_ID.to_string(), "Off".to_string()),
+        ],
+        SOURCE_PATCH_AUTO_ID,
+    );
+    video_patch_combo.dropdown.set_hexpand(true);
+    video_patch_combo.dropdown.set_sensitive(false);
+    video_patch_combo.dropdown.set_tooltip_text(Some(
         "Route source video to Auto, Off, or a specific video track",
     ));
-    video_patch_row.append(&video_patch_combo);
+    video_patch_row.append(&video_patch_combo.dropdown);
     routing_pop_box.append(&video_patch_row);
 
     let audio_patch_row = GBox::new(Orientation::Horizontal, 6);
@@ -643,16 +647,20 @@ pub fn build_preview(
     audio_patch_label.set_xalign(0.0);
     audio_patch_row.append(&audio_patch_label);
 
-    let audio_patch_combo = ComboBoxText::new();
-    audio_patch_combo.append(Some(SOURCE_PATCH_AUTO_ID), "Auto");
-    audio_patch_combo.append(Some(SOURCE_PATCH_OFF_ID), "Off");
-    audio_patch_combo.set_active_id(Some(SOURCE_PATCH_AUTO_ID));
-    audio_patch_combo.set_hexpand(true);
-    audio_patch_combo.set_sensitive(false);
-    audio_patch_combo.set_tooltip_text(Some(
+    let audio_patch_combo = IdDropDown::new();
+    audio_patch_combo.set_entries(
+        &[
+            (SOURCE_PATCH_AUTO_ID.to_string(), "Auto".to_string()),
+            (SOURCE_PATCH_OFF_ID.to_string(), "Off".to_string()),
+        ],
+        SOURCE_PATCH_AUTO_ID,
+    );
+    audio_patch_combo.dropdown.set_hexpand(true);
+    audio_patch_combo.dropdown.set_sensitive(false);
+    audio_patch_combo.dropdown.set_tooltip_text(Some(
         "Route source audio to Auto, Off, or a specific audio track",
     ));
-    audio_patch_row.append(&audio_patch_combo);
+    audio_patch_row.append(&audio_patch_combo.dropdown);
     routing_pop_box.append(&audio_patch_row);
 
     routing_pop.set_child(Some(&routing_pop_box));
@@ -676,12 +684,12 @@ pub fn build_preview(
         let routing_button = routing_button.clone();
         let video_patch_combo_for_summary = video_patch_combo.clone();
         let audio_patch_combo = audio_patch_combo.clone();
-        video_patch_combo.connect_changed(move |combo| {
+        video_patch_combo.connect_selected(move |combo| {
             if source_patch_updating.get() {
                 return;
             }
             source_patch_state.borrow_mut().video =
-                SourcePatchTarget::from_combo_id(combo.active_id());
+                SourcePatchTarget::from_id(combo.active_id().as_deref());
             update_routing_button_summary(
                 &routing_button,
                 &video_patch_combo_for_summary,
@@ -695,12 +703,12 @@ pub fn build_preview(
         let routing_button = routing_button.clone();
         let video_patch_combo = video_patch_combo.clone();
         let audio_patch_combo_for_summary = audio_patch_combo.clone();
-        audio_patch_combo.connect_changed(move |combo| {
+        audio_patch_combo.connect_selected(move |combo| {
             if source_patch_updating.get() {
                 return;
             }
             source_patch_state.borrow_mut().audio =
-                SourcePatchTarget::from_combo_id(combo.active_id());
+                SourcePatchTarget::from_id(combo.active_id().as_deref());
             update_routing_button_summary(
                 &routing_button,
                 &video_patch_combo,

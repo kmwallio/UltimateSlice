@@ -8,6 +8,7 @@ pub mod command_palette;
 pub mod curves_editor;
 pub mod effects_browser;
 pub mod export_queue;
+pub mod id_dropdown;
 pub mod inspector;
 pub mod keyframe_editor;
 pub mod levels_editor;
