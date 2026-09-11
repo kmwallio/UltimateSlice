@@ -693,6 +693,9 @@ pub fn build_program_monitor(
     // Shared scope frame for false-color and zebra draw_funcs (320×180 RGBA).
     // Updated via the returned frame_updater callback each poll tick.
     let overlay_frame: Rc<RefCell<Option<ScopeFrame>>> = Rc::new(RefCell::new(None));
+    // Bumped on every overlay_frame update — cache key for the rasterized
+    // false-color / zebra surfaces so expose/resize redraws are a blit.
+    let overlay_frame_rev: Rc<Cell<u64>> = Rc::new(Cell::new(0));
 
     // False-color overlay: maps each pixel's luminance to a colour spectrum to
     // help evaluate exposure without guessing from a standard video image.
@@ -706,33 +709,37 @@ pub fn build_program_monitor(
     {
         let fc_visible = false_color_visible.clone();
         let fc_frame = overlay_frame.clone();
+        let fc_rev = overlay_frame_rev.clone();
+        // (frame revision, rasterized surface) — rebuilt only when a new
+        // frame arrives, not on every expose/resize.
+        let fc_cache: Rc<RefCell<Option<(u64, gtk::cairo::ImageSurface)>>> =
+            Rc::new(RefCell::new(None));
         false_color_da.set_draw_func(move |_da, cr, width, height| {
             if !fc_visible.get() || width <= 0 || height <= 0 {
                 return;
             }
             let guard = fc_frame.borrow();
             let Some(ref frame) = *guard else { return };
-            let fw = frame.width as f64;
-            let fh = frame.height as f64;
-            let sw = width as f64 / fw;
-            let sh = height as f64 / fh;
-            let data = &frame.data;
-            for fy in 0..frame.height {
-                for fx in 0..frame.width {
-                    let base = (fy * frame.width + fx) * 4;
-                    if base + 3 >= data.len() {
-                        break;
-                    }
-                    let r = data[base] as f64 / 255.0;
-                    let g = data[base + 1] as f64 / 255.0;
-                    let b = data[base + 2] as f64 / 255.0;
-                    let luma = LUMA_R * r + LUMA_G * g + LUMA_B * b;
-                    let (fr, fg, fb) = false_color_luma(luma);
-                    cr.set_source_rgb(fr, fg, fb);
-                    cr.rectangle(fx as f64 * sw, fy as f64 * sh, sw + 0.5, sh + 0.5);
-                    cr.fill().ok();
-                }
+            let rev = fc_rev.get();
+            let mut cache = fc_cache.borrow_mut();
+            if cache.as_ref().map(|(r, _)| *r) != Some(rev) {
+                let Some(surface) = build_false_color_surface(frame) else {
+                    return;
+                };
+                *cache = Some((rev, surface));
             }
+            let Some((_, ref surface)) = *cache else {
+                return;
+            };
+            let sw = width as f64 / frame.width as f64;
+            let sh = height as f64 / frame.height as f64;
+            cr.save().ok();
+            cr.scale(sw, sh);
+            let pattern = gtk::cairo::SurfacePattern::create(surface);
+            pattern.set_filter(gtk::cairo::Filter::Nearest);
+            cr.set_source(&pattern).ok();
+            cr.paint().ok();
+            cr.restore().ok();
         });
     }
     overlay.add_overlay(&false_color_da);
@@ -751,6 +758,10 @@ pub fn build_program_monitor(
         let z_visible = zebra_visible.clone();
         let z_thresh = zebra_threshold_cell.clone();
         let z_frame = overlay_frame.clone();
+        let z_rev = overlay_frame_rev.clone();
+        // ((frame revision, threshold bits), rasterized stripe surface).
+        let z_cache: Rc<RefCell<Option<((u64, u64), gtk::cairo::ImageSurface)>>> =
+            Rc::new(RefCell::new(None));
         zebra_da.set_draw_func(move |_da, cr, width, height| {
             if !z_visible.get() || width <= 0 || height <= 0 {
                 return;
@@ -758,28 +769,28 @@ pub fn build_program_monitor(
             let guard = z_frame.borrow();
             let Some(ref frame) = *guard else { return };
             let threshold = z_thresh.get();
-            let fw = frame.width as f64;
-            let fh = frame.height as f64;
-            let sw = width as f64 / fw;
-            let sh = height as f64 / fh;
-            let data = &frame.data;
-            for fy in 0..frame.height {
-                for fx in 0..frame.width {
-                    let base = (fy * frame.width + fx) * 4;
-                    if base + 3 >= data.len() {
-                        break;
-                    }
-                    let r = data[base] as f64 / 255.0;
-                    let g = data[base + 1] as f64 / 255.0;
-                    let b = data[base + 2] as f64 / 255.0;
-                    let luma = LUMA_R * r + LUMA_G * g + LUMA_B * b;
-                    if luma >= threshold && (fx + fy) % 8 < 4 {
-                        cr.set_source_rgba(1.0, 0.85, 0.0, 0.85);
-                        cr.rectangle(fx as f64 * sw, fy as f64 * sh, sw + 0.5, sh + 0.5);
-                        cr.fill().ok();
-                    }
-                }
+            let key = (z_rev.get(), threshold.to_bits());
+            let mut cache = z_cache.borrow_mut();
+            if cache.as_ref().map(|(k, _)| *k) != Some(key) {
+                let Some(surface) = build_zebra_surface(frame, threshold) else {
+                    return;
+                };
+                *cache = Some((key, surface));
             }
+            let Some((_, ref surface)) = *cache else {
+                return;
+            };
+            let sw = width as f64 / frame.width as f64;
+            let sh = height as f64 / frame.height as f64;
+            cr.save().ok();
+            cr.scale(sw, sh);
+            let pattern = gtk::cairo::SurfacePattern::create(surface);
+            pattern.set_filter(gtk::cairo::Filter::Nearest);
+            cr.set_source(&pattern).ok();
+            // Stripes are baked opaque; the historical 0.85 stripe opacity is
+            // applied here in one composite.
+            cr.paint_with_alpha(0.85).ok();
+            cr.restore().ok();
         });
     }
     overlay.add_overlay(&zebra_da);
@@ -1916,10 +1927,12 @@ pub fn build_program_monitor(
         let fc_da = false_color_da.clone();
         let z_da = zebra_da.clone();
         let of = overlay_frame.clone();
+        let of_rev = overlay_frame_rev.clone();
         let fc_vis = false_color_visible.clone();
         let z_vis = zebra_visible.clone();
         Rc::new(move |frame: ScopeFrame| {
             *of.borrow_mut() = Some(frame);
+            of_rev.set(of_rev.get().wrapping_add(1));
             if fc_vis.get() {
                 fc_da.queue_draw();
             }
@@ -2974,10 +2987,30 @@ fn prompt_rename_reference_still(
 #[cfg(test)]
 mod tests {
     use super::{
-        subtitle_preview_baseline_y, subtitle_preview_box_padding, subtitle_preview_outline_width,
-        subtitle_preview_stroke_width, subtitle_preview_underline_metrics,
-        PROGRAM_MONITOR_CANVAS_BASE_CSS_CLASSES,
+        frame_luma_at, pack_cairo_rgb, subtitle_preview_baseline_y, subtitle_preview_box_padding,
+        subtitle_preview_outline_width, subtitle_preview_stroke_width,
+        subtitle_preview_underline_metrics, PROGRAM_MONITOR_CANVAS_BASE_CSS_CLASSES,
     };
+
+    #[test]
+    fn pack_cairo_rgb_matches_argb_word_layout() {
+        assert_eq!(pack_cairo_rgb(0.0, 0.0, 0.0), 0xFF00_0000);
+        assert_eq!(pack_cairo_rgb(1.0, 1.0, 1.0), 0xFFFF_FFFF);
+        assert_eq!(pack_cairo_rgb(1.0, 0.0, 0.0), 0xFFFF_0000);
+        assert_eq!(pack_cairo_rgb(0.0, 1.0, 0.0), 0xFF00_FF00);
+        assert_eq!(pack_cairo_rgb(0.0, 0.0, 1.0), 0xFF00_00FF);
+        // Zebra stripe yellow: G = 0.85 → 216.
+        assert_eq!(pack_cairo_rgb(1.0, 0.85, 0.0), 0xFFFF_D800);
+    }
+
+    #[test]
+    fn frame_luma_at_reads_rgba_and_bounds_checks() {
+        // One white pixel then one black pixel (RGBA).
+        let data = [255u8, 255, 255, 255, 0, 0, 0, 255];
+        assert!((frame_luma_at(&data, 0).unwrap() - 1.0).abs() < 1e-6);
+        assert!(frame_luma_at(&data, 4).unwrap().abs() < 1e-6);
+        assert!(frame_luma_at(&data, 8).is_none());
+    }
 
     #[test]
     fn subtitle_outline_scales_with_preview_height() {
@@ -3110,6 +3143,83 @@ pub fn build_vu_meter() -> (DrawingArea, Rc<Cell<[f64; 2]>>) {
 
 pub fn format_timecode(ns: u64, frame_rate: &FrameRate) -> String {
     timecode::format_ns_as_timecode(ns, frame_rate)
+}
+
+/// Pack an opaque RGB pixel (0.0–1.0 channels) into Cairo's native-endian
+/// 0xAARRGGBB word layout (Format::Rgb24 / ARgb32).
+fn pack_cairo_rgb(r: f64, g: f64, b: f64) -> u32 {
+    0xFF00_0000
+        | ((((r * 255.0) as u32) & 0xFF) << 16)
+        | ((((g * 255.0) as u32) & 0xFF) << 8)
+        | (((b * 255.0) as u32) & 0xFF)
+}
+
+/// Luma (0.0–1.0) of the RGBA pixel starting at `base`, or None past the end.
+fn frame_luma_at(data: &[u8], base: usize) -> Option<f64> {
+    if base + 3 >= data.len() {
+        return None;
+    }
+    let r = data[base] as f64 / 255.0;
+    let g = data[base + 1] as f64 / 255.0;
+    let b = data[base + 2] as f64 / 255.0;
+    Some(LUMA_R * r + LUMA_G * g + LUMA_B * b)
+}
+
+/// Rasterize the false-color exposure map of `frame` into an opaque
+/// frame-resolution image surface (one pass over the pixels), replacing the
+/// historical per-pixel `rectangle+fill` Cairo path (57k fills per frame).
+/// The scaled blit to widget size happens in the draw func.
+fn build_false_color_surface(frame: &ScopeFrame) -> Option<gtk::cairo::ImageSurface> {
+    let (w, h) = (frame.width as i32, frame.height as i32);
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let mut surface = gtk::cairo::ImageSurface::create(gtk::cairo::Format::Rgb24, w, h).ok()?;
+    let stride = surface.stride() as usize;
+    {
+        // ImageSurfaceData marks the surface dirty when dropped.
+        let mut dest = surface.data().ok()?;
+        for fy in 0..frame.height {
+            for fx in 0..frame.width {
+                let Some(luma) = frame_luma_at(&frame.data, (fy * frame.width + fx) * 4) else {
+                    break;
+                };
+                let (fr, fg, fb) = false_color_luma(luma);
+                let o = fy * stride + fx * 4;
+                dest[o..o + 4].copy_from_slice(&pack_cairo_rgb(fr, fg, fb).to_ne_bytes());
+            }
+        }
+    }
+    Some(surface)
+}
+
+/// Rasterize zebra stripes for pixels at/above `threshold` into a
+/// frame-resolution ARGB surface: opaque yellow stripe pixels, transparent
+/// elsewhere. The draw func composites it with `paint_with_alpha(0.85)` to
+/// preserve the historical stripe opacity.
+fn build_zebra_surface(frame: &ScopeFrame, threshold: f64) -> Option<gtk::cairo::ImageSurface> {
+    let (w, h) = (frame.width as i32, frame.height as i32);
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let stripe = pack_cairo_rgb(1.0, 0.85, 0.0);
+    let mut surface = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w, h).ok()?;
+    let stride = surface.stride() as usize;
+    {
+        let mut dest = surface.data().ok()?;
+        for fy in 0..frame.height {
+            for fx in 0..frame.width {
+                let Some(luma) = frame_luma_at(&frame.data, (fy * frame.width + fx) * 4) else {
+                    break;
+                };
+                if luma >= threshold && (fx + fy) % 8 < 4 {
+                    let o = fy * stride + fx * 4;
+                    dest[o..o + 4].copy_from_slice(&stripe.to_ne_bytes());
+                }
+            }
+        }
+    }
+    Some(surface)
 }
 
 /// Map a luminance value (0.0–1.0) to an RGB triple using the standard
