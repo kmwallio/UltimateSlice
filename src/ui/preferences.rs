@@ -1,3 +1,4 @@
+use crate::ui::id_dropdown::IdDropDown;
 use crate::ui_state::{
     clamp_prerender_crf, AutoScrollMode, CrossfadeCurve, GskRenderer, HwEncoderMode,
     PlaybackPriority, PreferencesState, PrerenderEncodingPreset, PreviewQuality, ProxyCodec,
@@ -114,6 +115,22 @@ fn append_generated_files_section(container: &GBox) {
     }
 }
 
+/// Build an [`IdDropDown`] from a static `(id, label)` table, selecting
+/// `active_id`. The ids are the persisted preference tokens — selection
+/// round-trips by stable string id, never by row index.
+fn build_pref_dropdown(opts: &[(&str, &str)], active_id: &str) -> IdDropDown {
+    let dd = IdDropDown::new();
+    dd.set_entries(
+        &opts
+            .iter()
+            .map(|(id, label)| (id.to_string(), label.to_string()))
+            .collect::<Vec<_>>(),
+        active_id,
+    );
+    dd.dropdown.set_halign(gtk::Align::Start);
+    dd
+}
+
 #[allow(deprecated)]
 pub fn show_preferences_dialog(
     parent: &gtk::Window,
@@ -180,13 +197,15 @@ pub fn show_preferences_dialog(
 
     let theme_label = Label::new(Some("Theme"));
     theme_label.set_halign(gtk::Align::Start);
-    let theme_combo = gtk4::ComboBoxText::new();
-    theme_combo.append(Some("system"), "System (follow desktop)");
-    theme_combo.append(Some("light"), "Light");
-    theme_combo.append(Some("dark"), "Dark");
-    theme_combo.append(Some("high_contrast"), "High Contrast (large text)");
-    theme_combo.set_active_id(Some(current.theme_mode.as_str()));
-    theme_combo.set_halign(gtk::Align::Start);
+    let theme_combo = build_pref_dropdown(
+        &[
+            ("system", "System (follow desktop)"),
+            ("light", "Light"),
+            ("dark", "Dark"),
+            ("high_contrast", "High Contrast (large text)"),
+        ],
+        current.theme_mode.as_str(),
+    );
     let theme_hint = Label::new(Some(
         "Light/Dark switch the app chrome. System follows your desktop's light/dark setting. \
          High Contrast uses a pure-black palette with bright borders, stronger focus rings, and \
@@ -198,7 +217,7 @@ pub fn show_preferences_dialog(
     theme_hint.set_wrap(true);
     theme_hint.set_max_width_chars(60);
     general_box.append(&theme_label);
-    general_box.append(&theme_combo);
+    general_box.append(&theme_combo.dropdown);
     general_box.append(&theme_hint);
 
     let accent_row = GBox::new(Orientation::Horizontal, 8);
@@ -267,21 +286,22 @@ pub fn show_preferences_dialog(
     let hw_accel = CheckButton::with_label("Enable hardware acceleration");
     hw_accel.set_active(current.hardware_acceleration_enabled);
     hw_accel.set_halign(gtk::Align::Start);
-    let playback_priority = gtk4::ComboBoxText::new();
-    playback_priority.append(Some("smooth"), "Smooth (prioritize playback continuity)");
-    playback_priority.append(Some("balanced"), "Balanced");
-    playback_priority.append(
-        Some("accurate"),
-        "Accurate (prioritize seek/frame precision)",
+    let playback_priority = build_pref_dropdown(
+        &[
+            ("smooth", "Smooth (prioritize playback continuity)"),
+            ("balanced", "Balanced"),
+            ("accurate", "Accurate (prioritize seek/frame precision)"),
+        ],
+        current.playback_priority.as_str(),
     );
-    playback_priority.set_active_id(Some(current.playback_priority.as_str()));
-    playback_priority.set_halign(gtk::Align::Start);
-    let source_playback_priority = gtk4::ComboBoxText::new();
-    source_playback_priority.append(Some("smooth"), "Smooth (faster source seeks)");
-    source_playback_priority.append(Some("balanced"), "Balanced");
-    source_playback_priority.append(Some("accurate"), "Accurate (frame-precise source seeks)");
-    source_playback_priority.set_active_id(Some(current.source_playback_priority.as_str()));
-    source_playback_priority.set_halign(gtk::Align::Start);
+    let source_playback_priority = build_pref_dropdown(
+        &[
+            ("smooth", "Smooth (faster source seeks)"),
+            ("balanced", "Balanced"),
+            ("accurate", "Accurate (frame-precise source seeks)"),
+        ],
+        current.source_playback_priority.as_str(),
+    );
     let hint = Label::new(Some(
         "Applies to source preview playback immediately (with non-GL fallback when needed).",
     ));
@@ -291,13 +311,15 @@ pub fn show_preferences_dialog(
     priority_hint.set_halign(gtk::Align::Start);
     priority_hint.add_css_class("dim-label");
     let hw_caps = crate::media::hwaccel::detect();
-    let hw_encoder_combo = gtk4::ComboBoxText::new();
-    hw_encoder_combo.append(Some("auto"), "Auto (use hardware when available)");
-    hw_encoder_combo.append(Some("vaapi"), "VA-API (Intel / AMD)");
-    hw_encoder_combo.append(Some("nvenc"), "NVENC (NVIDIA)");
-    hw_encoder_combo.append(Some("off"), "Off (always libx264)");
-    hw_encoder_combo.set_active_id(Some(current.hw_encoder_mode.as_str()));
-    hw_encoder_combo.set_halign(gtk::Align::Start);
+    let hw_encoder_combo = build_pref_dropdown(
+        &[
+            ("auto", "Auto (use hardware when available)"),
+            ("vaapi", "VA-API (Intel / AMD)"),
+            ("nvenc", "NVENC (NVIDIA)"),
+            ("off", "Off (always libx264)"),
+        ],
+        current.hw_encoder_mode.as_str(),
+    );
     let hw_encoder_hint = Label::new(Some(
         "Used for proxy generation and background prerender only. Falls back to \
          libx264 automatically when the requested encoder is unavailable. Final \
@@ -308,8 +330,8 @@ pub fn show_preferences_dialog(
     hw_encoder_hint.set_wrap(true);
     hw_encoder_hint.set_max_width_chars(60);
     if !hw_caps.any_usable() {
-        hw_encoder_combo.set_sensitive(false);
-        hw_encoder_combo.set_tooltip_text(Some(
+        hw_encoder_combo.dropdown.set_sensitive(false);
+        hw_encoder_combo.dropdown.set_tooltip_text(Some(
             "No hardware encoder detected (h264_vaapi / h264_nvenc).",
         ));
     }
@@ -318,48 +340,52 @@ pub fn show_preferences_dialog(
     playback_box.append(&hw_accel);
     playback_box.append(&hint);
     playback_box.append(&Label::new(Some("Hardware encoder (proxy / prerender)")));
-    playback_box.append(&hw_encoder_combo);
+    playback_box.append(&hw_encoder_combo.dropdown);
     playback_box.append(&hw_encoder_hint);
     playback_box.append(&Label::new(Some("Program monitor playback priority")));
-    playback_box.append(&playback_priority);
+    playback_box.append(&playback_priority.dropdown);
     playback_box.append(&priority_hint);
     playback_box.append(&Label::new(Some("Source monitor playback priority")));
-    playback_box.append(&source_playback_priority);
+    playback_box.append(&source_playback_priority.dropdown);
 
     let pq_label = Label::new(Some("Preview quality"));
     pq_label.set_halign(gtk::Align::Start);
-    let preview_quality = gtk4::ComboBoxText::new();
-    preview_quality.append(Some("auto"), "Auto (adapt to monitor size)");
-    preview_quality.append(Some("full"), "Full (project resolution)");
-    preview_quality.append(Some("half"), "Half (÷2 — lower memory)");
-    preview_quality.append(Some("quarter"), "Quarter (÷4 — lowest memory)");
-    preview_quality.set_active_id(Some(current.preview_quality.as_str()));
-    preview_quality.set_halign(gtk::Align::Start);
+    let preview_quality = build_pref_dropdown(
+        &[
+            ("auto", "Auto (adapt to monitor size)"),
+            ("full", "Full (project resolution)"),
+            ("half", "Half (÷2 — lower memory)"),
+            ("quarter", "Quarter (÷4 — lowest memory)"),
+        ],
+        current.preview_quality.as_str(),
+    );
     let pq_hint = Label::new(Some("Auto adapts quality to current Program Monitor size. Manual levels scale the compositor output for preview playback. Export always uses full resolution."));
     pq_hint.set_halign(gtk::Align::Start);
     pq_hint.add_css_class("dim-label");
     pq_hint.set_wrap(true);
     pq_hint.set_max_width_chars(60);
     playback_box.append(&pq_label);
-    playback_box.append(&preview_quality);
+    playback_box.append(&preview_quality.dropdown);
     playback_box.append(&pq_hint);
 
     let renderer_label = Label::new(Some("GTK renderer"));
     renderer_label.set_halign(gtk::Align::Start);
-    let gsk_renderer = gtk4::ComboBoxText::new();
-    gsk_renderer.append(Some("auto"), "Auto (let GTK decide)");
-    gsk_renderer.append(Some("cairo"), "Cairo (Software — no GPU memory)");
-    gsk_renderer.append(Some("opengl"), "OpenGL (moderate GPU memory)");
-    gsk_renderer.append(Some("vulkan"), "Vulkan (highest quality)");
-    gsk_renderer.set_active_id(Some(current.gsk_renderer.as_str()));
-    gsk_renderer.set_halign(gtk::Align::Start);
+    let gsk_renderer = build_pref_dropdown(
+        &[
+            ("auto", "Auto (let GTK decide)"),
+            ("cairo", "Cairo (Software — no GPU memory)"),
+            ("opengl", "OpenGL (moderate GPU memory)"),
+            ("vulkan", "Vulkan (highest quality)"),
+        ],
+        current.gsk_renderer.as_str(),
+    );
     let renderer_hint = Label::new(Some("Choose Cairo on devices with limited GPU memory to avoid Vulkan out-of-memory errors. Requires restart."));
     renderer_hint.set_halign(gtk::Align::Start);
     renderer_hint.add_css_class("dim-label");
     renderer_hint.set_wrap(true);
     renderer_hint.set_max_width_chars(60);
     playback_box.append(&renderer_label);
-    playback_box.append(&gsk_renderer);
+    playback_box.append(&gsk_renderer.dropdown);
     playback_box.append(&renderer_hint);
 
     let experimental_check = CheckButton::with_label("Experimental preview optimizations");
@@ -405,14 +431,16 @@ pub fn show_preferences_dialog(
 
     let proxy_label = Label::new(Some("Proxy preview mode"));
     proxy_label.set_halign(gtk::Align::Start);
-    let proxy_mode = gtk4::ComboBoxText::new();
-    proxy_mode.append(Some("off"), "Off (use original media)");
-    proxy_mode.append(Some("p1080"), "1080p (HD-tall preview)");
-    proxy_mode.append(Some("p720"), "720p (smaller, ~10–15% faster)");
-    proxy_mode.append(Some("p640"), "640p (very small, fastest scrubbing)");
-    proxy_mode.append(Some("p540"), "540p (smallest, fastest)");
-    proxy_mode.set_active_id(Some(current.proxy_mode.as_str()));
-    proxy_mode.set_halign(gtk::Align::Start);
+    let proxy_mode = build_pref_dropdown(
+        &[
+            ("off", "Off (use original media)"),
+            ("p1080", "1080p (HD-tall preview)"),
+            ("p720", "720p (smaller, ~10–15% faster)"),
+            ("p640", "640p (very small, fastest scrubbing)"),
+            ("p540", "540p (smallest, fastest)"),
+        ],
+        current.proxy_mode.as_str(),
+    );
     let proxy_hint = Label::new(Some(
         "Generate lightweight proxy files for smoother preview playback. Proxies preserve source aspect ratio and never upscale. Export always uses original media.",
     ));
@@ -421,19 +449,21 @@ pub fn show_preferences_dialog(
     proxy_hint.set_wrap(true);
     proxy_hint.set_max_width_chars(60);
     proxies_box.append(&proxy_label);
-    proxies_box.append(&proxy_mode);
+    proxies_box.append(&proxy_mode.dropdown);
     proxies_box.append(&proxy_hint);
 
     let proxy_codec_label = Label::new(Some("Proxy codec"));
     proxy_codec_label.set_halign(gtk::Align::Start);
-    let proxy_codec_combo = gtk4::ComboBoxText::new();
-    proxy_codec_combo.append(Some("h264"), "H.264 (universal)");
-    proxy_codec_combo.append(
-        Some("hevc"),
-        "HEVC / H.265 (smaller files, often faster on iGPUs)",
+    let proxy_codec_combo = build_pref_dropdown(
+        &[
+            ("h264", "H.264 (universal)"),
+            (
+                "hevc",
+                "HEVC / H.265 (smaller files, often faster on iGPUs)",
+            ),
+        ],
+        current.proxy_codec.as_str(),
     );
-    proxy_codec_combo.set_active_id(Some(current.proxy_codec.as_str()));
-    proxy_codec_combo.set_halign(gtk::Align::Start);
     let proxy_codec_hint = Label::new(Some(
         "HEVC compresses ~30–50% better than H.264 at the same visual quality, and on Intel iGPUs the dedicated HEVC encoder can be faster than H.264 for very-high-resolution sources. Falls back to libx265 (software) when no hardware HEVC encoder is available.",
     ));
@@ -442,7 +472,7 @@ pub fn show_preferences_dialog(
     proxy_codec_hint.set_wrap(true);
     proxy_codec_hint.set_max_width_chars(60);
     proxies_box.append(&proxy_codec_label);
-    proxies_box.append(&proxy_codec_combo);
+    proxies_box.append(&proxy_codec_combo.dropdown);
     proxies_box.append(&proxy_codec_hint);
 
     let persist_proxies_check = CheckButton::with_label("Persist proxies next to original media");
@@ -486,15 +516,17 @@ pub fn show_preferences_dialog(
 
     let prerender_preset_label = Label::new(Some("Prerender encoding preset"));
     prerender_preset_label.set_halign(gtk::Align::Start);
-    let prerender_preset = gtk4::ComboBoxText::new();
-    prerender_preset.append(Some("ultrafast"), "Ultrafast (lowest CPU, largest files)");
-    prerender_preset.append(Some("superfast"), "Superfast");
-    prerender_preset.append(Some("veryfast"), "Veryfast (default)");
-    prerender_preset.append(Some("faster"), "Faster");
-    prerender_preset.append(Some("fast"), "Fast");
-    prerender_preset.append(Some("medium"), "Medium (highest quality per byte)");
-    prerender_preset.set_active_id(Some(current.prerender_preset.as_str()));
-    prerender_preset.set_halign(gtk::Align::Start);
+    let prerender_preset = build_pref_dropdown(
+        &[
+            ("ultrafast", "Ultrafast (lowest CPU, largest files)"),
+            ("superfast", "Superfast"),
+            ("veryfast", "Veryfast (default)"),
+            ("faster", "Faster"),
+            ("fast", "Fast"),
+            ("medium", "Medium (highest quality per byte)"),
+        ],
+        current.prerender_preset.as_str(),
+    );
     let prerender_preset_hint = Label::new(Some(
         "Slower presets spend more CPU to improve compression efficiency for reusable prerender cache clips.",
     ));
@@ -503,7 +535,7 @@ pub fn show_preferences_dialog(
     prerender_preset_hint.set_wrap(true);
     prerender_preset_hint.set_max_width_chars(60);
     proxies_box.append(&prerender_preset_label);
-    proxies_box.append(&prerender_preset);
+    proxies_box.append(&prerender_preset.dropdown);
     proxies_box.append(&prerender_preset_hint);
 
     let prerender_crf_label = Label::new(Some("Prerender quality (CRF)"));
@@ -583,14 +615,12 @@ pub fn show_preferences_dialog(
     let autoscroll_row = GBox::new(Orientation::Horizontal, 8);
     let autoscroll_label = Label::new(Some("Follow playhead during playback:"));
     autoscroll_label.set_halign(gtk::Align::Start);
-    let autoscroll_combo = gtk4::ComboBoxText::new();
-    autoscroll_combo.append(Some("page"), "Page");
-    autoscroll_combo.append(Some("smooth"), "Smooth");
-    autoscroll_combo.append(Some("off"), "Off");
-    autoscroll_combo.set_active_id(Some(current.timeline_autoscroll.as_str()));
-    autoscroll_combo.set_halign(gtk::Align::Start);
+    let autoscroll_combo = build_pref_dropdown(
+        &[("page", "Page"), ("smooth", "Smooth"), ("off", "Off")],
+        current.timeline_autoscroll.as_str(),
+    );
     autoscroll_row.append(&autoscroll_label);
-    autoscroll_row.append(&autoscroll_combo);
+    autoscroll_row.append(&autoscroll_combo.dropdown);
     let autoscroll_hint = Label::new(Some(
         "Page jumps the view forward when the playhead reaches the right edge. Smooth slides the view to keep the playhead near the right. Off never moves the view automatically. In all modes, auto-scroll is paused briefly while you scroll or drag.",
     ));
@@ -617,11 +647,10 @@ pub fn show_preferences_dialog(
         CheckButton::with_label("Enable automatic audio crossfades at edit points");
     crossfade_enabled_check.set_active(current.crossfade_enabled);
     crossfade_enabled_check.set_halign(gtk::Align::Start);
-    let crossfade_curve = gtk4::ComboBoxText::new();
-    crossfade_curve.append(Some("equal_power"), "Equal power");
-    crossfade_curve.append(Some("linear"), "Linear");
-    crossfade_curve.set_active_id(Some(current.crossfade_curve.as_str()));
-    crossfade_curve.set_halign(gtk::Align::Start);
+    let crossfade_curve = build_pref_dropdown(
+        &[("equal_power", "Equal power"), ("linear", "Linear")],
+        current.crossfade_curve.as_str(),
+    );
     let crossfade_duration_ms = gtk4::SpinButton::with_range(10.0, 10_000.0, 10.0);
     crossfade_duration_ms.set_value((current.crossfade_duration_ns as f64) / 1_000_000.0);
     crossfade_duration_ms.set_digits(0);
@@ -633,7 +662,7 @@ pub fn show_preferences_dialog(
     crossfade_hint.set_max_width_chars(60);
     timeline_box.append(&crossfade_enabled_check);
     timeline_box.append(&Label::new(Some("Crossfade curve")));
-    timeline_box.append(&crossfade_curve);
+    timeline_box.append(&crossfade_curve.dropdown);
     timeline_box.append(&Label::new(Some("Crossfade duration (ms)")));
     timeline_box.append(&crossfade_duration_ms);
     timeline_box.append(&crossfade_hint);
@@ -643,15 +672,17 @@ pub fn show_preferences_dialog(
     loudness_header.set_halign(gtk::Align::Start);
     loudness_header.add_css_class("title-5");
     timeline_box.append(&loudness_header);
-    let loudness_preset_combo = gtk4::ComboBoxText::new();
-    loudness_preset_combo.append(Some("ebu_r128"), "EBU R128 (−23 LUFS)");
-    loudness_preset_combo.append(Some("atsc_a85"), "ATSC A/85 (−24 LUFS)");
-    loudness_preset_combo.append(Some("netflix"), "Netflix (−27 LUFS)");
-    loudness_preset_combo.append(Some("apple_pod"), "Apple Podcasts (−16 LUFS)");
-    loudness_preset_combo.append(Some("streaming"), "Streaming (−14 LUFS)");
-    loudness_preset_combo.append(Some("custom"), "Custom");
-    loudness_preset_combo.set_active_id(Some(&current.loudness_target_preset));
-    loudness_preset_combo.set_halign(gtk::Align::Start);
+    let loudness_preset_combo = build_pref_dropdown(
+        &[
+            ("ebu_r128", "EBU R128 (−23 LUFS)"),
+            ("atsc_a85", "ATSC A/85 (−24 LUFS)"),
+            ("netflix", "Netflix (−27 LUFS)"),
+            ("apple_pod", "Apple Podcasts (−16 LUFS)"),
+            ("streaming", "Streaming (−14 LUFS)"),
+            ("custom", "Custom"),
+        ],
+        &current.loudness_target_preset,
+    );
     let loudness_custom_spin = gtk4::SpinButton::with_range(-30.0, 0.0, 0.1);
     loudness_custom_spin.set_value(current.loudness_target_lufs);
     loudness_custom_spin.set_digits(1);
@@ -659,11 +690,8 @@ pub fn show_preferences_dialog(
     loudness_custom_spin.set_sensitive(current.loudness_target_preset == "custom");
     {
         let spin = loudness_custom_spin.clone();
-        loudness_preset_combo.connect_changed(move |combo| {
-            let id = combo
-                .active_id()
-                .unwrap_or_else(|| "ebu_r128".into())
-                .to_string();
+        loudness_preset_combo.connect_selected(move |combo| {
+            let id = combo.active_id().unwrap_or_else(|| "ebu_r128".to_string());
             spin.set_sensitive(id == "custom");
             if let Some(lufs) = crate::ui_state::loudness_target_preset_to_lufs(&id) {
                 spin.set_value(lufs);
@@ -678,7 +706,7 @@ pub fn show_preferences_dialog(
     loudness_hint.set_wrap(true);
     loudness_hint.set_max_width_chars(60);
     timeline_box.append(&Label::new(Some("Target preset")));
-    timeline_box.append(&loudness_preset_combo);
+    timeline_box.append(&loudness_preset_combo.dropdown);
     timeline_box.append(&Label::new(Some("Custom target (LUFS)")));
     timeline_box.append(&loudness_custom_spin);
     timeline_box.append(&loudness_hint);
@@ -742,9 +770,7 @@ pub fn show_preferences_dialog(
     // reference — when `ai-inference` is off the handle just stays
     // `None` and the response handler falls back to the existing
     // value.
-    #[allow(deprecated)]
-    let ai_backend_combo_handle: Rc<RefCell<Option<gtk::ComboBoxText>>> =
-        Rc::new(RefCell::new(None));
+    let ai_backend_combo_handle: Rc<RefCell<Option<IdDropDown>>> = Rc::new(RefCell::new(None));
     let background_ai_indexing_check = CheckButton::with_label("AI index in background");
     background_ai_indexing_check.set_active(current.background_ai_indexing);
     background_ai_indexing_check.set_halign(gtk::Align::Start);
@@ -789,15 +815,16 @@ pub fn show_preferences_dialog(
             accel_name.set_hexpand(true);
             accel_row.append(&accel_name);
 
-            // We use plain gtk::ComboBoxText here (matching the rest
-            // of this Preferences dialog — DropDown would be nicer
-            // but would require a different idiom). Populate with
-            // only the compiled-in backends plus a leading Auto row.
-            #[allow(deprecated)]
-            let backend_combo = gtk::ComboBoxText::new();
-            #[allow(deprecated)]
+            // `IdDropDown` keeps the selection keyed by the stable
+            // backend id string (what `PreferencesState.ai_backend`
+            // persists), never by row index. Populate with only the
+            // compiled-in backends plus a leading Auto row.
+            let backend_combo = IdDropDown::new();
             {
-                backend_combo.append(Some(AiBackend::Auto.as_id()), AiBackend::Auto.label());
+                let mut entries: Vec<(String, String)> = vec![(
+                    AiBackend::Auto.as_id().to_string(),
+                    AiBackend::Auto.label().to_string(),
+                )];
                 for b in [
                     AiBackend::Cuda,
                     AiBackend::Rocm,
@@ -815,13 +842,12 @@ pub fn show_preferences_dialog(
                             // machine with no NVIDIA driver).
                             format!("{} (unavailable)", b.label())
                         };
-                        backend_combo.append(Some(b.as_id()), &label);
+                        entries.push((b.as_id().to_string(), label));
                     }
                 }
-                let current_id = current.ai_backend.clone();
-                backend_combo.set_active_id(Some(&current_id));
+                backend_combo.set_entries(&entries, &current.ai_backend);
             }
-            accel_row.append(&backend_combo);
+            accel_row.append(&backend_combo.dropdown);
             models_box.append(&accel_row);
 
             // Status line showing what was actually detected on this
@@ -859,8 +885,7 @@ pub fn show_preferences_dialog(
             // restart. (Cancel leaves the live singleton changed
             // but the persisted state untouched, which matches how
             // other "live preview" preference widgets behave.)
-            #[allow(deprecated)]
-            backend_combo.connect_changed(move |combo| {
+            backend_combo.connect_selected(move |combo| {
                 if let Some(id) = combo.active_id() {
                     let backend = AiBackend::from_id(id.as_str());
                     set_current_backend(backend);
@@ -1639,7 +1664,6 @@ pub fn show_preferences_dialog(
                 backup_max_versions: backup_max_versions_spin.value() as usize,
                 loudness_target_preset: loudness_preset_combo
                     .active_id()
-                    .map(|id| id.to_string())
                     .unwrap_or_else(|| "ebu_r128".to_string()),
                 loudness_target_lufs: loudness_custom_spin.value(),
                 voice_enhance_cache_cap_gib: voice_enhance_cap_spin.value().clamp(0.5, 50.0),
@@ -1650,10 +1674,9 @@ pub fn show_preferences_dialog(
                 // otherwise fall back to whatever was in `current`
                 // so we don't clobber a valid value.
                 ai_backend: {
-                    #[allow(deprecated)]
                     let combo_ref = ai_backend_combo_handle.borrow();
                     match combo_ref.as_ref().and_then(|c| c.active_id()) {
-                        Some(id) => id.to_string(),
+                        Some(id) => id,
                         None => current.ai_backend.clone(),
                     }
                 },
