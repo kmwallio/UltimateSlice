@@ -293,6 +293,45 @@ pub enum TitleAnimation {
     Fade,
     /// Scales the title from 0 to 1 over the animation duration.
     Pop,
+    /// Slides the title in from the left edge (ease-out).
+    SlideFromLeft,
+    /// Slides the title in from the right edge (ease-out).
+    SlideFromRight,
+    /// Slides the title in from the bottom edge (ease-out).
+    SlideFromBottom,
+    /// Slides the title in from the top edge (ease-out).
+    SlideFromTop,
+}
+
+impl TitleAnimation {
+    /// Stable string id used in project files and the MCP API.
+    pub fn id(&self) -> &'static str {
+        match self {
+            TitleAnimation::None => "none",
+            TitleAnimation::Typewriter => "typewriter",
+            TitleAnimation::Fade => "fade",
+            TitleAnimation::Pop => "pop",
+            TitleAnimation::SlideFromLeft => "slide_from_left",
+            TitleAnimation::SlideFromRight => "slide_from_right",
+            TitleAnimation::SlideFromBottom => "slide_from_bottom",
+            TitleAnimation::SlideFromTop => "slide_from_top",
+        }
+    }
+
+    /// Inverse of [`TitleAnimation::id`]. Returns `None` for unknown ids.
+    pub fn from_id(id: &str) -> Option<TitleAnimation> {
+        match id {
+            "none" => Some(TitleAnimation::None),
+            "typewriter" => Some(TitleAnimation::Typewriter),
+            "fade" => Some(TitleAnimation::Fade),
+            "pop" => Some(TitleAnimation::Pop),
+            "slide_from_left" => Some(TitleAnimation::SlideFromLeft),
+            "slide_from_right" => Some(TitleAnimation::SlideFromRight),
+            "slide_from_bottom" => Some(TitleAnimation::SlideFromBottom),
+            "slide_from_top" => Some(TitleAnimation::SlideFromTop),
+            _ => None,
+        }
+    }
 }
 
 /// A single alternate take inside an [`ClipKind::Audition`] clip.
@@ -3220,14 +3259,26 @@ impl Clip {
         if keyframes.is_empty() {
             return default_value;
         }
-        let mut sorted: Vec<&NumericKeyframe> = keyframes.iter().collect();
+        // Keyframe lanes are kept sorted by time at insert (see the
+        // upsert_*_keyframe helpers), so the hot path — called per property
+        // per slot on every preview tick — evaluates the slice in place.
+        // Unsorted lanes (e.g. a hand-edited project file) take the
+        // allocating fallback.
+        if keyframes.windows(2).all(|w| w[0].time_ns <= w[1].time_ns) {
+            return Self::evaluate_sorted_keyframes(keyframes, local_timeline_ns);
+        }
+        let mut sorted = keyframes.to_vec();
         sorted.sort_by_key(|kf| kf.time_ns);
-        let first = sorted[0];
+        Self::evaluate_sorted_keyframes(&sorted, local_timeline_ns)
+    }
+
+    fn evaluate_sorted_keyframes(sorted: &[NumericKeyframe], local_timeline_ns: u64) -> f64 {
+        let first = &sorted[0];
         if local_timeline_ns < first.time_ns {
             return first.value;
         }
         let mut prev = first;
-        for next in sorted.iter().skip(1) {
+        for next in &sorted[1..] {
             if local_timeline_ns < next.time_ns {
                 let span = next.time_ns.saturating_sub(prev.time_ns);
                 if span == 0 {
@@ -4478,6 +4529,26 @@ mod tests {
         ];
         let v = Clip::evaluate_keyframed_value(&keyframes, 500_000_000, 9.0);
         assert!((v - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_evaluate_keyframed_value_unsorted_input_matches_sorted() {
+        // The hot path assumes lanes are maintained sorted; unsorted data
+        // (hand-edited project files) must take the sorting fallback and
+        // produce identical results.
+        let kf = |time_ns: u64, value: f64| NumericKeyframe {
+            time_ns,
+            value,
+            interpolation: KeyframeInterpolation::Linear,
+            bezier_controls: None,
+        };
+        let sorted = vec![kf(0, 0.0), kf(1_000, 1.0), kf(2_000, 4.0)];
+        let unsorted = vec![kf(2_000, 4.0), kf(0, 0.0), kf(1_000, 1.0)];
+        for t in [0u64, 250, 500, 1_000, 1_500, 2_000, 3_000] {
+            let a = Clip::evaluate_keyframed_value(&sorted, t, 9.0);
+            let b = Clip::evaluate_keyframed_value(&unsorted, t, 9.0);
+            assert!((a - b).abs() < 1e-12, "t={t}: sorted={a} unsorted={b}");
+        }
     }
 
     #[test]

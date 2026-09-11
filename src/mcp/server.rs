@@ -2315,7 +2315,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_clip_title_style",
-            "description": "Set title/text overlay styling properties on a clip. Includes font, color, position, outline, shadow, background box.",
+            "description": "Set title/text overlay styling properties on a clip. Includes font, color, position, outline, shadow, background box, and entry animation.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2335,7 +2335,9 @@ fn tools_list() -> Value {
                     "title_bg_box_color": { "type": "integer" },
                     "title_bg_box_padding": { "type": "number" },
                     "title_clip_bg_color": { "type": "integer", "description": "Title clip background color (0=transparent)" },
-                    "title_secondary_text": { "type": "string" }
+                    "title_secondary_text": { "type": "string" },
+                    "title_animation": { "type": "string", "enum": ["none", "typewriter", "fade", "pop", "slide_from_left", "slide_from_right", "slide_from_bottom", "slide_from_top"], "description": "Entry animation applied at the start of the title clip" },
+                    "title_animation_duration_ns": { "type": "integer", "description": "Entry animation duration in nanoseconds (default 1s)" }
                 },
                 "required": ["clip_id"]
             }
@@ -4299,6 +4301,8 @@ fn dispatch_tool_payload(
             title_bg_box_padding: args["title_bg_box_padding"].as_f64(),
             title_clip_bg_color: args["title_clip_bg_color"].as_u64().map(|v| v as u32),
             title_secondary_text: args["title_secondary_text"].as_str().map(String::from),
+            title_animation: args["title_animation"].as_str().map(String::from),
+            title_animation_duration_ns: args["title_animation_duration_ns"].as_u64(),
             reply: tx,
         },
         "add_to_export_queue" => McpCommand::AddToExportQueue {

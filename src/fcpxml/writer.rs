@@ -1234,6 +1234,14 @@ fn write_fcpxml_with_options(project: &Project, options: WriterOptions) -> Resul
                             clip.title_secondary_text.as_str(),
                         ));
                     }
+                    if clip.title_animation != crate::model::clip::TitleAnimation::None {
+                        asset_clip
+                            .push_attribute(("us:title-animation", clip.title_animation.id()));
+                        asset_clip.push_attribute((
+                            "us:title-animation-duration-ns",
+                            clip.title_animation_duration_ns.to_string().as_str(),
+                        ));
+                    }
                     if clip.kind == crate::model::clip::ClipKind::Image {
                         asset_clip.push_attribute(("us:clip-kind", "image"));
                     } else if clip.kind == crate::model::clip::ClipKind::Title {
@@ -3274,6 +3282,22 @@ fn patch_asset_clip_block_transform(
             },
         ),
         (
+            "us:title-animation",
+            if clip.title_animation != crate::model::clip::TitleAnimation::None {
+                Some(clip.title_animation.id().to_string())
+            } else {
+                None
+            },
+        ),
+        (
+            "us:title-animation-duration-ns",
+            if clip.title_animation != crate::model::clip::TitleAnimation::None {
+                Some(clip.title_animation_duration_ns.to_string())
+            } else {
+                None
+            },
+        ),
+        (
             "us:clip-kind",
             match clip.kind {
                 crate::model::clip::ClipKind::Image => Some("image".to_string()),
@@ -4940,6 +4964,37 @@ mod tests {
                 crate::model::transition::TransitionAlignment::EndOnCut,
             )
         );
+    }
+
+    #[test]
+    fn test_write_fcpxml_roundtrips_title_animation() {
+        let mut project = Project::new("TitleAnim");
+        project.tracks.clear();
+        let mut track = Track::new_video("Video 1");
+        let mut title = Clip::new("", 3_000_000_000, 0, ClipKind::Title);
+        title.title_text = "Hello".to_string();
+        title.title_animation = crate::model::clip::TitleAnimation::SlideFromBottom;
+        title.title_animation_duration_ns = 750_000_000;
+        track.add_clip(title);
+        project.tracks.push(track);
+
+        let xml = write_fcpxml(&project).expect("write should succeed");
+        assert!(
+            xml.contains("us:title-animation=\"slide_from_bottom\""),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("us:title-animation-duration-ns=\"750000000\""),
+            "{xml}"
+        );
+
+        let parsed = parse_fcpxml(&xml).expect("parse written xml");
+        let clip = &parsed.video_tracks().next().expect("video track").clips[0];
+        assert_eq!(
+            clip.title_animation,
+            crate::model::clip::TitleAnimation::SlideFromBottom
+        );
+        assert_eq!(clip.title_animation_duration_ns, 750_000_000);
     }
 
     #[test]

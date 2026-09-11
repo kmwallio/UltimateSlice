@@ -33,7 +33,7 @@ pub struct ReferenceStillSummary {
 }
 
 /// Style info for a subtitle line in the program monitor overlay.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct SubtitleLine {
     /// Individual words with their active/inactive state.
     /// If non-empty, words are rendered individually with highlighting.
@@ -82,7 +82,7 @@ pub struct SubtitleLine {
 }
 
 /// A single word to display, with active (highlighted) flag.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct SubtitleWordDisplay {
     pub text: String,
     pub active: bool,
@@ -1896,10 +1896,16 @@ pub fn build_program_monitor(
     }
 
     // subtitle_text_setter: update the current subtitle overlay lines.
+    // Called every ~33 ms program-monitor tick (ungated, so paused edits
+    // show immediately) — skip the store + overlay repaint when the lines
+    // are unchanged, which is the vast majority of ticks.
     let subtitle_text_setter: Rc<dyn Fn(Vec<SubtitleLine>)> = {
         let sl = subtitle_lines.clone();
         let da = subtitle_da.clone();
         Rc::new(move |lines: Vec<SubtitleLine>| {
+            if *sl.borrow() == lines {
+                return;
+            }
             *sl.borrow_mut() = lines;
             da.queue_draw();
         })

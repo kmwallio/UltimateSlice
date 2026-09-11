@@ -3003,6 +3003,10 @@ impl InspectorView {
                         crate::model::clip::TitleAnimation::Typewriter => 1,
                         crate::model::clip::TitleAnimation::Fade => 2,
                         crate::model::clip::TitleAnimation::Pop => 3,
+                        crate::model::clip::TitleAnimation::SlideFromLeft => 4,
+                        crate::model::clip::TitleAnimation::SlideFromRight => 5,
+                        crate::model::clip::TitleAnimation::SlideFromBottom => 6,
+                        crate::model::clip::TitleAnimation::SlideFromTop => 7,
                     });
                 self.title_animation_duration_slider
                     .set_value(c.title_animation_duration_ns as f64 / 1_000_000_000.0);
@@ -5822,8 +5826,16 @@ pub fn build_inspector(
 
     title_inner.append(&Separator::new(Orientation::Horizontal));
     row_label(&title_inner, "Animation");
-    let title_animation_dropdown =
-        gtk4::DropDown::from_strings(&["None", "Typewriter", "Fade", "Pop"]);
+    let title_animation_dropdown = gtk4::DropDown::from_strings(&[
+        "None",
+        "Typewriter",
+        "Fade",
+        "Pop",
+        "Slide from Left",
+        "Slide from Right",
+        "Slide from Bottom",
+        "Slide from Top",
+    ]);
     title_inner.append(&title_animation_dropdown);
 
     row_label(&title_inner, "  Duration (s)");
@@ -9348,6 +9360,10 @@ pub fn build_inspector(
                 1 => crate::model::clip::TitleAnimation::Typewriter,
                 2 => crate::model::clip::TitleAnimation::Fade,
                 3 => crate::model::clip::TitleAnimation::Pop,
+                4 => crate::model::clip::TitleAnimation::SlideFromLeft,
+                5 => crate::model::clip::TitleAnimation::SlideFromRight,
+                6 => crate::model::clip::TitleAnimation::SlideFromBottom,
+                7 => crate::model::clip::TitleAnimation::SlideFromTop,
                 _ => crate::model::clip::TitleAnimation::None,
             };
             let id = selected_clip_id.borrow().clone();

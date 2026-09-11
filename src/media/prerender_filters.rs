@@ -769,6 +769,23 @@ pub(crate) fn prerender_build_title_filter(clip: &ProgramClip, out_h: u32) -> St
                 ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}:x='{pos_x}':y='{pos_y}':alpha='{alpha_expr}'{style}"
             ));
         }
+        TitleAnimation::SlideFromLeft
+        | TitleAnimation::SlideFromRight
+        | TitleAnimation::SlideFromBottom
+        | TitleAnimation::SlideFromTop => {
+            // Mirrors export.rs: cubic ease-out slide from one frame
+            // dimension off-screen (matches preview's ease_out_cubic).
+            let remain = format!("pow(1-min(1,max(0,t/{dur_s:.4})),3)");
+            let (x_expr, y_expr) = match clip.title_animation {
+                TitleAnimation::SlideFromLeft => (format!("{pos_x}-w*{remain}"), pos_y.clone()),
+                TitleAnimation::SlideFromRight => (format!("{pos_x}+w*{remain}"), pos_y.clone()),
+                TitleAnimation::SlideFromBottom => (pos_x.clone(), format!("{pos_y}+h*{remain}")),
+                _ => (pos_x.clone(), format!("{pos_y}-h*{remain}")),
+            };
+            filter.push_str(&format!(
+                ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={base_color}:x='{x_expr}':y='{y_expr}'{style}"
+            ));
+        }
         TitleAnimation::Typewriter => {
             let char_count = clip.title_text.chars().count();
             if char_count == 0 {

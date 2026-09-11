@@ -4614,6 +4614,30 @@ fn build_title_filter(clip: &crate::model::clip::Clip, out_h: u32) -> String {
                 ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={r:02x}{g:02x}{b:02x}:x='{pos_x}':y='{pos_y}':alpha='{alpha_expr}'{style}"
             ));
         }
+        crate::model::clip::TitleAnimation::SlideFromLeft
+        | crate::model::clip::TitleAnimation::SlideFromRight
+        | crate::model::clip::TitleAnimation::SlideFromBottom
+        | crate::model::clip::TitleAnimation::SlideFromTop => {
+            // Offset the text by up to one frame dimension, decaying to 0
+            // with cubic ease-out — matches the preview's compositor-pad
+            // slide (ease_out_cubic in drawing_render.rs).
+            let remain = format!("pow(1-min(1,max(0,t/{dur_s:.4})),3)");
+            let (x_expr, y_expr) = match clip.title_animation {
+                crate::model::clip::TitleAnimation::SlideFromLeft => {
+                    (format!("{pos_x}-w*{remain}"), pos_y.clone())
+                }
+                crate::model::clip::TitleAnimation::SlideFromRight => {
+                    (format!("{pos_x}+w*{remain}"), pos_y.clone())
+                }
+                crate::model::clip::TitleAnimation::SlideFromBottom => {
+                    (pos_x.clone(), format!("{pos_y}+h*{remain}"))
+                }
+                _ => (pos_x.clone(), format!("{pos_y}-h*{remain}")),
+            };
+            filter.push_str(&format!(
+                ",drawtext={font_option}:text='{text}':fontsize={scaled_size:.2}:fontcolor={base_color}:x='{x_expr}':y='{y_expr}'{style}"
+            ));
+        }
         crate::model::clip::TitleAnimation::Typewriter => {
             // Emit one drawtext per visible-char threshold, each active
             // in an exclusive time window so only one layer renders at a
@@ -8758,6 +8782,28 @@ mod tests {
         assert!(f.contains("between(t\\,0.2000\\,0.4000)"), "filter: {f}");
         // Final char stays on until the end of the clip.
         assert!(f.contains("gte(t\\,0.4000)"), "filter: {f}");
+    }
+
+    #[test]
+    fn build_title_filter_slide_emits_eased_position_expression() {
+        let mut clip = Clip::new("/tmp/test.mp4", 5_000_000_000, 0, ClipKind::Video);
+        clip.title_text = "Hi".to_string();
+        clip.title_animation = crate::model::clip::TitleAnimation::SlideFromLeft;
+        clip.title_animation_duration_ns = 1_000_000_000;
+        let f = build_title_filter(&clip, 1080);
+        // x offsets by -w * eased-remaining; y stays static.
+        assert!(
+            f.contains("x='(0.500000)*w-text_w/2-w*pow(1-min(1,max(0,t/1.0000)),3)'"),
+            "filter: {f}"
+        );
+        assert_eq!(f.matches(",drawtext=").count(), 1, "filter: {f}");
+
+        clip.title_animation = crate::model::clip::TitleAnimation::SlideFromBottom;
+        let f = build_title_filter(&clip, 1080);
+        assert!(
+            f.contains("+h*pow(1-min(1,max(0,t/1.0000)),3)'"),
+            "filter: {f}"
+        );
     }
 
     #[test]

@@ -845,6 +845,15 @@ pub fn animation_progress(local_time_ns: u64, duration_ns: u64) -> f64 {
     (local_time_ns as f64 / duration_ns as f64).clamp(0.0, 1.0)
 }
 
+/// Cubic ease-out over a linear progress value (0.0–1.0). Used by the
+/// slide-in title animations so motion decelerates into place. Must stay
+/// in sync with the ffmpeg expression `1-pow(1-p,3)` emitted by the
+/// export/prerender drawtext builders.
+pub fn ease_out_cubic(progress: f64) -> f64 {
+    let p = progress.clamp(0.0, 1.0);
+    1.0 - (1.0 - p).powi(3)
+}
+
 /// Number of characters of `text` that should be visible at the given progress
 /// (for `TitleAnimation::Typewriter`). Always reveals at least one character
 /// once any progress has elapsed so the title doesn't flash empty.
@@ -862,6 +871,17 @@ pub fn typewriter_visible_chars(text: &str, progress: f64) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ease_out_cubic_clamps_and_decelerates() {
+        assert_eq!(ease_out_cubic(-1.0), 0.0);
+        assert_eq!(ease_out_cubic(0.0), 0.0);
+        assert_eq!(ease_out_cubic(1.0), 1.0);
+        assert_eq!(ease_out_cubic(2.0), 1.0);
+        // Ease-out: front-loaded motion — halfway in time is > 80% of travel.
+        assert!(ease_out_cubic(0.5) > 0.8);
+        assert!((ease_out_cubic(0.5) - 0.875).abs() < 1e-12);
+    }
 
     fn sample_stroke() -> DrawingItem {
         DrawingItem {

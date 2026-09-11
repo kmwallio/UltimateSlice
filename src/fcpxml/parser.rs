@@ -1473,6 +1473,13 @@ fn parse_asset_clip(
         if let Some(v) = attrs.get("us:title-secondary-text") {
             clip.title_secondary_text = v.clone();
         }
+        if let Some(v) = attrs.get("us:title-animation") {
+            clip.title_animation =
+                crate::model::clip::TitleAnimation::from_id(v).unwrap_or_default();
+        }
+        if let Some(v) = attrs.get("us:title-animation-duration-ns") {
+            clip.title_animation_duration_ns = v.parse().unwrap_or(1_000_000_000);
+        }
         if let Some(v) = attrs.get("us:clip-kind") {
             match v.as_str() {
                 "image" => clip.kind = ClipKind::Image,

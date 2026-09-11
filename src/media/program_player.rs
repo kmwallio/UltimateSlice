@@ -1408,6 +1408,55 @@ impl ProgramClip {
     }
 }
 
+/// Last values pushed to a slot's GStreamer elements by the per-tick
+/// property appliers (`apply_keyframed_video_slot_properties`,
+/// `apply_transition_effects`, `apply_transform_to_slot`).
+///
+/// The appliers run ~30×/sec on the GTK main thread and, for the common
+/// case of a static (non-keyframed) clip, would otherwise re-push
+/// identical values through GObject property dispatch every tick.  Each
+/// applier compares against this cache and skips the `set_property` call
+/// when the value is unchanged.
+///
+/// Coherency rules:
+/// - `None` means "unknown" → the applier always writes.  Fresh slots
+///   start at `None`, so build-time direct property sets need no sync.
+/// - Any *post-build* code path that writes one of these properties
+///   directly must either update the cache to the written value (see the
+///   hide path and `update_opacity*`) or the written value must equal
+///   what the applier computes from current clip state (true for the
+///   inspector live-update paths, which mutate `clips` first).
+/// - `soft_reload_clips`/`load_clips` invalidate all caches so wholesale
+///   clip-state replacement (undo, MCP edits) can never be skipped.
+#[derive(Default)]
+struct SlotAppliedProps {
+    /// (brightness, contrast, saturation, hue) last set on `videobalance`.
+    videobalance: std::cell::Cell<Option<(f64, f64, f64, f64)>>,
+    /// (r, g, b) last set on the frei0r `coloradj_RGB` element.
+    coloradj: std::cell::Cell<Option<(f64, f64, f64)>>,
+    /// Alpha last set on the compositor pad.
+    pad_alpha: std::cell::Cell<Option<f64>>,
+    /// (crop_left, crop_right, crop_top, crop_bottom, letterbox_h,
+    /// letterbox_v) last written into `crop_alpha_state`.
+    crop_state: std::cell::Cell<Option<(i32, i32, i32, i32, i32, i32)>>,
+    /// Rotation (degrees) last applied to `videoflip_rotate`.
+    rotate_deg: std::cell::Cell<Option<i32>>,
+    /// (flip_h, flip_v) last applied to `videoflip_flip`.
+    flip: std::cell::Cell<Option<(bool, bool)>>,
+}
+
+impl SlotAppliedProps {
+    /// Forget everything — the next applier pass re-writes all properties.
+    fn invalidate(&self) {
+        self.videobalance.set(None);
+        self.coloradj.set(None);
+        self.pad_alpha.set(None);
+        self.crop_state.set(None);
+        self.rotate_deg.set(None);
+        self.flip.set(None);
+    }
+}
+
 /// One decoder branch connected to the compositor/audiomixer.
 struct VideoSlot {
     /// Index into `ProgramPlayer::clips` for the clip loaded in this slot.
@@ -1455,6 +1504,9 @@ struct VideoSlot {
     /// Crop values are in project pixels; the probe scales them to frame pixels.
     /// letterbox_h/v are in frame pixels (already at preview resolution).
     crop_alpha_state: Arc<Mutex<(i32, i32, i32, i32, i32, i32, i32, i32)>>,
+    /// Last-applied property values — lets the per-tick appliers skip
+    /// redundant GObject sets. See [`SlotAppliedProps`].
+    applied: SlotAppliedProps,
     imagefreeze: Option<gst::Element>,
     videoflip_rotate: Option<gst::Element>,
     videoflip_flip: Option<gst::Element>,
@@ -1913,6 +1965,10 @@ pub struct ProgramPlayer {
     /// Must be flushed along with decoders for 3+ tracks to trigger a fresh
     /// compositor re-preroll (the aggregator clears ALL pad buffers on flush).
     background_src: gst::Element,
+    /// Pattern last set on `background_src` by `apply_transition_effects` —
+    /// skips the per-tick `set_property_from_str` when unchanged.  Only that
+    /// function mutates the pattern after construction.
+    last_background_pattern: std::cell::Cell<&'static str>,
     /// Requested compositor sink pad for the always-on black background branch.
     #[allow(dead_code)]
     background_compositor_pad: gst::Pad,
@@ -2700,6 +2756,7 @@ impl ProgramPlayer {
                 audio_sink,
                 display_sink: display_sink_ref,
                 background_src: black_src,
+                last_background_pattern: std::cell::Cell::new("black"),
                 background_compositor_pad: comp_bg_pad,
                 preview_divisor: 1,
                 display_queue,
@@ -4143,6 +4200,12 @@ impl ProgramPlayer {
     /// correction, keyframes, etc.) may have been modified.
     pub fn soft_reload_clips(&mut self, mut clips: Vec<ProgramClip>) {
         self.invalidate_short_frame_cache("soft-reload-clips");
+        // Clip state is replaced wholesale (undo, MCP edits, inspector
+        // changes) — forget the last-applied property values so the next
+        // applier pass re-pushes everything from the new state.
+        for slot in &self.slots {
+            slot.applied.invalidate();
+        }
         clips.sort_by_key(|c| c.timeline_start_ns);
         let (audio, video): (Vec<_>, Vec<_>) = clips.into_iter().partition(|c| c.is_audio_only);
         self.audio_clips = audio;
@@ -4183,6 +4246,9 @@ impl ProgramPlayer {
 
     pub fn load_clips(&mut self, mut clips: Vec<ProgramClip>) {
         self.invalidate_short_frame_cache("project-clips-reloaded");
+        for slot in &self.slots {
+            slot.applied.invalidate();
+        }
         clips.sort_by_key(|c| c.timeline_start_ns);
         let (audio, video): (Vec<_>, Vec<_>) = clips.into_iter().partition(|c| c.is_audio_only);
         self.audio_clips = audio;
@@ -5426,10 +5492,29 @@ impl ProgramPlayer {
                             .get(idx)
                             .map(Self::clip_has_phase1_keyframes)
                             .unwrap_or(false)
-                    });
+                    })
+                    && {
+                        // Only bypass the cheap realtime boundary path when a
+                        // prerendered segment is actually READY to swap in
+                        // (same readiness probe as bypass_continue_for_prerender
+                        // in rebuild_pipeline_at).  Merely *supporting*
+                        // prerender used to force the full-rebuild path, which
+                        // then built ordinary live slots anyway — paying the
+                        // teardown + all-slot link/seek/preroll/arrival waits
+                        // (hundreds of ms of main-thread stall) for nothing.
+                        // The realtime add path reaches the same live-slot
+                        // state in a fraction of that, segment requests are
+                        // issued from the prewarm lookahead regardless, and a
+                        // segment that becomes ready mid-window still gets
+                        // promoted via pending_prerender_promote.
+                        let probe = self.clips_active_at(new_pos);
+                        let signature = self.prerender_signature_for_active(&probe);
+                        self.find_prerender_segment_for(new_pos, &probe, signature)
+                            .is_some()
+                    };
                 if prefer_prerender_boundary && self.realtime_preview {
                     log::info!(
-                        "poll: skipping realtime boundary path at {} to allow background prerender usage",
+                        "poll: skipping realtime boundary path at {} to use ready background prerender segment",
                         new_pos
                     );
                 }
@@ -5654,12 +5739,19 @@ impl ProgramPlayer {
                 vb.set_property("contrast", p.contrast);
                 vb.set_property("saturation", p.saturation);
                 vb.set_property("hue", p.hue);
+                slot.applied.videobalance.set(Some((
+                    p.brightness,
+                    p.contrast,
+                    p.saturation,
+                    p.hue,
+                )));
             }
             if let Some(ref ca) = slot.coloradj_rgb {
                 let cp = Self::compute_coloradj_params(temperature, tint);
                 ca.set_property("r", cp.r);
                 ca.set_property("g", cp.g);
                 ca.set_property("b", cp.b);
+                slot.applied.coloradj.set(Some((cp.r, cp.g, cp.b)));
             }
             if let Some(ref tp) = slot.colorbalance_3pt {
                 let p = Self::compute_3point_params(
@@ -6323,6 +6415,9 @@ impl ProgramPlayer {
     ///   multiplicatively with any clip-level opacity already applied.
     /// Pop: scales the compositor pad's width/height from 0→native around
     ///   the pad's current centre.
+    /// SlideFrom{Left,Right,Bottom,Top}: offsets the compositor pad's
+    ///   xpos/ypos from one frame-dimension off-screen to 0 with cubic
+    ///   ease-out, so the whole title layer glides into place.
     pub fn apply_title_animations(&self, timeline_pos_ns: u64) {
         use crate::model::clip::TitleAnimation;
         if self.clips.is_empty() || self.slots.is_empty() {
@@ -6369,6 +6464,7 @@ impl ProgramPlayer {
                         // and procedural fade multiply.
                         let base = clip.opacity_at_timeline_ns(timeline_pos_ns);
                         pad.set_property("alpha", base * progress);
+                        slot.applied.pad_alpha.set(Some(base * progress));
                     }
                 }
                 TitleAnimation::Pop => {
@@ -6393,6 +6489,30 @@ impl ProgramPlayer {
                                 pad.set_property("xpos", xpos);
                                 pad.set_property("ypos", ypos);
                             }
+                        }
+                    }
+                }
+                TitleAnimation::SlideFromLeft
+                | TitleAnimation::SlideFromRight
+                | TitleAnimation::SlideFromBottom
+                | TitleAnimation::SlideFromTop => {
+                    if let Some(ref pad) = slot.compositor_pad {
+                        if pad.find_property("xpos").is_some()
+                            && pad.find_property("ypos").is_some()
+                        {
+                            let remain =
+                                1.0 - crate::media::drawing_render::ease_out_cubic(progress);
+                            let pw = self.project_width as f64;
+                            let ph = self.project_height as f64;
+                            let (dx, dy) = match clip.title_animation {
+                                TitleAnimation::SlideFromLeft => (-pw * remain, 0.0),
+                                TitleAnimation::SlideFromRight => (pw * remain, 0.0),
+                                TitleAnimation::SlideFromBottom => (0.0, ph * remain),
+                                TitleAnimation::SlideFromTop => (0.0, -ph * remain),
+                                _ => (0.0, 0.0),
+                            };
+                            pad.set_property("xpos", dx.round() as i32);
+                            pad.set_property("ypos", dy.round() as i32);
                         }
                     }
                 }
@@ -6780,6 +6900,7 @@ impl ProgramPlayer {
                     }
                 } else if let Some(ref pad) = slot.compositor_pad {
                     pad.set_property("alpha", opacity);
+                    slot.applied.pad_alpha.set(Some(opacity));
                 }
             }
         }
@@ -6810,6 +6931,7 @@ impl ProgramPlayer {
                     }
                 } else if let Some(ref pad) = slot.compositor_pad {
                     pad.set_property("alpha", opacity);
+                    slot.applied.pad_alpha.set(Some(opacity));
                 }
             }
             if self.current_idx == Some(i) && self.state != PlayerState::Playing {
@@ -7130,16 +7252,24 @@ impl ProgramPlayer {
                     has_coloradj,
                     has_3point,
                 );
-                vb.set_property("brightness", p.brightness);
-                vb.set_property("contrast", p.contrast);
-                vb.set_property("saturation", p.saturation);
-                vb.set_property("hue", p.hue);
+                let vals = (p.brightness, p.contrast, p.saturation, p.hue);
+                if slot.applied.videobalance.get() != Some(vals) {
+                    vb.set_property("brightness", p.brightness);
+                    vb.set_property("contrast", p.contrast);
+                    vb.set_property("saturation", p.saturation);
+                    vb.set_property("hue", p.hue);
+                    slot.applied.videobalance.set(Some(vals));
+                }
             }
             if let Some(ref ca) = slot.coloradj_rgb {
                 let cp = Self::compute_coloradj_params(temperature, tint);
-                ca.set_property("r", cp.r);
-                ca.set_property("g", cp.g);
-                ca.set_property("b", cp.b);
+                let vals = (cp.r, cp.g, cp.b);
+                if slot.applied.coloradj.get() != Some(vals) {
+                    ca.set_property("r", cp.r);
+                    ca.set_property("g", cp.g);
+                    ca.set_property("b", cp.b);
+                    slot.applied.coloradj.set(Some(vals));
+                }
             }
             if let Some(ref pad) = slot.compositor_pad {
                 let alpha = clip.opacity_at_timeline_ns(timeline_pos).clamp(0.0, 1.0);
@@ -7149,8 +7279,9 @@ impl ProgramPlayer {
                     if let Ok(mut a) = slot.blend_alpha.lock() {
                         *a = alpha;
                     }
-                } else {
+                } else if slot.applied.pad_alpha.get() != Some(alpha) {
                     pad.set_property("alpha", alpha);
+                    slot.applied.pad_alpha.set(Some(alpha));
                 }
                 Self::apply_zoom_to_slot(
                     slot,
@@ -7209,10 +7340,12 @@ impl ProgramPlayer {
             slot_zorders.insert(slot.clip_idx, incoming_zorder);
             slot_zorders.insert(incoming_idx, outgoing_zorder);
         }
-        self.background_src.set_property_from_str(
-            "pattern",
-            transition_preview_background_pattern(&transition_states),
-        );
+        let pattern = transition_preview_background_pattern(&transition_states);
+        if self.last_background_pattern.get() != pattern {
+            self.background_src
+                .set_property_from_str("pattern", pattern);
+            self.last_background_pattern.set(pattern);
+        }
         for (slot, tstate) in self.slots.iter().zip(transition_states.iter()) {
             if slot.hidden || slot.is_prerender_slot {
                 continue;
@@ -7254,8 +7387,9 @@ impl ProgramPlayer {
                     if let Ok(mut a) = slot.blend_alpha.lock() {
                         *a = effective_alpha;
                     }
-                } else {
+                } else if slot.applied.pad_alpha.get() != Some(effective_alpha) {
                     pad.set_property("alpha", effective_alpha);
+                    slot.applied.pad_alpha.set(Some(effective_alpha));
                 }
                 if let Some((canvas_x, canvas_y)) = tstate.as_ref().and_then(|ts| {
                     transition_preview_canvas_offset(ts.kind.as_str(), ts.role, ts.progress)
@@ -9819,84 +9953,112 @@ impl ProgramPlayer {
         // 1. Ghost sink pad's peer (decoder src pad)
         // 2. Ghost sink pad's own current caps (may have source caps after preroll)
         // 3. The first element inside the effects_bin's sink pad caps
-        let source_caps = slot.effects_bin.static_pad("sink").and_then(|ghost| {
-            ghost
-                .peer()
-                .and_then(|p| p.current_caps())
-                .or_else(|| ghost.current_caps())
-        });
-        let (lb_h, lb_v) = source_caps
-            .and_then(|c| {
-                c.structure(0).map(|s| {
-                    let src_w = s.get::<i32>("width").unwrap_or(0);
-                    let src_h = s.get::<i32>("height").unwrap_or(0);
-                    if src_w <= 0 || src_h <= 0 {
-                        return (0, 0);
-                    }
-                    // Get project resolution from effects_bin src pad
-                    let (fw, fh) = slot
-                        .effects_bin
-                        .static_pad("src")
-                        .and_then(|p| p.current_caps())
-                        .and_then(|c| {
-                            c.structure(0).map(|s| {
-                                (
-                                    s.get::<i32>("width").unwrap_or(0),
-                                    s.get::<i32>("height").unwrap_or(0),
-                                )
+        //
+        // Skipped entirely for uncropped clips: the alpha pad probe ignores
+        // the letterbox values when all crop margins are zero, and the caps
+        // queries (pad peer walk + caps copy) are too expensive to run per
+        // slot on every 30 FPS tick for the common no-crop case.
+        let has_crop = crop_left > 0 || crop_right > 0 || crop_top > 0 || crop_bottom > 0;
+        let (lb_h, lb_v) = if !has_crop {
+            (0, 0)
+        } else {
+            let source_caps = slot.effects_bin.static_pad("sink").and_then(|ghost| {
+                ghost
+                    .peer()
+                    .and_then(|p| p.current_caps())
+                    .or_else(|| ghost.current_caps())
+            });
+            source_caps
+                .and_then(|c| {
+                    c.structure(0).map(|s| {
+                        let src_w = s.get::<i32>("width").unwrap_or(0);
+                        let src_h = s.get::<i32>("height").unwrap_or(0);
+                        if src_w <= 0 || src_h <= 0 {
+                            return (0, 0);
+                        }
+                        // Get project resolution from effects_bin src pad
+                        let (fw, fh) = slot
+                            .effects_bin
+                            .static_pad("src")
+                            .and_then(|p| p.current_caps())
+                            .and_then(|c| {
+                                c.structure(0).map(|s| {
+                                    (
+                                        s.get::<i32>("width").unwrap_or(0),
+                                        s.get::<i32>("height").unwrap_or(0),
+                                    )
+                                })
                             })
-                        })
-                        .unwrap_or((0, 0));
-                    if fw <= 0 || fh <= 0 {
-                        return (0, 0);
-                    }
-                    let scale = (fw as f64 / src_w as f64).min(fh as f64 / src_h as f64);
-                    let scaled_w = (src_w as f64 * scale).round() as i32;
-                    let scaled_h = (src_h as f64 * scale).round() as i32;
-                    ((fw - scaled_w) / 2, (fh - scaled_h) / 2)
+                            .unwrap_or((0, 0));
+                        if fw <= 0 || fh <= 0 {
+                            return (0, 0);
+                        }
+                        let scale = (fw as f64 / src_w as f64).min(fh as f64 / src_h as f64);
+                        let scaled_w = (src_w as f64 * scale).round() as i32;
+                        let scaled_h = (src_h as f64 * scale).round() as i32;
+                        ((fw - scaled_w) / 2, (fh - scaled_h) / 2)
+                    })
                 })
-            })
-            .unwrap_or((0, 0));
-        if crop_left > 0 || crop_right > 0 || crop_top > 0 || crop_bottom > 0 {
-            log::info!(
-                "ProgramPlayer: crop letterbox offset: lb_h={lb_h} lb_v={lb_v} crop=({crop_left},{crop_right},{crop_top},{crop_bottom})"
-            );
-        }
+                .unwrap_or((0, 0))
+        };
 
         // Update shared crop state — the alpha pad probe reads this on each frame.
         // Only update crop values and letterbox; proj_w/proj_h are set at
         // construction from actual project dimensions (not processing resolution).
-        {
+        // Skip the mutex write (contended with the streaming-thread probe)
+        // when nothing changed since the last apply.
+        let crop_vals = (
+            crop_left.max(0),
+            crop_right.max(0),
+            crop_top.max(0),
+            crop_bottom.max(0),
+            lb_h,
+            lb_v,
+        );
+        if slot.applied.crop_state.get() != Some(crop_vals) {
+            if has_crop {
+                log::info!(
+                    "ProgramPlayer: crop letterbox offset: lb_h={lb_h} lb_v={lb_v} crop=({crop_left},{crop_right},{crop_top},{crop_bottom})"
+                );
+            }
             let mut st = slot.crop_alpha_state.lock().unwrap();
-            st.0 = crop_left.max(0);
-            st.1 = crop_right.max(0);
-            st.2 = crop_top.max(0);
-            st.3 = crop_bottom.max(0);
-            st.4 = lb_h;
-            st.5 = lb_v;
+            st.0 = crop_vals.0;
+            st.1 = crop_vals.1;
+            st.2 = crop_vals.2;
+            st.3 = crop_vals.3;
+            st.4 = crop_vals.4;
+            st.5 = crop_vals.5;
+            drop(st);
+            slot.applied.crop_state.set(Some(crop_vals));
         }
         if let Some(ref vfr) = slot.videoflip_rotate {
-            if vfr.find_property("angle").is_some() {
-                // UI positive rotation is counterclockwise, matching GstRotate.
-                vfr.set_property("angle", (rotate as f64).to_radians());
-            } else {
-                let method = match rotate.rem_euclid(360) {
-                    90 => "counterclockwise",
-                    180 => "rotate-180",
-                    270 => "clockwise",
-                    _ => "none",
-                };
-                vfr.set_property_from_str("method", method);
+            if slot.applied.rotate_deg.get() != Some(rotate) {
+                if vfr.find_property("angle").is_some() {
+                    // UI positive rotation is counterclockwise, matching GstRotate.
+                    vfr.set_property("angle", (rotate as f64).to_radians());
+                } else {
+                    let method = match rotate.rem_euclid(360) {
+                        90 => "counterclockwise",
+                        180 => "rotate-180",
+                        270 => "clockwise",
+                        _ => "none",
+                    };
+                    vfr.set_property_from_str("method", method);
+                }
+                slot.applied.rotate_deg.set(Some(rotate));
             }
         }
         if let Some(ref vff) = slot.videoflip_flip {
-            let method = match (flip_h, flip_v) {
-                (true, true) => "rotate-180",
-                (true, false) => "horizontal-flip",
-                (false, true) => "vertical-flip",
-                (false, false) => "none",
-            };
-            vff.set_property_from_str("method", method);
+            if slot.applied.flip.get() != Some((flip_h, flip_v)) {
+                let method = match (flip_h, flip_v) {
+                    (true, true) => "rotate-180",
+                    (true, false) => "horizontal-flip",
+                    (false, true) => "vertical-flip",
+                    (false, false) => "none",
+                };
+                vff.set_property_from_str("method", method);
+                slot.applied.flip.set(Some((flip_h, flip_v)));
+            }
         }
     }
 
@@ -10533,6 +10695,9 @@ impl ProgramPlayer {
             if removed.contains(&slot.clip_idx) {
                 if let Some(ref pad) = slot.compositor_pad {
                     pad.set_property("alpha", 0.0_f64);
+                    // Keep the applier skip-cache truthful so an un-hide
+                    // (e.g. the rollback paths below) re-applies alpha.
+                    slot.applied.pad_alpha.set(Some(0.0));
                 }
                 if let Some(ref pad) = slot.audio_mixer_pad {
                     pad.set_property("volume", 0.0_f64);
@@ -12243,6 +12408,7 @@ impl ProgramPlayer {
         let effects_bin = gst::Bin::new();
 
         Some(VideoSlot {
+            applied: SlotAppliedProps::default(),
             clip_idx,
             decoder,
             video_linked,
@@ -12588,6 +12754,7 @@ impl ProgramPlayer {
         let _ = decoder.sync_state_with_parent();
 
         Some(VideoSlot {
+            applied: SlotAppliedProps::default(),
             clip_idx: 0,
             decoder,
             video_linked,
@@ -13448,6 +13615,7 @@ impl ProgramPlayer {
             let audio_linked = Arc::new(AtomicBool::new(false));
 
             let slot_ref_for_transform = VideoSlot {
+                applied: SlotAppliedProps::default(),
                 clip_idx,
                 decoder: src.clone(),
                 video_linked: video_linked.clone(),
@@ -13532,6 +13700,7 @@ impl ProgramPlayer {
             let _ = slot_queue.sync_state_with_parent();
 
             return Some(VideoSlot {
+                applied: SlotAppliedProps::default(),
                 clip_idx,
                 decoder: src,
                 video_linked,
@@ -14087,6 +14256,7 @@ impl ProgramPlayer {
 
         // Apply per-clip transform.
         let slot_ref_for_transform = VideoSlot {
+            applied: SlotAppliedProps::default(),
             clip_idx,
             decoder: decoder.clone(),
             video_linked: video_linked.clone(),
@@ -14166,6 +14336,7 @@ impl ProgramPlayer {
         );
 
         Some(VideoSlot {
+            applied: SlotAppliedProps::default(),
             clip_idx,
             decoder,
             video_linked,
@@ -14605,6 +14776,9 @@ impl ProgramPlayer {
             vb.set_property("contrast", p.contrast);
             vb.set_property("saturation", p.saturation);
             vb.set_property("hue", p.hue);
+            slot.applied
+                .videobalance
+                .set(Some((p.brightness, p.contrast, p.saturation, p.hue)));
         }
 
         // frei0r coloradj_RGB (per-channel temperature/tint)
@@ -14613,6 +14787,7 @@ impl ProgramPlayer {
             ca.set_property("r", cp.r);
             ca.set_property("g", cp.g);
             ca.set_property("b", cp.b);
+            slot.applied.coloradj.set(Some((cp.r, cp.g, cp.b)));
         }
 
         // frei0r 3-point-color-balance (shadows/midtones/highlights)
@@ -16658,7 +16833,8 @@ mod tests {
     use super::{
         apply_adjustment_overlays_rgba, clip_can_fully_occlude, AdjustmentOverlay,
         CachedPlayheadFrame, ProgramClip, ProgramPlayer, ScopeFrame, ShortFrameCache,
-        ThreePointParabola, TransitionPrerenderSpec, TransitionRole, VBParams, VideoSlot,
+        SlotAppliedProps, ThreePointParabola, TransitionPrerenderSpec, TransitionRole, VBParams,
+        VideoSlot,
     };
     use crate::media::adjustment_scope::AdjustmentScopeShape;
     use crate::media::color_math;
@@ -18498,6 +18674,7 @@ mod tests {
         let _ = gst::init();
         let identity = || gst::ElementFactory::make("identity").build().ok();
         VideoSlot {
+            applied: SlotAppliedProps::default(),
             clip_idx: 0,
             decoder: gst::ElementFactory::make("fakesrc")
                 .build()

@@ -969,6 +969,8 @@ pub enum McpCommand {
         title_bg_box_padding: Option<f64>,
         title_clip_bg_color: Option<u32>,
         title_secondary_text: Option<String>,
+        title_animation: Option<String>,
+        title_animation_duration_ns: Option<u64>,
         reply: SyncSender<Value>,
     },
     AddToExportQueue {

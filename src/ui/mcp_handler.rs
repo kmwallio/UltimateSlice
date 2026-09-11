@@ -7276,8 +7276,27 @@ pub(crate) fn handle_mcp_command(
             title_bg_box_padding,
             title_clip_bg_color,
             title_secondary_text,
+            title_animation,
+            title_animation_duration_ns,
             reply,
         } => {
+            let parsed_animation = match title_animation.as_deref() {
+                None => None,
+                Some(s) => match crate::model::clip::TitleAnimation::from_id(s) {
+                    Some(a) => Some(a),
+                    None => {
+                        reply
+                            .send(json!({
+                                "success": false,
+                                "error": format!(
+                                    "unknown title_animation '{s}' (expected one of: none, typewriter, fade, pop, slide_from_left, slide_from_right, slide_from_bottom, slide_from_top)"
+                                )
+                            }))
+                            .ok();
+                        return;
+                    }
+                },
+            };
             let mut proj = project.borrow_mut();
             let found = if let Some(clip) = proj
                 .tracks
@@ -7332,6 +7351,12 @@ pub(crate) fn handle_mcp_command(
                 }
                 if let Some(v) = title_secondary_text {
                     clip.title_secondary_text = v;
+                }
+                if let Some(v) = parsed_animation {
+                    clip.title_animation = v;
+                }
+                if let Some(v) = title_animation_duration_ns {
+                    clip.title_animation_duration_ns = v;
                 }
                 proj.dirty = true;
                 true
