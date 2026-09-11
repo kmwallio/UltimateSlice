@@ -21409,7 +21409,7 @@ pub fn build_window(
         MCP_MAIN_DISPATCH.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move |cmd| {
                 if let Some(win) = window_weak.upgrade() {
-                    handle_mcp_command(
+                    crate::ui::mcp_handler::handle_mcp_command(
                         cmd,
                         &win,
                         &main_stack_for_mcp,
@@ -22111,97 +22111,6 @@ pub fn build_window(
 
 // ── MCP command handler (runs on GTK main thread) ────────────────────────────
 
-/// MCP command dispatcher — delegated to `crate::ui::mcp_handler`.
-/// See `src/ui/mcp_handler.rs` for the full implementation.
-fn handle_mcp_command(
-    cmd: crate::mcp::McpCommand,
-    window: &gtk::ApplicationWindow,
-    main_stack: &gtk::Stack,
-    project: &Rc<RefCell<Project>>,
-    library: &Rc<RefCell<MediaLibrary>>,
-    player: &Rc<RefCell<Player>>,
-    prog_player: &Rc<RefCell<ProgramPlayer>>,
-    timeline_state: &Rc<RefCell<TimelineState>>,
-    preferences_state: &Rc<RefCell<crate::ui_state::PreferencesState>>,
-    workspace_layouts_state: &Rc<RefCell<crate::ui_state::WorkspaceLayoutsState>>,
-    proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
-    bg_removal_cache: &Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
-    frame_interp_cache: &Rc<RefCell<crate::media::frame_interp_cache::FrameInterpCache>>,
-    render_replace_cache: &Rc<RefCell<crate::media::render_replace_cache::RenderReplaceCache>>,
-    voice_enhance_cache: &Rc<RefCell<crate::media::voice_enhance_cache::VoiceEnhanceCache>>,
-    clip_embedding_cache: &Rc<RefCell<crate::media::clip_embedding_cache::ClipEmbeddingCache>>,
-    auto_tag_cache: &Rc<RefCell<crate::media::auto_tag_cache::AutoTagCache>>,
-    stt_cache: &Rc<RefCell<crate::media::stt_cache::SttCache>>,
-    music_gen_cache: &Rc<RefCell<crate::media::music_gen::MusicGenCache>>,
-    tracking_cache: &Rc<RefCell<crate::media::tracking::TrackingCache>>,
-    tracking_job_owner_by_key: &Rc<RefCell<HashMap<String, String>>>,
-    tracking_job_key_by_clip: &Rc<RefCell<HashMap<String, String>>>,
-    on_close_preview: &Rc<dyn Fn()>,
-    source_marks: &Rc<RefCell<crate::model::media_library::SourceMarks>>,
-    on_source_selected: &Rc<dyn Fn(String, u64, Option<(u64, u64)>)>,
-    on_project_changed: &Rc<dyn Fn()>,
-    on_project_changed_full: &Rc<dyn Fn()>,
-    capture_workspace_arrangement: &Rc<dyn Fn() -> crate::ui_state::WorkspaceArrangement>,
-    apply_workspace_arrangement: &Rc<dyn Fn(crate::ui_state::WorkspaceArrangement)>,
-    workspace_layout_pending_name: &Rc<RefCell<Option<String>>>,
-    sync_workspace_layout_controls: &Rc<dyn Fn()>,
-    apply_preferences_state: &Rc<dyn Fn(crate::ui_state::PreferencesState)>,
-    apply_program_monitor_hud: &Rc<dyn Fn(bool)>,
-    apply_program_monitor_aspect_mask: &Rc<dyn Fn(crate::ui_state::AspectMaskPreset)>,
-    apply_program_monitor_timecode_burnin: &Rc<
-        dyn Fn(bool, crate::model::project::TimecodeBurninPosition),
-    >,
-    apply_program_monitor_ab_enabled: &Rc<dyn Fn(bool)>,
-    apply_program_monitor_ab_midline: &Rc<dyn Fn(f64)>,
-    apply_program_monitor_ab_reference: &Rc<dyn Fn(Option<String>)>,
-    refresh_reference_stills: &Rc<dyn Fn()>,
-    suppress_resume_on_next_reload: &Rc<Cell<bool>>,
-    clear_media_browser_on_next_reload: &Rc<Cell<bool>>,
-) {
-    crate::ui::mcp_handler::handle_mcp_command(
-        cmd,
-        window,
-        main_stack,
-        project,
-        library,
-        player,
-        prog_player,
-        timeline_state,
-        preferences_state,
-        workspace_layouts_state,
-        proxy_cache,
-        bg_removal_cache,
-        frame_interp_cache,
-        render_replace_cache,
-        voice_enhance_cache,
-        clip_embedding_cache,
-        auto_tag_cache,
-        stt_cache,
-        music_gen_cache,
-        tracking_cache,
-        tracking_job_owner_by_key,
-        tracking_job_key_by_clip,
-        on_close_preview,
-        source_marks,
-        on_source_selected,
-        on_project_changed,
-        on_project_changed_full,
-        capture_workspace_arrangement,
-        apply_workspace_arrangement,
-        workspace_layout_pending_name,
-        sync_workspace_layout_controls,
-        apply_preferences_state,
-        apply_program_monitor_hud,
-        apply_program_monitor_aspect_mask,
-        apply_program_monitor_timecode_burnin,
-        apply_program_monitor_ab_enabled,
-        apply_program_monitor_ab_midline,
-        apply_program_monitor_ab_reference,
-        refresh_reference_stills,
-        suppress_resume_on_next_reload,
-        clear_media_browser_on_next_reload,
-    );
-}
 
 /// Walk a `HeaderBar` and register every `Button` / `ToggleButton` that has a
 /// visible label as a palette command. Shortcut is extracted from trailing
