@@ -9,6 +9,7 @@ use crate::model::media_library::{
     MediaCollection, MediaFilterCriteria, MediaItem, MediaKindFilter, MediaLibrary, MediaRating,
     MediaRatingFilter, MediaSearchField, ResolutionFilter,
 };
+use crate::ui::id_dropdown::IdDropDown;
 use crate::ui_state::PreferencesState;
 use gdk4;
 use gio;
@@ -38,8 +39,8 @@ enum FlowBoxEntry {
     },
 }
 
-fn kind_filter_from_active_id(active_id: Option<glib::GString>) -> MediaKindFilter {
-    match active_id.as_deref() {
+fn kind_filter_from_active_id(active_id: Option<&str>) -> MediaKindFilter {
+    match active_id {
         Some("video") => MediaKindFilter::Video,
         Some("audio") => MediaKindFilter::Audio,
         Some("image") => MediaKindFilter::Image,
@@ -58,8 +59,8 @@ fn kind_filter_active_id(filter: MediaKindFilter) -> &'static str {
     }
 }
 
-fn resolution_filter_from_active_id(active_id: Option<glib::GString>) -> ResolutionFilter {
-    match active_id.as_deref() {
+fn resolution_filter_from_active_id(active_id: Option<&str>) -> ResolutionFilter {
+    match active_id {
         Some("sd") => ResolutionFilter::SdOrSmaller,
         Some("hd") => ResolutionFilter::Hd,
         Some("fhd") => ResolutionFilter::FullHd,
@@ -78,8 +79,8 @@ fn resolution_filter_active_id(filter: ResolutionFilter) -> &'static str {
     }
 }
 
-fn frame_rate_filter_from_active_id(active_id: Option<glib::GString>) -> FrameRateFilter {
-    match active_id.as_deref() {
+fn frame_rate_filter_from_active_id(active_id: Option<&str>) -> FrameRateFilter {
+    match active_id {
         Some("fps24") => FrameRateFilter::Fps24OrLess,
         Some("fps25_30") => FrameRateFilter::Fps25To30,
         Some("fps31_59") => FrameRateFilter::Fps31To59,
@@ -98,8 +99,8 @@ fn frame_rate_filter_active_id(filter: FrameRateFilter) -> &'static str {
     }
 }
 
-fn rating_filter_from_active_id(active_id: Option<glib::GString>) -> MediaRatingFilter {
-    match active_id.as_deref() {
+fn rating_filter_from_active_id(active_id: Option<&str>) -> MediaRatingFilter {
+    match active_id {
         Some("favorite") => MediaRatingFilter::Favorite,
         Some("reject") => MediaRatingFilter::Reject,
         Some("unrated") => MediaRatingFilter::Unrated,
@@ -120,27 +121,23 @@ fn collection_display_label(collection: &MediaCollection) -> String {
     collection.name.clone()
 }
 
-fn selected_collection_id(combo: &gtk::ComboBoxText) -> Option<String> {
-    combo.active_id().and_then(|id| {
-        let id = id.to_string();
-        (id != COLLECTION_NONE_ID).then_some(id)
-    })
+fn selected_collection_id(combo: &IdDropDown) -> Option<String> {
+    combo
+        .active_id()
+        .and_then(|id| (id != COLLECTION_NONE_ID).then_some(id))
 }
 
 fn refresh_collection_picker(
-    combo: &gtk::ComboBoxText,
+    combo: &IdDropDown,
     rename_btn: &Button,
     delete_btn: &Button,
     lib: &MediaLibrary,
 ) {
     let active_id = selected_collection_id(combo);
-    combo.remove_all();
-    combo.append(Some(COLLECTION_NONE_ID), "Collections");
+    let mut entries: Vec<(String, String)> =
+        vec![(COLLECTION_NONE_ID.to_string(), "Collections".to_string())];
     for collection in &lib.collections {
-        combo.append(
-            Some(collection.id.as_str()),
-            collection_display_label(collection).as_str(),
-        );
+        entries.push((collection.id.clone(), collection_display_label(collection)));
     }
     let active_id = active_id
         .filter(|id| {
@@ -149,7 +146,7 @@ fn refresh_collection_picker(
                 .any(|collection| &collection.id == id)
         })
         .unwrap_or_else(|| COLLECTION_NONE_ID.to_string());
-    combo.set_active_id(Some(&active_id));
+    combo.set_entries(&entries, &active_id);
     let has_selected_collection = active_id != COLLECTION_NONE_ID;
     rename_btn.set_sensitive(has_selected_collection);
     delete_btn.set_sensitive(has_selected_collection);
@@ -278,11 +275,13 @@ pub fn build_media_browser(
 
     let collection_row = GBox::new(Orientation::Horizontal, 4);
 
-    let collection_filter = gtk::ComboBoxText::new();
-    collection_filter.append(Some(COLLECTION_NONE_ID), "Collections");
-    collection_filter.set_active_id(Some(COLLECTION_NONE_ID));
-    collection_filter.set_hexpand(true);
-    collection_row.append(&collection_filter);
+    let collection_filter = IdDropDown::new();
+    collection_filter.set_entries(
+        &[(COLLECTION_NONE_ID.to_string(), "Collections".to_string())],
+        COLLECTION_NONE_ID,
+    );
+    collection_filter.dropdown.set_hexpand(true);
+    collection_row.append(&collection_filter.dropdown);
 
     let save_collection_btn = Button::from_icon_name("document-save-symbolic");
     save_collection_btn.add_css_class("browser-header-import");
@@ -305,44 +304,60 @@ pub fn build_media_browser(
 
     let filter_row = GBox::new(Orientation::Horizontal, 4);
 
-    let kind_filter = gtk::ComboBoxText::new();
-    kind_filter.append(Some("all"), "All Types");
-    kind_filter.append(Some("video"), "Video");
-    kind_filter.append(Some("audio"), "Audio");
-    kind_filter.append(Some("image"), "Images");
-    kind_filter.append(Some("offline"), "Offline");
-    kind_filter.set_active_id(Some("all"));
-    kind_filter.set_hexpand(true);
-    filter_row.append(&kind_filter);
+    let kind_filter = IdDropDown::new();
+    kind_filter.set_entries(
+        &[
+            ("all".to_string(), "All Types".to_string()),
+            ("video".to_string(), "Video".to_string()),
+            ("audio".to_string(), "Audio".to_string()),
+            ("image".to_string(), "Images".to_string()),
+            ("offline".to_string(), "Offline".to_string()),
+        ],
+        "all",
+    );
+    kind_filter.dropdown.set_hexpand(true);
+    filter_row.append(&kind_filter.dropdown);
 
-    let resolution_filter = gtk::ComboBoxText::new();
-    resolution_filter.append(Some("all"), "All Sizes");
-    resolution_filter.append(Some("sd"), "SD or smaller");
-    resolution_filter.append(Some("hd"), "HD");
-    resolution_filter.append(Some("fhd"), "Full HD");
-    resolution_filter.append(Some("uhd"), "4K+");
-    resolution_filter.set_active_id(Some("all"));
-    resolution_filter.set_hexpand(true);
-    filter_row.append(&resolution_filter);
+    let resolution_filter = IdDropDown::new();
+    resolution_filter.set_entries(
+        &[
+            ("all".to_string(), "All Sizes".to_string()),
+            ("sd".to_string(), "SD or smaller".to_string()),
+            ("hd".to_string(), "HD".to_string()),
+            ("fhd".to_string(), "Full HD".to_string()),
+            ("uhd".to_string(), "4K+".to_string()),
+        ],
+        "all",
+    );
+    resolution_filter.dropdown.set_hexpand(true);
+    filter_row.append(&resolution_filter.dropdown);
 
-    let frame_rate_filter = gtk::ComboBoxText::new();
-    frame_rate_filter.append(Some("all"), "All FPS");
-    frame_rate_filter.append(Some("fps24"), "24 fps or less");
-    frame_rate_filter.append(Some("fps25_30"), "25-30 fps");
-    frame_rate_filter.append(Some("fps31_59"), "31-59 fps");
-    frame_rate_filter.append(Some("fps60"), "60+ fps");
-    frame_rate_filter.set_active_id(Some("all"));
-    frame_rate_filter.set_hexpand(true);
-    filter_row.append(&frame_rate_filter);
+    let frame_rate_filter = IdDropDown::new();
+    frame_rate_filter.set_entries(
+        &[
+            ("all".to_string(), "All FPS".to_string()),
+            ("fps24".to_string(), "24 fps or less".to_string()),
+            ("fps25_30".to_string(), "25-30 fps".to_string()),
+            ("fps31_59".to_string(), "31-59 fps".to_string()),
+            ("fps60".to_string(), "60+ fps".to_string()),
+        ],
+        "all",
+    );
+    frame_rate_filter.dropdown.set_hexpand(true);
+    filter_row.append(&frame_rate_filter.dropdown);
 
-    let rating_filter = gtk::ComboBoxText::new();
-    rating_filter.append(Some("all"), "All Ratings");
-    rating_filter.append(Some("favorite"), "Favorite");
-    rating_filter.append(Some("reject"), "Reject");
-    rating_filter.append(Some("unrated"), "Unrated");
-    rating_filter.set_active_id(Some("all"));
-    rating_filter.set_hexpand(true);
-    filter_row.append(&rating_filter);
+    let rating_filter = IdDropDown::new();
+    rating_filter.set_entries(
+        &[
+            ("all".to_string(), "All Ratings".to_string()),
+            ("favorite".to_string(), "Favorite".to_string()),
+            ("reject".to_string(), "Reject".to_string()),
+            ("unrated".to_string(), "Unrated".to_string()),
+        ],
+        "all",
+    );
+    rating_filter.dropdown.set_hexpand(true);
+    filter_row.append(&rating_filter.dropdown);
 
     filter_box.append(&filter_row);
     vbox.append(&filter_box);
@@ -482,7 +497,7 @@ pub fn build_media_browser(
         filter_search.connect_search_changed(move |entry| {
             filters.borrow_mut().search_text = entry.text().trim().to_string();
             if !applying_collection.get() {
-                collection_filter.set_active_id(Some(COLLECTION_NONE_ID));
+                collection_filter.set_active_id(COLLECTION_NONE_ID);
             }
             refresh_filtered_view();
         });
@@ -492,10 +507,10 @@ pub fn build_media_browser(
         let refresh_filtered_view = refresh_filtered_view.clone();
         let collection_filter = collection_filter.clone();
         let applying_collection = applying_collection.clone();
-        kind_filter.connect_changed(move |combo| {
-            filters.borrow_mut().kind = kind_filter_from_active_id(combo.active_id());
+        kind_filter.connect_selected(move |combo| {
+            filters.borrow_mut().kind = kind_filter_from_active_id(combo.active_id().as_deref());
             if !applying_collection.get() {
-                collection_filter.set_active_id(Some(COLLECTION_NONE_ID));
+                collection_filter.set_active_id(COLLECTION_NONE_ID);
             }
             refresh_filtered_view();
         });
@@ -505,10 +520,11 @@ pub fn build_media_browser(
         let refresh_filtered_view = refresh_filtered_view.clone();
         let collection_filter = collection_filter.clone();
         let applying_collection = applying_collection.clone();
-        resolution_filter.connect_changed(move |combo| {
-            filters.borrow_mut().resolution = resolution_filter_from_active_id(combo.active_id());
+        resolution_filter.connect_selected(move |combo| {
+            filters.borrow_mut().resolution =
+                resolution_filter_from_active_id(combo.active_id().as_deref());
             if !applying_collection.get() {
-                collection_filter.set_active_id(Some(COLLECTION_NONE_ID));
+                collection_filter.set_active_id(COLLECTION_NONE_ID);
             }
             refresh_filtered_view();
         });
@@ -518,10 +534,11 @@ pub fn build_media_browser(
         let refresh_filtered_view = refresh_filtered_view.clone();
         let collection_filter = collection_filter.clone();
         let applying_collection = applying_collection.clone();
-        frame_rate_filter.connect_changed(move |combo| {
-            filters.borrow_mut().frame_rate = frame_rate_filter_from_active_id(combo.active_id());
+        frame_rate_filter.connect_selected(move |combo| {
+            filters.borrow_mut().frame_rate =
+                frame_rate_filter_from_active_id(combo.active_id().as_deref());
             if !applying_collection.get() {
-                collection_filter.set_active_id(Some(COLLECTION_NONE_ID));
+                collection_filter.set_active_id(COLLECTION_NONE_ID);
             }
             refresh_filtered_view();
         });
@@ -531,10 +548,11 @@ pub fn build_media_browser(
         let refresh_filtered_view = refresh_filtered_view.clone();
         let collection_filter = collection_filter.clone();
         let applying_collection = applying_collection.clone();
-        rating_filter.connect_changed(move |combo| {
-            filters.borrow_mut().rating = rating_filter_from_active_id(combo.active_id());
+        rating_filter.connect_selected(move |combo| {
+            filters.borrow_mut().rating =
+                rating_filter_from_active_id(combo.active_id().as_deref());
             if !applying_collection.get() {
-                collection_filter.set_active_id(Some(COLLECTION_NONE_ID));
+                collection_filter.set_active_id(COLLECTION_NONE_ID);
             }
             refresh_filtered_view();
         });
@@ -553,14 +571,14 @@ pub fn build_media_browser(
         let refresh_browser_view = refresh_browser_view.clone();
         let rename_collection_btn = rename_collection_btn.clone();
         let delete_collection_btn = delete_collection_btn.clone();
-        collection_filter.connect_changed(move |combo| {
+        collection_filter.connect_selected(move |combo| {
             let Some(collection_id) = selected_collection_id(combo) else {
                 rename_collection_btn.set_sensitive(false);
                 delete_collection_btn.set_sensitive(false);
                 return;
             };
             let Some(collection) = library.borrow().find_collection(&collection_id).cloned() else {
-                combo.set_active_id(Some(COLLECTION_NONE_ID));
+                combo.set_active_id(COLLECTION_NONE_ID);
                 rename_collection_btn.set_sensitive(false);
                 delete_collection_btn.set_sensitive(false);
                 return;
@@ -570,14 +588,12 @@ pub fn build_media_browser(
             applying_collection.set(true);
             *filters.borrow_mut() = collection.criteria.clone();
             filter_search.set_text(&collection.criteria.search_text);
-            kind_filter.set_active_id(Some(kind_filter_active_id(collection.criteria.kind)));
-            resolution_filter.set_active_id(Some(resolution_filter_active_id(
-                collection.criteria.resolution,
-            )));
-            frame_rate_filter.set_active_id(Some(frame_rate_filter_active_id(
-                collection.criteria.frame_rate,
-            )));
-            rating_filter.set_active_id(Some(rating_filter_active_id(collection.criteria.rating)));
+            kind_filter.set_active_id(kind_filter_active_id(collection.criteria.kind));
+            resolution_filter
+                .set_active_id(resolution_filter_active_id(collection.criteria.resolution));
+            frame_rate_filter
+                .set_active_id(frame_rate_filter_active_id(collection.criteria.frame_rate));
+            rating_filter.set_active_id(rating_filter_active_id(collection.criteria.rating));
             applying_collection.set(false);
             *current_bin_id.borrow_mut() = None;
             *show_all_media.borrow_mut() = true;
@@ -611,7 +627,7 @@ pub fn build_media_browser(
         rename_collection_btn.connect_clicked(move |_| {
             if let Some(collection_id) = selected_collection_id(&collection_filter) {
                 show_rename_collection_dialog(
-                    &collection_filter,
+                    &collection_filter.dropdown,
                     &collection_id,
                     &library,
                     &refresh_browser_view,
@@ -689,7 +705,7 @@ pub fn build_media_browser(
                     drop(entries);
                     *current_bin_id_click.borrow_mut() = Some(bin_id);
                     *show_all_media_click.borrow_mut() = false;
-                    collection_filter_click.set_active_id(Some(COLLECTION_NONE_ID));
+                    collection_filter_click.set_active_id(COLLECTION_NONE_ID);
                     let lib = library_click.borrow();
                     rebuild_flowbox_binned(
                         &flow_box_click,
@@ -2064,7 +2080,7 @@ pub fn build_media_browser(
         all_media_btn.connect_clicked(move |_| {
             let is_all = *show_all_media_all.borrow();
             *show_all_media_all.borrow_mut() = !is_all;
-            collection_filter_all.set_active_id(Some(COLLECTION_NONE_ID));
+            collection_filter_all.set_active_id(COLLECTION_NONE_ID);
             if !is_all {
                 // Entering All Media mode — clear bin navigation
                 *current_bin_id_all.borrow_mut() = None;
@@ -3811,7 +3827,7 @@ fn set_items_rating(
 
 #[allow(deprecated)]
 fn show_new_collection_dialog(
-    collection_filter: &gtk::ComboBoxText,
+    collection_filter: &IdDropDown,
     library: &Rc<RefCell<MediaLibrary>>,
     criteria: MediaFilterCriteria,
     refresh_browser_view: &Rc<dyn Fn()>,
@@ -3819,6 +3835,7 @@ fn show_new_collection_dialog(
     on_library_changed: &Rc<dyn Fn()>,
 ) {
     let window = collection_filter
+        .dropdown
         .root()
         .and_then(|root| root.downcast::<gtk::Window>().ok());
     let dialog = gtk::Dialog::with_buttons(
@@ -3855,7 +3872,7 @@ fn show_new_collection_dialog(
                 lib.collections.push(collection);
                 drop(lib);
                 refresh_collection_controls();
-                collection_filter.set_active_id(Some(&collection_id));
+                collection_filter.set_active_id(&collection_id);
                 refresh_browser_view();
                 on_library_changed();
             }
@@ -3931,7 +3948,7 @@ fn show_rename_collection_dialog(
 }
 
 fn delete_collection(
-    collection_filter: &gtk::ComboBoxText,
+    collection_filter: &IdDropDown,
     collection_id: &str,
     library: &Rc<RefCell<MediaLibrary>>,
     refresh_browser_view: &Rc<dyn Fn()>,
@@ -3943,7 +3960,7 @@ fn delete_collection(
         lib.collections
             .retain(|collection| collection.id != collection_id);
     }
-    collection_filter.set_active_id(Some(COLLECTION_NONE_ID));
+    collection_filter.set_active_id(COLLECTION_NONE_ID);
     refresh_collection_controls();
     refresh_browser_view();
     on_library_changed();
