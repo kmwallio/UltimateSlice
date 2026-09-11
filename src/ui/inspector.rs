@@ -76,6 +76,7 @@ pub struct SubtitleStyleClipboard {
     pub highlight_stroke_color: u32,
 }
 use crate::model::project::{FrameRate, MotionTrackerReference, Project};
+use crate::ui::id_dropdown::IdDropDown;
 use gdk4;
 use gio;
 use gtk4::prelude::*;
@@ -363,16 +364,16 @@ pub struct InspectorView {
     pub ladspa_effects_list: GBox,
     // Source audio routing
     pub source_audio_stream_summary_label: Label,
-    pub source_audio_stream_dropdown: gtk4::ComboBoxText,
-    pub source_audio_pair_dropdown: gtk4::ComboBoxText,
+    pub source_audio_stream_dropdown: IdDropDown,
+    pub source_audio_pair_dropdown: IdDropDown,
     // Channel mode
-    pub channel_mode_dropdown: gtk4::ComboBoxText,
+    pub channel_mode_dropdown: IdDropDown,
     // Pitch controls
     pub pitch_shift_slider: Scale,
     pub pitch_preserve_check: gtk4::CheckButton,
     // Track audio controls
-    pub role_dropdown: gtk4::ComboBoxText,
-    pub surround_position_dropdown: gtk4::ComboBoxText,
+    pub role_dropdown: IdDropDown,
+    pub surround_position_dropdown: IdDropDown,
     pub duck_check: gtk4::CheckButton,
     pub duck_amount_slider: Scale,
     // EQ sliders (3 bands × 3 params)
@@ -427,9 +428,9 @@ pub struct InspectorView {
     /// (`Generating…` / `Ready` / `Error` / `Model not installed`).
     pub frame_interp_status: Label,
     // Transitions
-    pub transition_kind_dropdown: gtk4::ComboBoxText,
+    pub transition_kind_dropdown: IdDropDown,
     pub transition_duration_ms: gtk4::SpinButton,
-    pub transition_alignment_dropdown: gtk4::ComboBoxText,
+    pub transition_alignment_dropdown: IdDropDown,
     pub transition_clear_btn: Button,
     pub transition_status_label: Label,
     // LUT (color grading)
@@ -2446,10 +2447,9 @@ impl InspectorView {
                     } else {
                         ""
                     };
-                self.transition_kind_dropdown
-                    .set_active_id(Some(current_kind_id));
+                self.transition_kind_dropdown.set_active_id(current_kind_id);
                 self.transition_alignment_dropdown
-                    .set_active_id(Some(current_transition.alignment.as_str()));
+                    .set_active_id(current_transition.alignment.as_str());
                 self.transition_clear_btn
                     .set_sensitive(current_transition.is_active());
                 if let Some((track, clip_index)) = project.tracks.iter().find_map(|track| {
@@ -2484,10 +2484,12 @@ impl InspectorView {
                         self.transition_duration_ms
                             .set_value((display_duration_ns as f64) / 1_000_000.0);
                         self.transition_kind_dropdown
+                            .dropdown
                             .set_sensitive(boundary_supports_transition);
                         self.transition_duration_ms
                             .set_sensitive(boundary_supports_transition && current_has_kind);
                         self.transition_alignment_dropdown
+                            .dropdown
                             .set_sensitive(boundary_supports_transition && current_has_kind);
                         let status = if !boundary_supports_transition {
                             format!(
@@ -2530,9 +2532,11 @@ impl InspectorView {
                         };
                         self.transition_duration_ms
                             .set_value((display_duration_ns as f64) / 1_000_000.0);
-                        self.transition_kind_dropdown.set_sensitive(false);
+                        self.transition_kind_dropdown.dropdown.set_sensitive(false);
                         self.transition_duration_ms.set_sensitive(false);
-                        self.transition_alignment_dropdown.set_sensitive(false);
+                        self.transition_alignment_dropdown
+                            .dropdown
+                            .set_sensitive(false);
                         let status = if current_transition.is_active() {
                             "This clip has no following clip on the same track. Remove the saved transition or add another clip after it."
                         } else {
@@ -2541,9 +2545,11 @@ impl InspectorView {
                         self.transition_status_label.set_text(status);
                     }
                 } else {
-                    self.transition_kind_dropdown.set_sensitive(false);
+                    self.transition_kind_dropdown.dropdown.set_sensitive(false);
                     self.transition_duration_ms.set_sensitive(false);
-                    self.transition_alignment_dropdown.set_sensitive(false);
+                    self.transition_alignment_dropdown
+                        .dropdown
+                        .set_sensitive(false);
                     self.transition_clear_btn.set_sensitive(false);
                     self.transition_status_label
                         .set_text("Transition controls are unavailable for this clip.");
@@ -2883,9 +2889,8 @@ impl InspectorView {
                     c,
                 );
                 // Channel mode
-                #[allow(deprecated)]
                 self.channel_mode_dropdown
-                    .set_active_id(Some(c.audio_channel_mode.as_str()));
+                    .set_active_id(c.audio_channel_mode.as_str());
                 // Pitch controls
                 self.pitch_shift_slider.set_value(c.pitch_shift_semitones);
                 self.pitch_preserve_check.set_active(c.pitch_preserve);
@@ -2895,12 +2900,9 @@ impl InspectorView {
                     .iter()
                     .find(|t| t.clips.iter().any(|tc| tc.id == c.id))
                 {
-                    #[allow(deprecated)]
-                    self.role_dropdown
-                        .set_active_id(Some(track.audio_role.as_str()));
-                    #[allow(deprecated)]
+                    self.role_dropdown.set_active_id(track.audio_role.as_str());
                     self.surround_position_dropdown
-                        .set_active_id(Some(track.surround_position.as_str()));
+                        .set_active_id(track.surround_position.as_str());
                     self.duck_check.set_active(track.duck);
                     self.duck_amount_slider.set_value(track.duck_amount_db);
                 }
@@ -3119,7 +3121,7 @@ impl InspectorView {
                 self.path_status_value.add_css_class("dim-label");
                 self.relink_btn.set_visible(false);
                 self.replace_btn.set_visible(false);
-                self.transition_kind_dropdown.set_active_id(Some(""));
+                self.transition_kind_dropdown.set_active_id("");
                 self.transition_duration_ms.set_range(
                     (MIN_TRANSITION_DURATION_NS as f64) / 1_000_000.0,
                     (DEFAULT_TRANSITION_DURATION_NS as f64) / 1_000_000.0,
@@ -3127,10 +3129,12 @@ impl InspectorView {
                 self.transition_duration_ms
                     .set_value((DEFAULT_TRANSITION_DURATION_NS as f64) / 1_000_000.0);
                 self.transition_alignment_dropdown
-                    .set_active_id(Some(TransitionAlignment::EndOnCut.as_str()));
-                self.transition_kind_dropdown.set_sensitive(false);
+                    .set_active_id(TransitionAlignment::EndOnCut.as_str());
+                self.transition_kind_dropdown.dropdown.set_sensitive(false);
                 self.transition_duration_ms.set_sensitive(false);
-                self.transition_alignment_dropdown.set_sensitive(false);
+                self.transition_alignment_dropdown
+                    .dropdown
+                    .set_sensitive(false);
                 self.transition_clear_btn.set_sensitive(false);
                 self.transition_status_label.set_text(
                     "Select a clip with a following clip to edit its outgoing transition.",
@@ -3676,15 +3680,17 @@ pub fn build_inspector(
     transition_expander.set_child(Some(&transition_inner));
 
     row_label(&transition_inner, "Type");
-    let transition_kind_dropdown = gtk4::ComboBoxText::new();
-    transition_kind_dropdown.append(Some(""), "None");
+    let transition_kind_dropdown = IdDropDown::new();
+    let mut transition_kind_entries = vec![(String::new(), "None".to_string())];
     for transition in supported_transition_definitions() {
-        transition_kind_dropdown.append(Some(transition.kind), transition.label);
+        transition_kind_entries.push((transition.kind.to_string(), transition.label.to_string()));
     }
-    transition_kind_dropdown.set_active_id(Some(""));
-    transition_kind_dropdown.set_halign(gtk4::Align::Start);
-    transition_kind_dropdown.set_hexpand(true);
-    transition_inner.append(&transition_kind_dropdown);
+    transition_kind_dropdown.set_entries(&transition_kind_entries, "");
+    transition_kind_dropdown
+        .dropdown
+        .set_halign(gtk4::Align::Start);
+    transition_kind_dropdown.dropdown.set_hexpand(true);
+    transition_inner.append(&transition_kind_dropdown.dropdown);
 
     row_label(&transition_inner, "Duration (ms)");
     let transition_duration_ms = gtk4::SpinButton::with_range(
@@ -3698,17 +3704,28 @@ pub fn build_inspector(
     transition_inner.append(&transition_duration_ms);
 
     row_label(&transition_inner, "Alignment");
-    let transition_alignment_dropdown = gtk4::ComboBoxText::new();
-    for alignment in TransitionAlignment::ALL {
-        transition_alignment_dropdown.append(Some(alignment.as_str()), alignment.label());
-    }
-    transition_alignment_dropdown.set_active_id(Some(TransitionAlignment::EndOnCut.as_str()));
-    transition_alignment_dropdown.set_halign(gtk::Align::Start);
-    transition_alignment_dropdown.set_hexpand(true);
-    transition_alignment_dropdown.set_tooltip_text(Some(
+    let transition_alignment_dropdown = IdDropDown::new();
+    let transition_alignment_entries: Vec<(String, String)> = TransitionAlignment::ALL
+        .iter()
+        .map(|alignment| {
+            (
+                alignment.as_str().to_string(),
+                alignment.label().to_string(),
+            )
+        })
+        .collect();
+    transition_alignment_dropdown.set_entries(
+        &transition_alignment_entries,
+        TransitionAlignment::EndOnCut.as_str(),
+    );
+    transition_alignment_dropdown
+        .dropdown
+        .set_halign(gtk::Align::Start);
+    transition_alignment_dropdown.dropdown.set_hexpand(true);
+    transition_alignment_dropdown.dropdown.set_tooltip_text(Some(
         "Controls where the overlap sits relative to the cut in preview, export, and background prerender.",
     ));
-    transition_inner.append(&transition_alignment_dropdown);
+    transition_inner.append(&transition_alignment_dropdown.dropdown);
 
     let transition_clear_btn = Button::with_label("Remove Transition");
     transition_clear_btn.set_halign(gtk::Align::Start);
@@ -5273,32 +5290,22 @@ pub fn build_inspector(
     audio_inner.append(&source_audio_stream_summary_label);
 
     row_label(&audio_inner, "Source Stream");
-    #[allow(deprecated)]
-    let source_audio_stream_dropdown = gtk4::ComboBoxText::new();
-    #[allow(deprecated)]
-    source_audio_stream_dropdown.append(Some("0"), "Stream 1");
-    #[allow(deprecated)]
-    source_audio_stream_dropdown.set_active_id(Some("0"));
-    audio_inner.append(&source_audio_stream_dropdown);
+    let source_audio_stream_dropdown = IdDropDown::new();
+    source_audio_stream_dropdown.set_entries(&[("0".to_string(), "Stream 1".to_string())], "0");
+    audio_inner.append(&source_audio_stream_dropdown.dropdown);
 
     row_label(&audio_inner, "Source Pair");
-    #[allow(deprecated)]
-    let source_audio_pair_dropdown = gtk4::ComboBoxText::new();
-    #[allow(deprecated)]
-    source_audio_pair_dropdown.append(Some("0"), "Channels 1-2");
-    #[allow(deprecated)]
-    source_audio_pair_dropdown.set_active_id(Some("0"));
-    audio_inner.append(&source_audio_pair_dropdown);
+    let source_audio_pair_dropdown = IdDropDown::new();
+    source_audio_pair_dropdown.set_entries(&[("0".to_string(), "Channels 1-2".to_string())], "0");
+    audio_inner.append(&source_audio_pair_dropdown.dropdown);
 
-    #[allow(deprecated)]
-    let channel_mode_dropdown = gtk4::ComboBoxText::new();
-    for mode in crate::model::clip::AudioChannelMode::ALL {
-        #[allow(deprecated)]
-        channel_mode_dropdown.append(Some(mode.as_str()), mode.label());
-    }
-    #[allow(deprecated)]
-    channel_mode_dropdown.set_active_id(Some("stereo"));
-    audio_inner.append(&channel_mode_dropdown);
+    let channel_mode_dropdown = IdDropDown::new();
+    let channel_mode_entries: Vec<(String, String)> = crate::model::clip::AudioChannelMode::ALL
+        .iter()
+        .map(|mode| (mode.as_str().to_string(), mode.label().to_string()))
+        .collect();
+    channel_mode_dropdown.set_entries(&channel_mode_entries, "stereo");
+    audio_inner.append(&channel_mode_dropdown.dropdown);
 
     // ── Pitch sub-section (inside Audio) ───────────────────────────────────
     let pitch_expander = Expander::new(Some("Pitch"));
@@ -5344,34 +5351,31 @@ pub fn build_inspector(
 
     // Audio Role dropdown
     row_label(&duck_inner, "Audio Role");
-    #[allow(deprecated)]
-    let role_dropdown = gtk4::ComboBoxText::new();
-    for role in crate::model::track::AudioRole::ALL {
-        #[allow(deprecated)]
-        role_dropdown.append(Some(role.as_str()), role.label());
-    }
-    #[allow(deprecated)]
-    role_dropdown.set_active_id(Some("none"));
-    duck_inner.append(&role_dropdown);
+    let role_dropdown = IdDropDown::new();
+    let role_entries: Vec<(String, String)> = crate::model::track::AudioRole::ALL
+        .iter()
+        .map(|role| (role.as_str().to_string(), role.label().to_string()))
+        .collect();
+    role_dropdown.set_entries(&role_entries, "none");
+    duck_inner.append(&role_dropdown.dropdown);
 
     // Surround Position dropdown — controls per-track channel routing in
     // surround (5.1 / 7.1) exports. `Auto` resolves the destination from
     // `audio_role` (Dialogue → Center, Music → Front L/R, etc.). Has no
     // effect on stereo exports.
     row_label(&duck_inner, "Surround Position");
-    #[allow(deprecated)]
-    let surround_position_dropdown = gtk4::ComboBoxText::new();
-    for pos in crate::model::track::SurroundPositionOverride::ALL {
-        #[allow(deprecated)]
-        surround_position_dropdown.append(Some(pos.as_str()), pos.label());
-    }
-    #[allow(deprecated)]
-    surround_position_dropdown.set_active_id(Some("auto"));
-    surround_position_dropdown.set_tooltip_text(Some(
+    let surround_position_dropdown = IdDropDown::new();
+    let surround_position_entries: Vec<(String, String)> =
+        crate::model::track::SurroundPositionOverride::ALL
+            .iter()
+            .map(|pos| (pos.as_str().to_string(), pos.label().to_string()))
+            .collect();
+    surround_position_dropdown.set_entries(&surround_position_entries, "auto");
+    surround_position_dropdown.dropdown.set_tooltip_text(Some(
         "Per-track destination for the multichannel upmix when exporting in 5.1 / 7.1 surround. \
          Auto picks a sensible default based on Audio Role. Ignored for stereo exports.",
     ));
-    duck_inner.append(&surround_position_dropdown);
+    duck_inner.append(&surround_position_dropdown.dropdown);
 
     let duck_check = gtk4::CheckButton::with_label("Duck this track when dialogue is present");
     duck_check.set_active(false);
@@ -7567,13 +7571,11 @@ pub fn build_inspector(
         let selected_clip_id = selected_clip_id.clone();
         let updating = updating.clone();
         let on_clip_changed = on_clip_changed.clone();
-        #[allow(deprecated)]
-        source_audio_stream_dropdown.connect_changed(move |combo| {
+        source_audio_stream_dropdown.connect_selected(move |combo| {
             if *updating.borrow() {
                 return;
             }
             let id = selected_clip_id.borrow().clone();
-            #[allow(deprecated)]
             if let (Some(ref clip_id), Some(stream_id)) = (id, combo.active_id()) {
                 if let Ok(stream_index) = stream_id.parse::<u32>() {
                     {
@@ -7599,13 +7601,11 @@ pub fn build_inspector(
         let selected_clip_id = selected_clip_id.clone();
         let updating = updating.clone();
         let on_clip_changed = on_clip_changed.clone();
-        #[allow(deprecated)]
-        source_audio_pair_dropdown.connect_changed(move |combo| {
+        source_audio_pair_dropdown.connect_selected(move |combo| {
             if *updating.borrow() {
                 return;
             }
             let id = selected_clip_id.borrow().clone();
-            #[allow(deprecated)]
             if let (Some(ref clip_id), Some(offset_id)) = (id, combo.active_id()) {
                 if let Ok(offset) = offset_id.parse::<u32>() {
                     {
@@ -7626,13 +7626,11 @@ pub fn build_inspector(
         let selected_clip_id = selected_clip_id.clone();
         let updating = updating.clone();
         let on_clip_changed = on_clip_changed.clone();
-        #[allow(deprecated)]
-        channel_mode_dropdown.connect_changed(move |combo| {
+        channel_mode_dropdown.connect_selected(move |combo| {
             if *updating.borrow() {
                 return;
             }
             let id = selected_clip_id.borrow().clone();
-            #[allow(deprecated)]
             if let (Some(ref clip_id), Some(mode_id)) = (id, combo.active_id()) {
                 {
                     let mut proj = project.borrow_mut();
@@ -7700,13 +7698,11 @@ pub fn build_inspector(
         let selected_clip_id = selected_clip_id.clone();
         let updating = updating.clone();
         let on_role_changed = on_role_changed.clone();
-        #[allow(deprecated)]
-        role_dropdown.connect_changed(move |combo| {
+        role_dropdown.connect_selected(move |combo| {
             if *updating.borrow() {
                 return;
             }
             let id = selected_clip_id.borrow().clone();
-            #[allow(deprecated)]
             if let (Some(ref clip_id), Some(role_id)) = (id, combo.active_id()) {
                 on_role_changed(clip_id, &role_id);
             }
@@ -7718,13 +7714,11 @@ pub fn build_inspector(
         let selected_clip_id = selected_clip_id.clone();
         let updating = updating.clone();
         let on_surround_position_changed = on_surround_position_changed.clone();
-        #[allow(deprecated)]
-        surround_position_dropdown.connect_changed(move |combo| {
+        surround_position_dropdown.connect_selected(move |combo| {
             if *updating.borrow() {
                 return;
             }
             let id = selected_clip_id.borrow().clone();
-            #[allow(deprecated)]
             if let (Some(ref clip_id), Some(pos_id)) = (id, combo.active_id()) {
                 on_surround_position_changed(clip_id, &pos_id);
             }
@@ -9645,7 +9639,6 @@ pub fn build_inspector(
                 let kind = kind_override.unwrap_or_else(|| {
                     transition_kind_dropdown_for_apply
                         .active_id()
-                        .map(|id| id.to_string())
                         .unwrap_or_default()
                 });
                 let alignment = transition_alignment_dropdown_for_apply
@@ -9722,7 +9715,7 @@ pub fn build_inspector(
 
         {
             let apply_transition_edit = apply_transition_edit.clone();
-            transition_kind_dropdown.connect_changed(move |_| {
+            transition_kind_dropdown.connect_selected(move |_| {
                 apply_transition_edit(None);
             });
         }
@@ -9734,7 +9727,7 @@ pub fn build_inspector(
         }
         {
             let apply_transition_edit = apply_transition_edit.clone();
-            transition_alignment_dropdown.connect_changed(move |_| {
+            transition_alignment_dropdown.connect_selected(move |_| {
                 apply_transition_edit(None);
             });
         }
@@ -11692,30 +11685,20 @@ fn normalize_audio_source_channel_offset(channel_count: u32, requested: u32) -> 
 
 fn set_audio_source_routing_controls_empty(
     summary_label: &Label,
-    #[allow(deprecated)] stream_dropdown: &gtk4::ComboBoxText,
-    #[allow(deprecated)] pair_dropdown: &gtk4::ComboBoxText,
+    stream_dropdown: &IdDropDown,
+    pair_dropdown: &IdDropDown,
 ) {
     summary_label.set_text("Select a clip to inspect source audio routing.");
-    #[allow(deprecated)]
-    stream_dropdown.remove_all();
-    #[allow(deprecated)]
-    stream_dropdown.append(Some("0"), "Stream 1");
-    #[allow(deprecated)]
-    stream_dropdown.set_active_id(Some("0"));
-    stream_dropdown.set_sensitive(false);
-    #[allow(deprecated)]
-    pair_dropdown.remove_all();
-    #[allow(deprecated)]
-    pair_dropdown.append(Some("0"), "Channels 1-2");
-    #[allow(deprecated)]
-    pair_dropdown.set_active_id(Some("0"));
-    pair_dropdown.set_sensitive(false);
+    stream_dropdown.set_entries(&[("0".to_string(), "Stream 1".to_string())], "0");
+    stream_dropdown.dropdown.set_sensitive(false);
+    pair_dropdown.set_entries(&[("0".to_string(), "Channels 1-2".to_string())], "0");
+    pair_dropdown.dropdown.set_sensitive(false);
 }
 
 fn sync_audio_source_routing_controls(
     summary_label: &Label,
-    #[allow(deprecated)] stream_dropdown: &gtk4::ComboBoxText,
-    #[allow(deprecated)] pair_dropdown: &gtk4::ComboBoxText,
+    stream_dropdown: &IdDropDown,
+    pair_dropdown: &IdDropDown,
     clip: &crate::model::clip::Clip,
 ) {
     let selected_stream_index = clip.clamped_audio_source_stream_index();
@@ -11729,32 +11712,28 @@ fn sync_audio_source_routing_controls(
         .unwrap_or_else(|| "Source audio metadata unavailable; assuming first stereo pair.".into());
     summary_label.set_text(&stream_summary);
 
-    #[allow(deprecated)]
-    stream_dropdown.remove_all();
-    if clip.audio_source_streams.is_empty() {
-        #[allow(deprecated)]
-        stream_dropdown.append(Some("0"), "Stream 1");
+    let stream_entries: Vec<(String, String)> = if clip.audio_source_streams.is_empty() {
+        vec![("0".to_string(), "Stream 1".to_string())]
     } else {
-        for stream in &clip.audio_source_streams {
-            #[allow(deprecated)]
-            stream_dropdown.append(Some(&stream.stream_index.to_string()), &stream.label());
-        }
-    }
-    #[allow(deprecated)]
-    stream_dropdown.set_active_id(Some(&selected_stream_index.to_string()));
-    stream_dropdown.set_sensitive(!clip.audio_source_streams.is_empty());
+        clip.audio_source_streams
+            .iter()
+            .map(|stream| (stream.stream_index.to_string(), stream.label()))
+            .collect()
+    };
+    stream_dropdown.set_entries(&stream_entries, &selected_stream_index.to_string());
+    stream_dropdown
+        .dropdown
+        .set_sensitive(!clip.audio_source_streams.is_empty());
 
-    #[allow(deprecated)]
-    pair_dropdown.remove_all();
-    for (offset, label) in
+    let pair_entries: Vec<(String, String)> =
         audio_source_channel_offset_options(clip.selected_audio_stream_channel_count())
-    {
-        #[allow(deprecated)]
-        pair_dropdown.append(Some(&offset.to_string()), &label);
-    }
-    #[allow(deprecated)]
-    pair_dropdown.set_active_id(Some(&selected_channel_offset.to_string()));
-    pair_dropdown.set_sensitive(!clip.audio_source_streams.is_empty());
+            .into_iter()
+            .map(|(offset, label)| (offset.to_string(), label))
+            .collect();
+    pair_dropdown.set_entries(&pair_entries, &selected_channel_offset.to_string());
+    pair_dropdown
+        .dropdown
+        .set_sensitive(!clip.audio_source_streams.is_empty());
 }
 
 /// Restore an expander's expanded state from the persisted section map.
