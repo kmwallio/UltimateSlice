@@ -18,11 +18,31 @@ use crate::media::export::LoudnessReport;
 use crate::ui_state::{loudness_target_preset_to_lufs, PreferencesState};
 use gtk4::prelude::*;
 use gtk4::{
-    self as gtk, Box as GBox, Button, ComboBoxText, Grid, Label, Orientation, Popover, SpinButton,
+    self as gtk, Box as GBox, Button, DropDown, Grid, Label, Orientation, Popover, SpinButton,
     Spinner, ToggleButton,
 };
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+
+/// Loudness target presets as (persisted string id, display label). The
+/// string id — not the row index — is what round-trips through
+/// `PreferencesState::loudness_target_preset`.
+const LOUDNESS_PRESET_OPTS: &[(&str, &str)] = &[
+    ("ebu_r128", "EBU R128 (−23 LUFS)"),
+    ("atsc_a85", "ATSC A/85 (−24 LUFS)"),
+    ("netflix", "Netflix (−27 LUFS)"),
+    ("apple_pod", "Apple Podcasts (−16 LUFS)"),
+    ("streaming", "Streaming (−14 LUFS)"),
+    ("custom", "Custom"),
+];
+
+/// Persisted id of the currently-selected loudness preset.
+fn loudness_preset_id(dd: &DropDown) -> String {
+    LOUDNESS_PRESET_OPTS
+        .get(dd.selected() as usize)
+        .map(|(id, _)| (*id).to_string())
+        .unwrap_or_else(|| "ebu_r128".to_string())
+}
 
 /// Widgets + shared state for the Loudness popover. Construction lives in
 /// `build_loudness_popover`; use the returned struct's methods to push state
@@ -33,7 +53,7 @@ pub struct LoudnessPopoverView {
     pub analyze_btn: Button,
     pub normalize_btn: Button,
     pub reset_gain_btn: Button,
-    pub preset_combo: ComboBoxText,
+    pub preset_combo: DropDown,
     pub custom_spin: SpinButton,
     /// Live spinner widget in the popover header — starts when the
     /// background analyze thread is spawned and stops when the result
@@ -124,20 +144,13 @@ impl LoudnessPopoverView {
 
     /// Resolve the currently-selected preset + custom spin to a LUFS value.
     pub fn current_target_lufs(&self) -> f64 {
-        let id = self
-            .preset_combo
-            .active_id()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "ebu_r128".to_string());
+        let id = loudness_preset_id(&self.preset_combo);
         loudness_target_preset_to_lufs(&id).unwrap_or_else(|| self.custom_spin.value())
     }
 
     /// Resolve the currently-selected preset id (for persistence).
     pub fn current_preset_id(&self) -> String {
-        self.preset_combo
-            .active_id()
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "ebu_r128".to_string())
+        loudness_preset_id(&self.preset_combo)
     }
 
     /// Set the popover into "analyzing" state — disable Analyze, start
@@ -271,14 +284,18 @@ pub fn build_loudness_popover(
     let target_row = GBox::new(Orientation::Horizontal, 8);
     let target_label = Label::new(Some("Target"));
     target_row.append(&target_label);
-    let preset_combo = ComboBoxText::new();
-    preset_combo.append(Some("ebu_r128"), "EBU R128 (−23 LUFS)");
-    preset_combo.append(Some("atsc_a85"), "ATSC A/85 (−24 LUFS)");
-    preset_combo.append(Some("netflix"), "Netflix (−27 LUFS)");
-    preset_combo.append(Some("apple_pod"), "Apple Podcasts (−16 LUFS)");
-    preset_combo.append(Some("streaming"), "Streaming (−14 LUFS)");
-    preset_combo.append(Some("custom"), "Custom");
-    preset_combo.set_active_id(Some(&preferences.loudness_target_preset));
+    let preset_combo = DropDown::from_strings(
+        &LOUDNESS_PRESET_OPTS
+            .iter()
+            .map(|(_, label)| *label)
+            .collect::<Vec<_>>(),
+    );
+    preset_combo.set_selected(
+        LOUDNESS_PRESET_OPTS
+            .iter()
+            .position(|(id, _)| *id == preferences.loudness_target_preset)
+            .unwrap_or(0) as u32,
+    );
     target_row.append(&preset_combo);
     let custom_spin = SpinButton::with_range(-30.0, 0.0, 0.1);
     custom_spin.set_value(preferences.loudness_target_lufs);
@@ -354,11 +371,8 @@ pub fn build_loudness_popover(
     // canonical LUFS value into the spin, and refresh the delta/warning.
     {
         let view_cb = view.clone();
-        view.preset_combo.connect_changed(move |combo| {
-            let id = combo
-                .active_id()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| "ebu_r128".to_string());
+        view.preset_combo.connect_selected_notify(move |combo| {
+            let id = loudness_preset_id(combo);
             view_cb.custom_spin.set_sensitive(id == "custom");
             if let Some(lufs) = loudness_target_preset_to_lufs(&id) {
                 view_cb.custom_spin.set_value(lufs);
