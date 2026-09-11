@@ -10603,17 +10603,17 @@ pub fn build_window(
                 let mic_label = gtk4::Label::new(Some("Microphone"));
                 mic_label.set_halign(gtk4::Align::Start);
                 body.append(&mic_label);
-                let mic_dropdown = gtk4::ComboBoxText::new();
-                #[allow(deprecated)]
-                mic_dropdown.append(Some("default"), "System Default");
+                let mic_dropdown = crate::ui::id_dropdown::IdDropDown::new();
                 let devices = crate::media::voiceover::list_audio_input_devices();
-                for (i, dev) in devices.iter().enumerate() {
-                    #[allow(deprecated)]
-                    mic_dropdown.append(Some(&format!("dev_{i}")), &dev.display_name);
-                }
-                #[allow(deprecated)]
-                mic_dropdown.set_active_id(Some("default"));
-                body.append(&mic_dropdown);
+                let mut mic_entries = vec![("default".to_string(), "System Default".to_string())];
+                mic_entries.extend(
+                    devices
+                        .iter()
+                        .enumerate()
+                        .map(|(i, dev)| (format!("dev_{i}"), dev.display_name.clone())),
+                );
+                mic_dropdown.set_entries(&mic_entries, "default");
+                body.append(&mic_dropdown.dropdown);
 
                 // Mute playback checkbox
                 let mute_check =
@@ -10687,7 +10687,7 @@ pub fn build_window(
 
                     // Read settings from dialog
                     #[allow(deprecated)]
-                    let mic_id = mic_dropdown.active_id().map(|s| s.to_string());
+                    let mic_id = mic_dropdown.active_id();
                     let mute_playback = mute_check.is_active();
                     let record_mono = mono_check.is_active();
 
@@ -11137,11 +11137,16 @@ pub fn build_window(
     source_keyword_controls.set_margin_top(6);
 
     let source_keyword_fields_row = gtk::Box::new(Orientation::Horizontal, 4);
-    let source_keyword_combo = gtk::ComboBoxText::new();
-    source_keyword_combo.append(Some(SOURCE_KEYWORD_NEW_ID), "New keyword range");
-    source_keyword_combo.set_active_id(Some(SOURCE_KEYWORD_NEW_ID));
-    source_keyword_combo.set_hexpand(true);
-    source_keyword_fields_row.append(&source_keyword_combo);
+    let source_keyword_combo = crate::ui::id_dropdown::IdDropDown::new();
+    source_keyword_combo.set_entries(
+        &[(
+            SOURCE_KEYWORD_NEW_ID.to_string(),
+            "New keyword range".to_string(),
+        )],
+        SOURCE_KEYWORD_NEW_ID,
+    );
+    source_keyword_combo.dropdown.set_hexpand(true);
+    source_keyword_fields_row.append(&source_keyword_combo.dropdown);
 
     let source_keyword_entry = gtk::Entry::new();
     source_keyword_entry.set_hexpand(true);
@@ -11254,14 +11259,13 @@ pub fn build_window(
                     .map(|item| item.keyword_ranges.clone())
                     .unwrap_or_default()
             };
-            source_keyword_combo.remove_all();
-            source_keyword_combo.append(Some(SOURCE_KEYWORD_NEW_ID), "New keyword range");
+            let mut keyword_entries = vec![(
+                SOURCE_KEYWORD_NEW_ID.to_string(),
+                "New keyword range".to_string(),
+            )];
             let mut active_id = SOURCE_KEYWORD_NEW_ID.to_string();
             for range in &ranges {
-                source_keyword_combo.append(
-                    Some(range.id.as_str()),
-                    format_source_keyword_range(range).as_str(),
-                );
+                keyword_entries.push((range.id.clone(), format_source_keyword_range(range)));
                 if selected_id.as_deref() == Some(range.id.as_str()) {
                     active_id = range.id.clone();
                 }
@@ -11269,7 +11273,7 @@ pub fn build_window(
             if active_id == SOURCE_KEYWORD_NEW_ID {
                 *selected_source_keyword_id.borrow_mut() = None;
             }
-            source_keyword_combo.set_active_id(Some(&active_id));
+            source_keyword_combo.set_entries(&keyword_entries, &active_id);
             refresh_source_keyword_actions();
         })
     };
@@ -11279,12 +11283,11 @@ pub fn build_window(
         let selected_source_keyword_id = selected_source_keyword_id.clone();
         let source_keyword_entry = source_keyword_entry.clone();
         let refresh_source_keyword_actions = refresh_source_keyword_actions.clone();
-        source_keyword_combo.connect_changed(move |combo| {
+        source_keyword_combo.connect_selected(move |combo| {
             let path = source_marks.borrow().path.clone();
-            let selected_id = combo.active_id().and_then(|id| {
-                let id = id.to_string();
-                (id != SOURCE_KEYWORD_NEW_ID).then_some(id)
-            });
+            let selected_id = combo
+                .active_id()
+                .and_then(|id| (id != SOURCE_KEYWORD_NEW_ID).then_some(id));
             *selected_source_keyword_id.borrow_mut() = selected_id.clone();
             let selected_label = {
                 let lib = library.borrow();
