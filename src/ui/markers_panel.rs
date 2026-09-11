@@ -17,6 +17,36 @@ use gtk4::{self as gtk, Box as GBox, Button, Label, ListBox, Orientation, Scroll
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// Color a marker swatch button's label via a shared CSS class.
+///
+/// One display-level provider is registered per *distinct* color for the
+/// app's lifetime (presets plus any custom marker colors — a small, bounded
+/// set). Replaces the old per-row `CssProvider` + `style_context()` pattern,
+/// which created a provider for every row on every panel rebuild and used
+/// deprecated GTK APIs.
+fn apply_marker_color_class(widget: &impl IsA<gtk::Widget>, r: u8, g: u8, b: u8) {
+    thread_local! {
+        static REGISTERED: RefCell<std::collections::HashSet<String>> =
+            RefCell::new(std::collections::HashSet::new());
+    }
+    let class = format!("marker-color-{r:02x}{g:02x}{b:02x}");
+    REGISTERED.with(|reg| {
+        let mut reg = reg.borrow_mut();
+        if reg.insert(class.clone()) {
+            let provider = gtk::CssProvider::new();
+            provider.load_from_string(&format!("button.{class} {{ color: rgb({r},{g},{b}); }}"));
+            if let Some(display) = gtk::gdk::Display::default() {
+                gtk::style_context_add_provider_for_display(
+                    &display,
+                    &provider,
+                    gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+                );
+            }
+        }
+    });
+    widget.add_css_class(&class);
+}
+
 /// Preset marker color palette (RGBA packed as 0xRRGGBBAA).
 const MARKER_COLOR_PRESETS: &[(u32, &str)] = &[
     (0xFF8C00FF, "Orange"),
@@ -78,17 +108,12 @@ impl MarkersPanelView {
         color_btn.add_css_class("flat");
         color_btn.set_size_request(22, 22);
         color_btn.set_tooltip_text(Some("Change marker color"));
-        let css = format!(
-            "button {{ color: rgb({},{},{}); }}",
+        apply_marker_color_class(
+            &color_btn,
             (r * 255.0) as u8,
             (g * 255.0) as u8,
             (b * 255.0) as u8,
         );
-        let provider = gtk::CssProvider::new();
-        provider.load_from_string(&css);
-        color_btn
-            .style_context()
-            .add_provider(&provider, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
         hbox.append(&color_btn);
 
         // Wire color button → popover with preset swatches
@@ -112,17 +137,12 @@ impl MarkersPanelView {
                     swatch.set_size_request(22, 22);
                     swatch.set_tooltip_text(Some(label));
                     let (sr, sg, sb, _) = unpack_rgba(rgba);
-                    let swatch_css = format!(
-                        "button {{ color: rgb({},{},{}); }}",
+                    apply_marker_color_class(
+                        &swatch,
                         (sr * 255.0) as u8,
                         (sg * 255.0) as u8,
                         (sb * 255.0) as u8,
                     );
-                    let sp = gtk::CssProvider::new();
-                    sp.load_from_string(&swatch_css);
-                    swatch
-                        .style_context()
-                        .add_provider(&sp, gtk::STYLE_PROVIDER_PRIORITY_APPLICATION);
                     let mid = marker_id.clone();
                     let proj = project.clone();
                     let ts = timeline_state.clone();

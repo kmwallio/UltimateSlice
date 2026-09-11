@@ -201,7 +201,13 @@ impl MixerPanelView {
     }
 
     /// Refresh VU meters from current peak data. Called from the 33ms poll tick.
+    /// `draw_vu_meter` is a pure function of the peak values, so every meter
+    /// repaint is skipped when its peaks are unchanged since the last draw —
+    /// and the whole pass is skipped while the panel isn't shown.
     pub fn update_meters(&self) {
+        if !self.strips_box.is_mapped() {
+            return;
+        }
         let ts = self.timeline_state.borrow();
         let proj = self.project.borrow();
         for strip in self.strips.borrow().iter() {
@@ -210,8 +216,11 @@ impl MixerPanelView {
                 .get(strip.track_index)
                 .copied()
                 .unwrap_or([-60.0, -60.0]);
+            let prev = strip.peak_cell.get();
             strip.peak_cell.set(peaks);
-            strip.vu_meter.queue_draw();
+            if prev != peaks {
+                strip.vu_meter.queue_draw();
+            }
         }
         // Bus meters — aggregate peak across all tracks in the bus's role.
         for bs in self.bus_strips.borrow().iter() {
@@ -228,8 +237,11 @@ impl MixerPanelView {
                         .unwrap_or([-60.0, -60.0]);
                     [acc[0].max(p[0]), acc[1].max(p[1])]
                 });
+            let prev = bs.peak_cell.get();
             bs.peak_cell.set(bus_peaks);
-            bs.vu_meter.queue_draw();
+            if prev != bus_peaks {
+                bs.vu_meter.queue_draw();
+            }
         }
         // Master meter — use the main program monitor peak data.
         // TimelineState doesn't expose master peaks directly; the mixer will
@@ -240,8 +252,11 @@ impl MixerPanelView {
             .fold([-60.0_f64, -60.0_f64], |acc, p| {
                 [acc[0].max(p[0]), acc[1].max(p[1])]
             });
+        let prev = self.master_peak_cell.get();
         self.master_peak_cell.set(master_peaks);
-        self.master_meter.queue_draw();
+        if prev != master_peaks {
+            self.master_meter.queue_draw();
+        }
     }
 
     fn build_channel_strip(&self, track: &Track, track_index: usize) -> ChannelStrip {

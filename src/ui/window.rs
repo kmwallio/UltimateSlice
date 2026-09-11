@@ -15012,6 +15012,10 @@ pub fn build_window(
         let last_draw_ns_c = last_draw_ns.clone();
         let vu = vu_meter.clone();
         let vu_pc = vu_peak_cell.clone();
+        // Last peaks actually drawn — lets the tick skip the 30 Hz VU repaint
+        // while the values are unchanged (idle/paused). NaN forces the first
+        // tick to draw.
+        let vu_last_drawn = Rc::new(Cell::new([f64::NAN, f64::NAN]));
         let scopes_rev = scopes_revealer.clone();
         let scopes_st = scopes_state.clone();
         let speed_lbl = speed_label.clone();
@@ -15180,9 +15184,14 @@ pub fn build_window(
                 picture_a_poll.queue_draw();
                 picture_b_poll.queue_draw();
             }
-            // Update VU meter with current audio peak levels.
+            // Update VU meter with current audio peak levels. draw_vu_meter
+            // is a pure function of the peaks, so skip the repaint whenever
+            // they are unchanged since the last draw.
             vu_pc.set(peaks);
-            vu.queue_draw();
+            if vu_last_drawn.get() != peaks {
+                vu_last_drawn.set(peaks);
+                vu.queue_draw();
+            }
             ts.borrow_mut().track_audio_peak_db = track_peaks;
             // Update mixer panel VU meters.
             if let Some(ref mx) = *mixer_panel_poll.borrow() {
