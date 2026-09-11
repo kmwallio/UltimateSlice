@@ -19,7 +19,7 @@ pub enum ScopeMode {
 }
 
 pub struct ColorScopesState {
-    pub frame: Option<ScopeFrame>,
+    pub frame: Option<std::sync::Arc<ScopeFrame>>,
     pub mode: ScopeMode,
     drawing_area: DrawingArea,
 }
@@ -128,10 +128,10 @@ pub fn build_color_scopes() -> (gtk::Widget, Rc<RefCell<ColorScopesState>>) {
 
             if let Some(ref frame) = st.frame {
                 match st.mode {
-                    ScopeMode::Waveform => draw_waveform(cr, frame, w, h),
-                    ScopeMode::Histogram => draw_histogram(cr, frame, w, h),
-                    ScopeMode::RgbParade => draw_rgb_parade(cr, frame, w, h),
-                    ScopeMode::Vectorscope => draw_vectorscope(cr, frame, w, h),
+                    ScopeMode::Waveform => draw_waveform(cr, frame.as_ref(), w, h),
+                    ScopeMode::Histogram => draw_histogram(cr, frame.as_ref(), w, h),
+                    ScopeMode::RgbParade => draw_rgb_parade(cr, frame.as_ref(), w, h),
+                    ScopeMode::Vectorscope => draw_vectorscope(cr, frame.as_ref(), w, h),
                 }
             } else {
                 // No frame yet — draw label
@@ -146,7 +146,10 @@ pub fn build_color_scopes() -> (gtk::Widget, Rc<RefCell<ColorScopesState>>) {
 }
 
 /// Push a new frame into the scopes widget and trigger a redraw.
-pub fn update_scope_frame(state: &Rc<RefCell<ColorScopesState>>, frame: ScopeFrame) {
+pub fn update_scope_frame(
+    state: &Rc<RefCell<ColorScopesState>>,
+    frame: std::sync::Arc<ScopeFrame>,
+) {
     let mut st = state.borrow_mut();
     st.frame = Some(frame);
     st.queue_draw();

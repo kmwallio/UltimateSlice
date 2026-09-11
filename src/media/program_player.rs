@@ -440,7 +440,7 @@ struct CachedPlayheadFrame {
     frame_pos_ns: u64,
     signature: u64,
     scope_seq: u64,
-    frame: ScopeFrame,
+    frame: Arc<ScopeFrame>,
 }
 
 #[derive(Clone, Copy)]
@@ -1916,9 +1916,9 @@ pub struct ProgramPlayer {
     pub audio_track_peak_db: Vec<[f64; 2]>,
     jkl_rate: f64,
     /// Latest RGBA frame captured from the scope appsink.
-    latest_scope_frame: Arc<Mutex<Option<ScopeFrame>>>,
+    latest_scope_frame: Arc<Mutex<Option<Arc<ScopeFrame>>>>,
     /// Latest RGBA frame captured from compositor src (before preview downscale).
-    latest_compositor_frame: Arc<Mutex<Option<ScopeFrame>>>,
+    latest_compositor_frame: Arc<Mutex<Option<Arc<ScopeFrame>>>>,
     /// Captured overlay frames for blend-mode clips.  Keyed by clip_idx.
     /// The blend probe on compositor output reads these to apply per-pixel
     /// blend math against the real base layers.
@@ -2102,8 +2102,9 @@ impl ProgramPlayer {
         let display_sink_ref = video_sink_inner.clone();
 
         // Shared frame store for colour scope analysis.
-        let latest_scope_frame: Arc<Mutex<Option<ScopeFrame>>> = Arc::new(Mutex::new(None));
-        let latest_compositor_frame: Arc<Mutex<Option<ScopeFrame>>> = Arc::new(Mutex::new(None));
+        let latest_scope_frame: Arc<Mutex<Option<Arc<ScopeFrame>>>> = Arc::new(Mutex::new(None));
+        let latest_compositor_frame: Arc<Mutex<Option<Arc<ScopeFrame>>>> =
+            Arc::new(Mutex::new(None));
         let blend_overlays: Arc<Mutex<HashMap<usize, BlendOverlay>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let adjustment_overlays: Arc<Mutex<Vec<AdjustmentOverlay>>> =
@@ -2176,11 +2177,11 @@ impl ProgramPlayer {
                                     );
                                     if map.size() >= 320 * 180 * 4 {
                                         if let Ok(mut frame) = lsf_preroll.lock() {
-                                            *frame = Some(ScopeFrame {
+                                            *frame = Some(Arc::new(ScopeFrame {
                                                 data: map.as_slice().to_vec(),
                                                 width: 320,
                                                 height: 180,
-                                            });
+                                            }));
                                             seq_preroll.fetch_add(1, Ordering::Relaxed);
                                         }
                                     }
@@ -2209,11 +2210,11 @@ impl ProgramPlayer {
                                     );
                                     if map.size() >= 320 * 180 * 4 {
                                         if let Ok(mut frame) = lsf_sample.lock() {
-                                            *frame = Some(ScopeFrame {
+                                            *frame = Some(Arc::new(ScopeFrame {
                                                 data: map.as_slice().to_vec(),
                                                 width: 320,
                                                 height: 180,
-                                            });
+                                            }));
                                             seq_sample.fetch_add(1, Ordering::Relaxed);
                                         }
                                     }
@@ -2547,11 +2548,11 @@ impl ProgramPlayer {
                         if w > 0 && h > 0 {
                             let data = map.as_slice().to_vec();
                             if let Ok(mut frame) = lcf.lock() {
-                                *frame = Some(ScopeFrame {
+                                *frame = Some(Arc::new(ScopeFrame {
                                     data,
                                     width: w,
                                     height: h,
-                                });
+                                }));
                             }
                         }
                     }
@@ -3804,7 +3805,7 @@ impl ProgramPlayer {
         (1.0, 0.0)
     }
 
-    pub fn try_pull_scope_frame(&self) -> Option<ScopeFrame> {
+    pub fn try_pull_scope_frame(&self) -> Option<Arc<ScopeFrame>> {
         if let Ok(frame) = self.latest_scope_frame.lock() {
             if let Some(fresh) = frame.clone() {
                 return Some(fresh);
@@ -3894,6 +3895,9 @@ impl ProgramPlayer {
                 .lock()
                 .ok()
                 .and_then(|f| f.clone())
+                // Rare interactive capture path — hand out an owned deep
+                // copy so callers can keep the frame past the next update.
+                .map(|frame| ScopeFrame::clone(&frame))
                 .ok_or_else(|| anyhow!("no compositor frame available yet"))
         })();
         self.scope_enabled
@@ -4002,7 +4006,7 @@ impl ProgramPlayer {
         let frame = self
             .try_pull_scope_frame()
             .ok_or_else(|| anyhow!("no displayed frame available yet"))?;
-        self.write_frame_ppm(path, &frame)
+        self.write_frame_ppm(path, frame.as_ref())
     }
 
     fn write_compositor_frame_ppm(&self, path: &str) -> Result<()> {
@@ -4012,7 +4016,7 @@ impl ProgramPlayer {
             .ok()
             .and_then(|f| f.clone())
             .ok_or_else(|| anyhow!("no compositor frame available yet"))?;
-        self.write_frame_ppm(path, &frame)
+        self.write_frame_ppm(path, frame.as_ref())
     }
 
     fn write_frame_ppm(&self, path: &str, frame: &ScopeFrame) -> Result<()> {
@@ -18225,7 +18229,7 @@ mod tests {
             frame_pos_ns,
             signature,
             scope_seq,
-            frame: make_scope_frame(seed),
+            frame: Arc::new(make_scope_frame(seed)),
         }
     }
 

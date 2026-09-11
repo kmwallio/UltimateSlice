@@ -310,7 +310,7 @@ pub fn build_program_monitor(
     Rc<dyn Fn(bool)>,
     Rc<dyn Fn()>,
     Rc<dyn Fn(AspectMaskPreset)>,
-    Rc<dyn Fn(ScopeFrame)>,
+    Rc<dyn Fn(std::sync::Arc<ScopeFrame>)>,
     Rc<dyn Fn(Vec<SubtitleLine>)>,
     // A/B setters — see Program Monitor polish section in ROADMAP.
     Rc<dyn Fn(bool)>,                                       // ab_enabled_setter
@@ -692,7 +692,8 @@ pub fn build_program_monitor(
 
     // Shared scope frame for false-color and zebra draw_funcs (320×180 RGBA).
     // Updated via the returned frame_updater callback each poll tick.
-    let overlay_frame: Rc<RefCell<Option<ScopeFrame>>> = Rc::new(RefCell::new(None));
+    let overlay_frame: Rc<RefCell<Option<std::sync::Arc<ScopeFrame>>>> =
+        Rc::new(RefCell::new(None));
     // Bumped on every overlay_frame update — cache key for the rasterized
     // false-color / zebra surfaces so expose/resize redraws are a blit.
     let overlay_frame_rev: Rc<Cell<u64>> = Rc::new(Cell::new(0));
@@ -1923,14 +1924,14 @@ pub fn build_program_monitor(
     };
 
     // frame_updater: push a new scope frame to the false-color and zebra overlays.
-    let frame_updater: Rc<dyn Fn(ScopeFrame)> = {
+    let frame_updater: Rc<dyn Fn(std::sync::Arc<ScopeFrame>)> = {
         let fc_da = false_color_da.clone();
         let z_da = zebra_da.clone();
         let of = overlay_frame.clone();
         let of_rev = overlay_frame_rev.clone();
         let fc_vis = false_color_visible.clone();
         let z_vis = zebra_visible.clone();
-        Rc::new(move |frame: ScopeFrame| {
+        Rc::new(move |frame: std::sync::Arc<ScopeFrame>| {
             *of.borrow_mut() = Some(frame);
             of_rev.set(of_rev.get().wrapping_add(1));
             if fc_vis.get() {

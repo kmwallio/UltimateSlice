@@ -22111,7 +22111,6 @@ pub fn build_window(
 
 // ── MCP command handler (runs on GTK main thread) ────────────────────────────
 
-
 /// Walk a `HeaderBar` and register every `Button` / `ToggleButton` that has a
 /// visible label as a palette command. Shortcut is extracted from trailing
 /// `(Ctrl+X)` / `(Alt+…)` etc. in the tooltip text; category defaults to
