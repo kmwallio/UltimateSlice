@@ -683,11 +683,14 @@ pub fn build_media_browser(
                 let mut child = flow_box_click.first_child();
                 while let Some(c) = child {
                     if let Ok(fbc) = c.clone().downcast::<FlowBoxChild>() {
-                        let alloc = fbc.allocation();
-                        if x >= alloc.x() as f64
-                            && x < (alloc.x() + alloc.width()) as f64
-                            && y >= alloc.y() as f64
-                            && y < (alloc.y() + alloc.height()) as f64
+                        let Some(bounds) = fbc.compute_bounds(&flow_box_click) else {
+                            child = c.next_sibling();
+                            continue;
+                        };
+                        if x >= bounds.x() as f64
+                            && x < (bounds.x() + bounds.width()) as f64
+                            && y >= bounds.y() as f64
+                            && y < (bounds.y() + bounds.height()) as f64
                         {
                             found = Some(fbc);
                             break;
@@ -757,11 +760,14 @@ pub fn build_media_browser(
                 let mut child = flow_box_click.first_child();
                 while let Some(c) = child {
                     if let Ok(fbc) = c.clone().downcast::<FlowBoxChild>() {
-                        let alloc = fbc.allocation();
-                        if x >= alloc.x() as f64
-                            && x < (alloc.x() + alloc.width()) as f64
-                            && y >= alloc.y() as f64
-                            && y < (alloc.y() + alloc.height()) as f64
+                        let Some(bounds) = fbc.compute_bounds(&flow_box_click) else {
+                            child = c.next_sibling();
+                            continue;
+                        };
+                        if x >= bounds.x() as f64
+                            && x < (bounds.x() + bounds.width()) as f64
+                            && y >= bounds.y() as f64
+                            && y < (bounds.y() + bounds.height()) as f64
                         {
                             found = Some(fbc);
                             break;
@@ -869,11 +875,14 @@ pub fn build_media_browser(
                 let mut child = flow_box_ctx.first_child();
                 while let Some(c) = child {
                     if let Ok(fbc) = c.clone().downcast::<FlowBoxChild>() {
-                        let alloc = fbc.allocation();
-                        if x >= alloc.x() as f64
-                            && x < (alloc.x() + alloc.width()) as f64
-                            && y >= alloc.y() as f64
-                            && y < (alloc.y() + alloc.height()) as f64
+                        let Some(bounds) = fbc.compute_bounds(&flow_box_ctx) else {
+                            child = c.next_sibling();
+                            continue;
+                        };
+                        if x >= bounds.x() as f64
+                            && x < (bounds.x() + bounds.width()) as f64
+                            && y >= bounds.y() as f64
+                            && y < (bounds.y() + bounds.height()) as f64
                         {
                             found = Some(fbc);
                             break;

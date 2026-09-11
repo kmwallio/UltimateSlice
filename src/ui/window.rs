@@ -143,10 +143,9 @@ struct OnboardingTourHandle {
 }
 
 fn fallback_onboarding_rect(overlay: &gtk::Widget) -> gtk::gdk::Rectangle {
-    let allocation = overlay.allocation();
     gtk::gdk::Rectangle::new(
-        (allocation.width() / 2).saturating_sub(1),
-        (allocation.height() / 2).saturating_sub(1),
+        (overlay.width() / 2).saturating_sub(1),
+        (overlay.height() / 2).saturating_sub(1),
         2,
         2,
     )
@@ -387,8 +386,8 @@ fn is_text_input_focused(focused: &gtk4::Widget) -> bool {
 
 fn workspace_paned_extent(paned: &Paned) -> i32 {
     match paned.orientation() {
-        Orientation::Horizontal => paned.allocation().width(),
-        Orientation::Vertical => paned.allocation().height(),
+        Orientation::Horizontal => paned.width(),
+        Orientation::Vertical => paned.height(),
         _ => 0,
     }
 }
@@ -1592,7 +1591,7 @@ fn focus_timeline_clip_instance_and_notify(
     let viewport_width = timeline_panel_cell
         .borrow()
         .as_ref()
-        .map(|widget| widget.allocation().width() as f64)
+        .map(|widget| widget.width() as f64)
         .filter(|width| *width > 0.0);
     let (seek_cb, selected_cb, selected_id) = {
         let mut st = timeline_state.borrow_mut();
@@ -15259,7 +15258,7 @@ pub fn build_window(
                 if should_draw {
                     if let Some(ref w) = *cell.borrow() {
                         if playing {
-                            let vw = w.allocated_width() as f64;
+                            let vw = w.width() as f64;
                             if vw > 0.0 {
                                 ts.borrow_mut().apply_playhead_autoscroll(vw);
                             }
@@ -18408,7 +18407,7 @@ pub fn build_window(
         let paned = timeline_paned.clone();
         let stack = bottom_panel_stack.clone();
         paned.connect_map(move |p| {
-            let total = p.allocation().height();
+            let total = p.height();
             if total > 0 && p.position() == 0 {
                 if stack.is_visible() {
                     show_timeline_bottom_panel(&stack, p);
