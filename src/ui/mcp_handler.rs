@@ -51,53 +51,122 @@ fn parse_project_health_cache_kind(
     }
 }
 
-pub(crate) fn handle_mcp_command(
-    cmd: crate::mcp::McpCommand,
-    window: &gtk::ApplicationWindow,
-    main_stack: &gtk::Stack,
-    project: &Rc<RefCell<Project>>,
-    library: &Rc<RefCell<MediaLibrary>>,
-    player: &Rc<RefCell<Player>>,
-    prog_player: &Rc<RefCell<ProgramPlayer>>,
-    timeline_state: &Rc<RefCell<TimelineState>>,
-    preferences_state: &Rc<RefCell<crate::ui_state::PreferencesState>>,
-    workspace_layouts_state: &Rc<RefCell<crate::ui_state::WorkspaceLayoutsState>>,
-    proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
-    bg_removal_cache: &Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
-    frame_interp_cache: &Rc<RefCell<crate::media::frame_interp_cache::FrameInterpCache>>,
-    render_replace_cache: &Rc<RefCell<crate::media::render_replace_cache::RenderReplaceCache>>,
-    voice_enhance_cache: &Rc<RefCell<crate::media::voice_enhance_cache::VoiceEnhanceCache>>,
-    clip_embedding_cache: &Rc<RefCell<crate::media::clip_embedding_cache::ClipEmbeddingCache>>,
-    auto_tag_cache: &Rc<RefCell<crate::media::auto_tag_cache::AutoTagCache>>,
-    stt_cache: &Rc<RefCell<crate::media::stt_cache::SttCache>>,
-    music_gen_cache: &Rc<RefCell<crate::media::music_gen::MusicGenCache>>,
-    tracking_cache: &Rc<RefCell<crate::media::tracking::TrackingCache>>,
-    tracking_job_owner_by_key: &Rc<RefCell<HashMap<String, String>>>,
-    tracking_job_key_by_clip: &Rc<RefCell<HashMap<String, String>>>,
-    on_close_preview: &Rc<dyn Fn()>,
-    source_marks: &Rc<RefCell<crate::model::media_library::SourceMarks>>,
-    on_source_selected: &Rc<dyn Fn(String, u64, Option<(u64, u64)>)>,
-    on_project_changed: &Rc<dyn Fn()>,
-    on_project_changed_full: &Rc<dyn Fn()>,
-    capture_workspace_arrangement: &Rc<dyn Fn() -> crate::ui_state::WorkspaceArrangement>,
-    apply_workspace_arrangement: &Rc<dyn Fn(crate::ui_state::WorkspaceArrangement)>,
-    workspace_layout_pending_name: &Rc<RefCell<Option<String>>>,
-    sync_workspace_layout_controls: &Rc<dyn Fn()>,
-    apply_preferences_state: &Rc<dyn Fn(crate::ui_state::PreferencesState)>,
-    apply_program_monitor_hud: &Rc<dyn Fn(bool)>,
-    apply_program_monitor_aspect_mask: &Rc<dyn Fn(crate::ui_state::AspectMaskPreset)>,
-    apply_program_monitor_timecode_burnin: &Rc<
-        dyn Fn(bool, crate::model::project::TimecodeBurninPosition),
-    >,
-    apply_program_monitor_ab_enabled: &Rc<dyn Fn(bool)>,
-    apply_program_monitor_ab_midline: &Rc<dyn Fn(f64)>,
-    apply_program_monitor_ab_reference: &Rc<dyn Fn(Option<String>)>,
-    refresh_reference_stills: &Rc<dyn Fn()>,
-    suppress_resume_on_next_reload: &Rc<Cell<bool>>,
-    clear_media_browser_on_next_reload: &Rc<Cell<bool>>,
-) {
+/// Background-work caches shared with the MCP dispatcher.
+#[derive(Clone, Copy)]
+pub(crate) struct McpCaches<'a> {
+    pub proxy_cache: &'a Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
+    pub bg_removal_cache: &'a Rc<RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
+    pub frame_interp_cache: &'a Rc<RefCell<crate::media::frame_interp_cache::FrameInterpCache>>,
+    pub render_replace_cache:
+        &'a Rc<RefCell<crate::media::render_replace_cache::RenderReplaceCache>>,
+    pub voice_enhance_cache: &'a Rc<RefCell<crate::media::voice_enhance_cache::VoiceEnhanceCache>>,
+    pub clip_embedding_cache:
+        &'a Rc<RefCell<crate::media::clip_embedding_cache::ClipEmbeddingCache>>,
+    pub auto_tag_cache: &'a Rc<RefCell<crate::media::auto_tag_cache::AutoTagCache>>,
+    pub stt_cache: &'a Rc<RefCell<crate::media::stt_cache::SttCache>>,
+    pub music_gen_cache: &'a Rc<RefCell<crate::media::music_gen::MusicGenCache>>,
+    pub tracking_cache: &'a Rc<RefCell<crate::media::tracking::TrackingCache>>,
+}
+
+/// UI callbacks the MCP dispatcher pushes results through.
+#[derive(Clone, Copy)]
+pub(crate) struct McpCallbacks<'a> {
+    pub on_close_preview: &'a Rc<dyn Fn()>,
+    pub on_source_selected: &'a Rc<dyn Fn(String, u64, Option<(u64, u64)>)>,
+    pub on_project_changed: &'a Rc<dyn Fn()>,
+    pub on_project_changed_full: &'a Rc<dyn Fn()>,
+    pub capture_workspace_arrangement: &'a Rc<dyn Fn() -> crate::ui_state::WorkspaceArrangement>,
+    pub apply_workspace_arrangement: &'a Rc<dyn Fn(crate::ui_state::WorkspaceArrangement)>,
+    pub sync_workspace_layout_controls: &'a Rc<dyn Fn()>,
+    pub apply_preferences_state: &'a Rc<dyn Fn(crate::ui_state::PreferencesState)>,
+    pub apply_program_monitor_hud: &'a Rc<dyn Fn(bool)>,
+    pub apply_program_monitor_aspect_mask: &'a Rc<dyn Fn(crate::ui_state::AspectMaskPreset)>,
+    pub apply_program_monitor_timecode_burnin:
+        &'a Rc<dyn Fn(bool, crate::model::project::TimecodeBurninPosition)>,
+    pub apply_program_monitor_ab_enabled: &'a Rc<dyn Fn(bool)>,
+    pub apply_program_monitor_ab_midline: &'a Rc<dyn Fn(f64)>,
+    pub apply_program_monitor_ab_reference: &'a Rc<dyn Fn(Option<String>)>,
+    pub refresh_reference_stills: &'a Rc<dyn Fn()>,
+}
+
+/// Everything `handle_mcp_command` needs from the main window, bundled so the
+/// dispatcher (and the per-category handlers it will be split into) take one
+/// context instead of ~40 positional parameters.
+#[derive(Clone, Copy)]
+pub(crate) struct McpCtx<'a> {
+    pub window: &'a gtk::ApplicationWindow,
+    pub main_stack: &'a gtk::Stack,
+    pub project: &'a Rc<RefCell<Project>>,
+    pub library: &'a Rc<RefCell<MediaLibrary>>,
+    pub player: &'a Rc<RefCell<Player>>,
+    pub prog_player: &'a Rc<RefCell<ProgramPlayer>>,
+    pub timeline_state: &'a Rc<RefCell<TimelineState>>,
+    pub preferences_state: &'a Rc<RefCell<crate::ui_state::PreferencesState>>,
+    pub workspace_layouts_state: &'a Rc<RefCell<crate::ui_state::WorkspaceLayoutsState>>,
+    pub caches: McpCaches<'a>,
+    pub tracking_job_owner_by_key: &'a Rc<RefCell<HashMap<String, String>>>,
+    pub tracking_job_key_by_clip: &'a Rc<RefCell<HashMap<String, String>>>,
+    pub source_marks: &'a Rc<RefCell<crate::model::media_library::SourceMarks>>,
+    pub workspace_layout_pending_name: &'a Rc<RefCell<Option<String>>>,
+    pub suppress_resume_on_next_reload: &'a Rc<Cell<bool>>,
+    pub clear_media_browser_on_next_reload: &'a Rc<Cell<bool>>,
+    pub callbacks: McpCallbacks<'a>,
+}
+
+pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
     use crate::mcp::McpCommand;
     use serde_json::{json, Value};
+
+    // Destructure into bindings with the historical parameter names so the
+    // dispatch body below stays byte-identical to the pre-McpCtx version.
+    let McpCtx {
+        window,
+        main_stack,
+        project,
+        library,
+        player,
+        prog_player,
+        timeline_state,
+        preferences_state,
+        workspace_layouts_state,
+        caches:
+            McpCaches {
+                proxy_cache,
+                bg_removal_cache,
+                frame_interp_cache,
+                render_replace_cache,
+                voice_enhance_cache,
+                clip_embedding_cache,
+                auto_tag_cache,
+                stt_cache,
+                music_gen_cache,
+                tracking_cache,
+            },
+        tracking_job_owner_by_key,
+        tracking_job_key_by_clip,
+        source_marks,
+        workspace_layout_pending_name,
+        suppress_resume_on_next_reload,
+        clear_media_browser_on_next_reload,
+        callbacks:
+            McpCallbacks {
+                on_close_preview,
+                on_source_selected,
+                on_project_changed,
+                on_project_changed_full,
+                capture_workspace_arrangement,
+                apply_workspace_arrangement,
+                sync_workspace_layout_controls,
+                apply_preferences_state,
+                apply_program_monitor_hud,
+                apply_program_monitor_aspect_mask,
+                apply_program_monitor_timecode_burnin,
+                apply_program_monitor_ab_enabled,
+                apply_program_monitor_ab_midline,
+                apply_program_monitor_ab_reference,
+                refresh_reference_stills,
+            },
+    } = ctx;
 
     let sync_library_change = || {
         {
