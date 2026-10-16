@@ -73,6 +73,7 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
   - `Off` (default): uses original source media and does not request/generate proxy files.
   - `Half Res`: generates half-resolution H.264 proxies.
   - `Quarter Res`: generates quarter-resolution H.264 proxies.
+- **Automatic proxies for large sources** (default: sources taller than 2160p): while Proxy preview mode is `Off`, sources above this height still get a proxy at the last proxy size you chose (1080p by default); smaller sources keep playing original media. Set it to `Off` for strict no-proxy behaviour. See [Proxy Settings](proxy-settings.md#automatic-proxies-for-large-sources).
 - The bottom status bar includes a proxy state toggle next to the render-mode toggle. It reads **Using Proxies** when proxy playback is active and **Original Media** when it is off, and **`Shift+P`** provides the same quick on/off action without opening Preferences.
 - Turning the quick toggle back on restores the last non-`Off` proxy size you chose here, so the fast toggle keeps using your preferred `Half Res` or `Quarter Res` setting.
 - Proxy files are transcoded in the background via ffmpeg and prefer a managed local cache root at `$XDG_CACHE_HOME/ultimateslice/proxies` (fallback `/tmp/ultimateslice/proxies`) for better external-drive playback.
@@ -96,7 +97,8 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 - Export always uses original full-resolution media regardless of proxy mode.
 - The setting is persisted across launches.
 - MCP automation:
-  - `get_preferences` returns `proxy_mode`, `last_non_off_proxy_mode`, and `persist_proxies_next_to_original_media`.
+  - `get_preferences` returns `proxy_mode`, `last_non_off_proxy_mode`, `auto_proxy_threshold`, and `persist_proxies_next_to_original_media`.
+  - `set_auto_proxy_threshold` sets the automatic-proxy threshold (`off`, `above_1080p`, `above_1440p`, `above_2160p`).
   - `set_proxy_mode` updates the mode, preserves the last non-`Off` proxy size for quick restore, and re-generates proxies as needed.
 
 ## Proxy Sidecar Persistence (Proxies)

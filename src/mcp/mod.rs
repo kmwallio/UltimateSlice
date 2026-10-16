@@ -154,6 +154,10 @@ pub enum McpCommand {
         mode: String,
         reply: SyncSender<Value>,
     },
+    SetAutoProxyThreshold {
+        threshold: String,
+        reply: SyncSender<Value>,
+    },
     SetProxySidecarPersistence {
         enabled: bool,
         reply: SyncSender<Value>,

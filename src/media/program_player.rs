@@ -1930,6 +1930,9 @@ pub struct ProgramPlayer {
     /// When true, all audio output is suppressed (voiceover recording mode).
     master_muted: bool,
     proxy_paths: HashMap<String, String>,
+    /// Sources that use a proxy even while `proxy_enabled` is false
+    /// (automatic proxies for sources above the preference threshold).
+    auto_proxy_sources: HashSet<String>,
     /// Proxy cache keys already reported as fallback-to-original in this session.
     /// Prevents warning spam while proxies are still being generated.
     proxy_fallback_warned_keys: HashSet<String>,
@@ -2809,6 +2812,7 @@ impl ProgramPlayer {
                 duck_gain: 1.0,
                 master_muted: false,
                 proxy_paths: HashMap::new(),
+                auto_proxy_sources: HashSet::new(),
                 proxy_fallback_warned_keys: HashSet::new(),
                 animated_svg_paths: HashMap::new(),
                 bg_removal_paths: HashMap::new(),
@@ -2923,6 +2927,35 @@ impl ProgramPlayer {
         }
         self.proxy_enabled = enabled;
         self.prewarmed_boundary_ns = None;
+    }
+
+    /// Sources that should play from a proxy even while manual proxy mode is
+    /// off (automatic proxies for sources above the preference threshold).
+    pub fn set_auto_proxy_sources(&mut self, sources: HashSet<String>) {
+        if self.auto_proxy_sources != sources {
+            self.auto_proxy_sources = sources;
+            self.proxy_fallback_warned_keys.clear();
+            self.prewarmed_boundary_ns = None;
+            self.invalidate_short_frame_cache("auto-proxy-sources-changed");
+            // Slots whose source joined or left the auto-proxy set must be
+            // rebuilt so they switch between proxy and original media.
+            if !self.clips.is_empty()
+                && matches!(self.state, PlayerState::Playing | PlayerState::Paused)
+                && self.active_slots_want_proxy_swap()
+            {
+                log::info!(
+                    "ProgramPlayer: auto-proxy set changed for an active slot, rebuilding at {}ns",
+                    self.timeline_pos_ns
+                );
+                self.rebuild_pipeline_at(self.timeline_pos_ns);
+            }
+        }
+    }
+
+    /// True when `source_path` should resolve to a ready proxy: manual proxy
+    /// mode, or an automatic proxy for a source above the threshold.
+    fn proxy_wanted_for_source(&self, source_path: &str) -> bool {
+        self.proxy_enabled || self.auto_proxy_sources.contains(source_path)
     }
 
     pub fn set_preview_luts(&mut self, enabled: bool) {
@@ -3542,7 +3575,54 @@ impl ProgramPlayer {
             self.proxy_paths = paths;
             self.prewarmed_boundary_ns = None;
             self.invalidate_short_frame_cache("proxy-paths-updated");
+            // A proxy that just became ready for a clip already in a slot
+            // would otherwise only be used at the next boundary/edit
+            // rebuild. Swap it in now so a heavy source stops decoding at
+            // full resolution as soon as its proxy exists.
+            if !self.clips.is_empty()
+                && matches!(self.state, PlayerState::Playing | PlayerState::Paused)
+                && self.active_slots_want_proxy_swap()
+            {
+                log::info!(
+                    "ProgramPlayer: proxy ready for an active slot, rebuilding at {}ns",
+                    self.timeline_pos_ns
+                );
+                self.rebuild_pipeline_at(self.timeline_pos_ns);
+            }
         }
+    }
+
+    /// The file a slot's `uridecodebin` is actually decoding, but only when
+    /// it is the clip's original media or one of the known proxy files.
+    /// `None` for prerender composites, non-URI sources (titles), and any
+    /// other derived media (bg-removal, render-replace, …) so those slot
+    /// kinds keep their existing reuse rules.
+    fn slot_original_or_proxy_path(&self, slot: &VideoSlot, clip: &ProgramClip) -> Option<String> {
+        if slot.is_prerender_slot || !slot.decoder.has_property("uri") {
+            return None;
+        }
+        let uri: Option<String> = slot.decoder.property("uri");
+        let uri = uri?;
+        let path = glib::filename_from_uri(&uri)
+            .ok()
+            .map(|(p, _)| p.to_string_lossy().into_owned())
+            .or_else(|| uri.strip_prefix("file://").map(str::to_owned))?;
+        (path == clip.source_path || self.proxy_paths.values().any(|p| *p == path)).then_some(path)
+    }
+
+    /// True when some slot is decoding the original while a proxy is now
+    /// wanted and ready (or decoding a proxy that is no longer wanted), so
+    /// the slot must be rebuilt rather than reused.
+    fn active_slots_want_proxy_swap(&self) -> bool {
+        self.slots.iter().any(|slot| {
+            let Some(clip) = self.clips.get(slot.clip_idx) else {
+                return false;
+            };
+            match self.slot_original_or_proxy_path(slot, clip) {
+                Some(actual) => actual != self.effective_source_path_for_clip(clip),
+                None => false,
+            }
+        })
     }
 
     pub fn update_animated_svg_paths(&mut self, paths: HashMap<String, String>) {
@@ -8285,7 +8365,7 @@ impl ProgramPlayer {
         } else {
             Some(clip.lut_paths.join("|"))
         };
-        if self.proxy_enabled {
+        if self.proxy_wanted_for_source(&clip.source_path) {
             // Proxies are LUT-agnostic — the LUT is applied live on the proxy
             // frame in preview (see realtime_lut), so the lookup key must NOT
             // include the LUT (matches collect_unique_proxy_variants passing
@@ -9287,6 +9367,11 @@ impl ProgramPlayer {
         .hash(&mut hasher);
         self.proxy_enabled.hash(&mut hasher);
         self.proxy_scale_divisor.hash(&mut hasher);
+        {
+            let mut auto: Vec<&String> = self.auto_proxy_sources.iter().collect();
+            auto.sort();
+            auto.hash(&mut hasher);
+        }
         for &idx in active {
             if let Some(c) = self.clips.get(idx) {
                 Self::hash_prerender_clip_state(
@@ -12835,7 +12920,7 @@ impl ProgramPlayer {
             return None;
         }
 
-        if self.proxy_enabled {
+        if self.proxy_wanted_for_source(&clip.source_path) {
             log::info!(
                 "build_audio_only_slot: clip={} source={} resolved={} mode={} proxy_key={} resolved_exists={} (video occluded)",
                 clip.id,
@@ -14141,7 +14226,7 @@ impl ProgramPlayer {
         let (effective_path, using_proxy, proxy_key, animated_svg_rendered) =
             self.resolve_source_path_for_clip(&clip);
         let uri = format!("file://{}", effective_path);
-        if self.proxy_enabled {
+        if self.proxy_wanted_for_source(&clip.source_path) {
             log::info!(
                 "ProgramPlayer: slot={} clip={} source={} resolved={} mode={} proxy_key={} resolved_exists={} uri={}",
                 zorder_offset,
@@ -14197,8 +14282,9 @@ impl ProgramPlayer {
         // already in the source media is the preview-LUT feature (a project-res
         // baked media used when proxy mode is OFF); skip there to avoid a
         // double-apply.
-        let lut_baked_in_source =
-            !self.proxy_enabled && self.preview_luts && !clip.lut_paths.is_empty();
+        let lut_baked_in_source = !self.proxy_wanted_for_source(&clip.source_path)
+            && self.preview_luts
+            && !clip.lut_paths.is_empty();
         let realtime_lut = if lut_baked_in_source {
             None
         } else {
@@ -15457,7 +15543,13 @@ impl ProgramPlayer {
             for (unmatched_idx, &slot_idx) in unmatched_slots.iter().enumerate() {
                 let current_clip_idx = self.slots[slot_idx].clip_idx;
                 let current_clip = &self.clips[current_clip_idx];
-                let current_path = self.effective_source_path_for_clip(current_clip);
+                // Compare against what the decoder is really playing when
+                // that is the original or a proxy: a proxy that became
+                // ready (or stopped being wanted) since the slot was built
+                // must force a rebuild, not a reuse.
+                let current_path = self
+                    .slot_original_or_proxy_path(&self.slots[slot_idx], current_clip)
+                    .unwrap_or_else(|| self.effective_source_path_for_clip(current_clip));
                 if desired_path != current_path {
                     continue;
                 }
@@ -16143,7 +16235,7 @@ impl ProgramPlayer {
                 .map(|&idx| {
                     let clip = &self.clips[idx];
                     let (path, using_proxy, key, _) = self.resolve_source_path_for_clip(clip);
-                    if self.proxy_enabled {
+                    if self.proxy_wanted_for_source(&clip.source_path) {
                         format!(
                             "clip={} track={} mode={} key={} path={}",
                             clip.id,

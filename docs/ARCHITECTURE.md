@@ -557,6 +557,45 @@ contract (all checks happen before anything is mutated):
   (wall-clock aligned, see the resync rules above). The caller must *not*
   touch `timeline_pos_ns` or call `seek`/`play` afterwards.
 
+### Automatic proxies (Proxy mode Off)
+
+`PreferencesState::auto_proxy_threshold` (default *above 2160p*) keeps
+Proxy mode `Off` strict for ordinary sources while still proxying very large
+ones. The rules:
+
+- **Per-source predicate, never a mode change.** `ProxyMode::is_enabled()`
+  stays the manual gate (~20 call sites). Automatic proxies are a
+  `HashSet<String>` of qualifying source paths, computed from the media
+  library (`auto_proxy_sources_from_library`: backing file, not
+  audio/image/animated-SVG, probed `video_height` above the threshold) and
+  pushed to `ProgramPlayer::set_auto_proxy_sources`. The player's resolver
+  uses `proxy_wanted_for_source(path) = proxy_enabled || auto set contains
+  path`; the auto set is hashed into the pipeline signature. The same set is
+  shared (`effective_auto_proxy_sources`) with the 500 ms proxy poll so ready
+  paths reach the player and the PROXY badge / watermark / Source Monitor
+  only light up for qualifying sources. `PreferencesState::auto_proxy_min_height()`
+  returns `None` whenever manual proxies are on (they cover every source).
+- **Size** is the remembered manual size (`auto_proxy_mode()` →
+  `remembered_proxy_mode()`), so the user's last choice carries over.
+  `proxy_scale_divisor` stays 1: auto-proxied sources are simply smaller
+  inputs to the compositor, and Auto preview quality already caps
+  processing at 1440p.
+- **Request sites**: media browser (newly probed items and already-probed
+  items on load), the reload priming pass, and the 250 ms tick (which also
+  drops LUT-baked preview variants for auto sources: they play the proxy
+  with a live LUT). The preferences-change handler must not wipe proxy
+  paths while the auto set is non-empty.
+- **Swap-in rule (applies to manual mode too).** A proxy that finishes for
+  a clip already in a slot is applied immediately: `update_proxy_paths` and
+  `set_auto_proxy_sources` call `active_slots_want_proxy_swap`, which
+  compares the file the slot's `uridecodebin` is *actually* decoding
+  (`slot_original_or_proxy_path`, only when that is the original or a known
+  proxy file) with `effective_source_path_for_clip`, and rebuilds at the
+  current position when they differ. `compute_reuse_plan` uses the same
+  actual-file comparison; comparing the slot's clip to itself through the
+  current proxy state made the continue-decoders fast path reuse a slot that
+  was still decoding the original.
+
 ### Export: GPU input decode
 
 `export_project_impl` (wrapped by `export_project_with_cancel`) carries a
@@ -1016,7 +1055,8 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_playback_priority` | Set program-monitor playback priority (`smooth` / `balanced` / `accurate`) |
 | `set_source_playback_priority` | Set source-monitor playback priority (`smooth` / `balanced` / `accurate`) |
 | `set_crossfade_settings` | Set automatic audio crossfade preferences (`enabled`, `curve`, `duration_ns`) with strict validation |
-| `set_proxy_mode` | Set proxy preview mode (`off` / `half_res` / `quarter_res`) |
+| `set_proxy_mode` | Set proxy preview mode (`off` / `p1080` / `p720` / `p640` / `p540`; legacy `half_res` / `quarter_res`) |
+| `set_auto_proxy_threshold` | Automatic proxies while proxy mode is off (`off` / `above_1080p` / `above_1440p` / `above_2160p`) |
 | `set_gsk_renderer` | Set GTK renderer backend (`auto` / `cairo` / `opengl` / `vulkan`); requires restart |
 | `set_preview_quality` | Set compositor preview quality (`auto` / `full` / `half` / `quarter`); takes effect immediately |
 | `set_realtime_preview` | Toggle real-time preview decoder prebuilds (`true` / `false`) |

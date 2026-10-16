@@ -1,8 +1,8 @@
 use crate::ui::id_dropdown::IdDropDown;
 use crate::ui_state::{
     clamp_prerender_crf, AutoScrollMode, CrossfadeCurve, GskRenderer, HwEncoderMode,
-    PlaybackPriority, PreferencesState, PrerenderEncodingPreset, PreviewQuality, ProxyCodec,
-    ProxyMode, ThemeMode, MAX_PRERENDER_CRF, MIN_PRERENDER_CRF,
+    AutoProxyThreshold, PlaybackPriority, PreferencesState, PrerenderEncodingPreset,
+    PreviewQuality, ProxyCodec, ProxyMode, ThemeMode, MAX_PRERENDER_CRF, MIN_PRERENDER_CRF,
 };
 use gtk4::prelude::*;
 use gtk4::{
@@ -467,6 +467,28 @@ pub fn show_preferences_dialog(
     proxies_box.append(&proxy_label);
     proxies_box.append(&proxy_mode.dropdown);
     proxies_box.append(&proxy_hint);
+
+    let auto_proxy_label = Label::new(Some("Automatic proxies for large sources"));
+    auto_proxy_label.set_halign(gtk::Align::Start);
+    let auto_proxy_combo = build_pref_dropdown(
+        &[
+            ("off", "Off (Proxy mode Off means no proxies at all)"),
+            ("above_1080p", "Sources taller than 1080p"),
+            ("above_1440p", "Sources taller than 1440p"),
+            ("above_2160p", "Sources taller than 2160p (4K)"),
+        ],
+        current.auto_proxy_threshold.as_str(),
+    );
+    let auto_proxy_hint = Label::new(Some(
+        "While Proxy preview mode is Off, sources above this height still get a proxy at the last proxy size you chose (1080p by default). Smaller sources keep playing from original media.",
+    ));
+    auto_proxy_hint.set_halign(gtk::Align::Start);
+    auto_proxy_hint.add_css_class("dim-label");
+    auto_proxy_hint.set_wrap(true);
+    auto_proxy_hint.set_max_width_chars(60);
+    proxies_box.append(&auto_proxy_label);
+    proxies_box.append(&auto_proxy_combo.dropdown);
+    proxies_box.append(&auto_proxy_hint);
 
     let proxy_codec_label = Label::new(Some("Proxy codec"));
     proxy_codec_label.set_halign(gtk::Align::Start);
@@ -1634,6 +1656,12 @@ pub fn show_preferences_dialog(
                 ),
                 proxy_mode: current.proxy_mode.clone(),
                 last_non_off_proxy_mode: current.last_non_off_proxy_mode.clone(),
+                auto_proxy_threshold: AutoProxyThreshold::from_str(
+                    auto_proxy_combo
+                        .active_id()
+                        .as_deref()
+                        .unwrap_or("above_2160p"),
+                ),
                 proxy_codec: ProxyCodec::from_str(
                     proxy_codec_combo.active_id().as_deref().unwrap_or("h264"),
                 ),

@@ -1833,6 +1833,20 @@ pub fn build_media_browser(
                                 pc.request(path, scale.clone(), None);
                             }
                         }
+                    } else if prefs.auto_proxy_min_height().is_some() {
+                        // Proxy mode Off: automatic proxies for newly probed
+                        // sources above the threshold (the probe just filled
+                        // in video_height).
+                        let lib = library.borrow();
+                        let mut pc = proxy_cache.borrow_mut();
+                        for path in &resolved {
+                            if let Some(scale) =
+                                crate::ui::window::auto_proxy_scale_for_source(&prefs, &lib, path)
+                            {
+                                log::info!("auto-proxy: requesting proxy for newly probed {}", path);
+                                pc.request(path, scale, None);
+                            }
+                        }
                     }
                 }
                 // Update drag-source payloads on existing children (avoids full rebuild).
@@ -1939,6 +1953,30 @@ pub fn build_media_browser(
                         }
                         if let Some(result) = pc.get(&item.source_path) {
                             if !result.is_audio_only && !result.is_image {
+                                pxc.request(&item.source_path, scale, None);
+                            }
+                        }
+                    }
+                } else if let Some(min_height) = prefs.auto_proxy_min_height() {
+                    // Proxy mode Off: automatic proxies for already-probed
+                    // sources above the threshold.
+                    let scale = crate::ui::window::proxy_scale_for_mode(&prefs.auto_proxy_mode());
+                    let pc = probe_cache.borrow();
+                    let mut pxc = proxy_cache.borrow_mut();
+                    for item in lib.items.iter() {
+                        if !item.has_backing_file() || item.is_missing {
+                            continue;
+                        }
+                        if let Some(result) = pc.get(&item.source_path) {
+                            let tall = result
+                                .video_height
+                                .or(item.video_height)
+                                .map_or(false, |h| h > min_height);
+                            if tall
+                                && !result.is_audio_only
+                                && !result.is_image
+                                && !result.is_animated_svg
+                            {
                                 pxc.request(&item.source_path, scale, None);
                             }
                         }

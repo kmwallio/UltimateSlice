@@ -1328,13 +1328,24 @@ fn tools_list() -> Value {
         },
         {
             "name": "set_proxy_mode",
-            "description": "Set proxy preview mode ('off', 'p1080', or 'p640'). 'p1080' caps proxy height at 1080 px; 'p640' caps at 640 px. Both preserve source aspect ratio and never upscale. Legacy values 'half_res' and 'quarter_res' are accepted for backward compatibility (mapped to 'p1080' and 'p640' respectively). Export always uses original media.",
+            "description": "Set proxy preview mode ('off', 'p1080', 'p720', 'p640', or 'p540'); the number caps proxy height in px. All preserve source aspect ratio and never upscale. Legacy values 'half_res' and 'quarter_res' are accepted for backward compatibility (mapped to 'p1080' and 'p640' respectively). 'off' is strict for ordinary sources, but sources above the automatic-proxy threshold (see set_auto_proxy_threshold) still use a proxy. Export always uses original media.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
-                    "mode": { "type": "string", "enum": ["off", "p1080", "p640", "half_res", "quarter_res"], "description": "Proxy preview mode. 'half_res'/'quarter_res' are legacy aliases for 'p1080'/'p640'." }
+                    "mode": { "type": "string", "enum": ["off", "p1080", "p720", "p640", "p540", "half_res", "quarter_res"], "description": "Proxy preview mode. 'half_res'/'quarter_res' are legacy aliases for 'p1080'/'p640'." }
                 },
                 "required": ["mode"]
+            }
+        },
+        {
+            "name": "set_auto_proxy_threshold",
+            "description": "Set the automatic-proxy threshold used while proxy mode is 'off': sources whose video height exceeds the threshold still get a proxy at the remembered proxy size (last_non_off_proxy_mode, 1080p by default). 'off' disables automatic proxies (strict Off). Default is 'above_2160p'.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "threshold": { "type": "string", "enum": ["off", "above_1080p", "above_1440p", "above_2160p"], "description": "Minimum source height that triggers an automatic proxy." }
+                },
+                "required": ["threshold"]
             }
         },
         {
@@ -3736,6 +3747,10 @@ fn dispatch_tool_payload(
         },
         "set_proxy_mode" => McpCommand::SetProxyMode {
             mode: arg_str!(args, "mode", "off"),
+            reply: tx,
+        },
+        "set_auto_proxy_threshold" => McpCommand::SetAutoProxyThreshold {
+            threshold: arg_str!(args, "threshold", "above_2160p"),
             reply: tx,
         },
         "set_proxy_sidecar_persistence" => McpCommand::SetProxySidecarPersistence {

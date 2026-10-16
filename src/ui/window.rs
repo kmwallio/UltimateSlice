@@ -5410,6 +5410,48 @@ fn auto_preview_divisor(
     bounded.max(proxy)
 }
 
+/// Library sources that qualify for an automatic proxy while Proxy mode is
+/// Off: video with a backing file whose probed height exceeds `min_height`.
+pub(crate) fn auto_proxy_sources_from_library(
+    library: &MediaLibrary,
+    threshold: crate::ui_state::AutoProxyThreshold,
+) -> HashSet<String> {
+    library
+        .items
+        .iter()
+        .filter(|i| {
+            i.has_backing_file()
+                && !i.is_missing
+                && !i.is_audio_only
+                && !i.is_image
+                && !i.is_animated_svg
+                && i.video_height.map_or(false, |h| threshold.applies_to_height(h))
+        })
+        .map(|i| i.source_path.clone())
+        .collect()
+}
+
+/// Proxy scale to use for `path` under the automatic-proxy rule, or `None`
+/// when the source does not qualify (manual proxy mode on, threshold off,
+/// not in the library, not probed yet, or not tall enough).
+pub(crate) fn auto_proxy_scale_for_source(
+    prefs: &crate::ui_state::PreferencesState,
+    library: &MediaLibrary,
+    path: &str,
+) -> Option<crate::media::proxy_cache::ProxyScale> {
+    prefs.auto_proxy_min_height()?;
+    let item = library.items.iter().find(|i| i.source_path == path)?;
+    let qualifies = item.has_backing_file()
+        && !item.is_missing
+        && !item.is_audio_only
+        && !item.is_image
+        && !item.is_animated_svg
+        && item
+            .video_height
+            .map_or(false, |h| prefs.auto_proxy_threshold.applies_to_height(h));
+    qualifies.then(|| proxy_scale_for_mode(&prefs.auto_proxy_mode()))
+}
+
 pub(crate) fn proxy_scale_for_mode(
     mode: &crate::ui_state::ProxyMode,
 ) -> crate::media::proxy_cache::ProxyScale {
@@ -5654,10 +5696,18 @@ fn reload_source_preview_selection(
     project: &Rc<RefCell<Project>>,
     proxy_cache: &Rc<RefCell<crate::media::proxy_cache::ProxyCache>>,
     proxy_mode: &crate::ui_state::ProxyMode,
+    auto_proxy_scale: Option<crate::media::proxy_cache::ProxyScale>,
     source_original_uri_for_proxy_fallback: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
     set_audio_only: &Rc<dyn Fn(bool)>,
 ) {
     set_audio_only(source_info.is_audio_only);
+    // Manual proxy mode covers every source; otherwise only a source that
+    // qualifies for an automatic proxy (`auto_proxy_scale`) uses one.
+    let (use_proxy, proxy_scale) = if proxy_mode.is_enabled() {
+        (true, Some(proxy_scale_for_mode(proxy_mode)))
+    } else {
+        (auto_proxy_scale.is_some(), auto_proxy_scale)
+    };
     let original_uri = format!("file://{path}");
     let (fr_num, fr_den) = {
         let proj = project.borrow();
@@ -5666,10 +5716,10 @@ fn reload_source_preview_selection(
     if let Ok(mut fallback_uri) = source_original_uri_for_proxy_fallback.lock() {
         *fallback_uri = Some(original_uri.clone());
     }
-    if proxy_mode.is_enabled() && !source_info.is_audio_only && !source_info.is_animated_svg {
-        proxy_cache
-            .borrow_mut()
-            .request(path, proxy_scale_for_mode(proxy_mode), None);
+    if let Some(scale) = proxy_scale
+        .filter(|_| use_proxy && !source_info.is_audio_only && !source_info.is_animated_svg)
+    {
+        proxy_cache.borrow_mut().request(path, scale, None);
     }
     let load_uri = if source_info.is_animated_svg {
         match crate::media::animated_svg::ensure_rendered_clip(
@@ -5692,7 +5742,7 @@ fn reload_source_preview_selection(
         }
     } else {
         let cache = proxy_cache.borrow();
-        if proxy_mode.is_enabled() {
+        if use_proxy {
             if let Some(proxy_path) = ready_proxy_path_for_source(&cache, path, None) {
                 log::info!("source preview: using proxy {}", proxy_path);
                 format!("file://{proxy_path}")
@@ -6820,6 +6870,12 @@ pub fn build_window(
         let p = project.borrow();
         proxy_scale_divisor_for_mode(&initial_proxy_mode, p.height)
     }));
+    // Sources playing from automatic proxies (Proxy mode Off, source taller
+    // than the auto-proxy threshold). Shared between the 250 ms player tick
+    // (which computes it from the library), the project reload priming, and
+    // the 500 ms proxy poll (ready proxies → player, timeline badge).
+    let effective_auto_proxy_sources: Rc<RefCell<HashSet<String>>> =
+        Rc::new(RefCell::new(HashSet::new()));
 
     let timeline_state = Rc::new(RefCell::new(TimelineState::new(project.clone())));
     timeline_state.borrow_mut().show_waveform_on_video = initial_show_waveform_on_video;
@@ -6874,6 +6930,7 @@ pub fn build_window(
         let prog_player = prog_player.clone();
         let proxy_cache = proxy_cache.clone();
         let voice_enhance_cache_apply = voice_enhance_cache.clone();
+        let effective_auto_proxy_sources_prefs = effective_auto_proxy_sources.clone();
         let project = project.clone();
         let timeline_state = timeline_state.clone();
         let mcp_sender = mcp_sender.clone();
@@ -7011,8 +7068,14 @@ pub fn build_window(
                 }
                 let paths = proxy_cache.borrow().proxies.clone();
                 prog_player.borrow_mut().update_proxy_paths(paths);
-            } else {
+            } else if effective_auto_proxy_sources_prefs.borrow().is_empty() {
                 prog_player.borrow_mut().update_proxy_paths(HashMap::new());
+            } else {
+                // Proxy mode Off but automatic proxies are in use: keep the
+                // cache paths so auto-proxied sources do not fall back to
+                // original media until the next tick re-pushes them.
+                let paths = proxy_cache.borrow().proxies.clone();
+                prog_player.borrow_mut().update_proxy_paths(paths);
             }
             timeline_state.borrow_mut().show_waveform_on_video = new_state.show_waveform_on_video;
             timeline_state.borrow_mut().show_timeline_preview = new_state.show_timeline_preview;
@@ -11343,7 +11406,9 @@ pub fn build_window(
         let source_original_uri_for_proxy_fallback = source_original_uri_for_proxy_fallback.clone();
         let set_audio_only = set_audio_only.clone();
         Rc::new(move |old_state, new_state| {
-            if old_state.proxy_mode == new_state.proxy_mode {
+            if old_state.proxy_mode == new_state.proxy_mode
+                && old_state.auto_proxy_threshold == new_state.auto_proxy_threshold
+            {
                 return;
             }
             let (path, duration_ns) = {
@@ -11358,6 +11423,7 @@ pub fn build_window(
                 let proj = project.borrow();
                 lookup_source_placement_info(&lib.items, &proj, &path)
             };
+            let auto_scale = auto_proxy_scale_for_source(new_state, &library.borrow(), &path);
             reload_source_preview_selection(
                 &path,
                 duration_ns,
@@ -11366,6 +11432,7 @@ pub fn build_window(
                 &project,
                 &proxy_cache,
                 &new_state.proxy_mode,
+                auto_scale,
                 &source_original_uri_for_proxy_fallback,
                 &set_audio_only,
             );
@@ -15053,6 +15120,8 @@ pub fn build_window(
         let proxy_cache = proxy_cache.clone();
         let effective_proxy_enabled = effective_proxy_enabled.clone();
         let effective_proxy_scale_divisor = effective_proxy_scale_divisor.clone();
+        let effective_auto_proxy_sources_tick = effective_auto_proxy_sources.clone();
+        let library_tick = library.clone();
         let last_auto_check_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
         let last_auto_check_us_c = last_auto_check_us.clone();
         let last_auto_quality_switch_us: Rc<Cell<i64>> = Rc::new(Cell::new(0));
@@ -15140,6 +15209,30 @@ pub fn build_window(
                     player.set_preview_luts(preview_luts);
 
                     let manual_proxy_mode = proxy_mode.is_enabled();
+                    // Automatic proxies: while manual proxy mode is Off,
+                    // sources taller than the threshold still play from a
+                    // proxy at the remembered proxy size. Recomputed from
+                    // the library each pass so newly probed imports join.
+                    let (auto_min_height, auto_proxy_mode_now) = {
+                        let prefs = preferences_state.borrow();
+                        (prefs.auto_proxy_min_height(), prefs.auto_proxy_mode())
+                    };
+                    let auto_sources: HashSet<String> = if auto_min_height.is_some() {
+                        let threshold = preferences_state.borrow().auto_proxy_threshold;
+                        auto_proxy_sources_from_library(&library_tick.borrow(), threshold)
+                    } else {
+                        HashSet::new()
+                    };
+                    if *effective_auto_proxy_sources_tick.borrow() != auto_sources {
+                        log::info!(
+                            "auto-proxy: {} source(s) above {} lines will use {} proxies",
+                            auto_sources.len(),
+                            auto_min_height.unwrap_or(0),
+                            auto_proxy_mode_now.as_str()
+                        );
+                        *effective_auto_proxy_sources_tick.borrow_mut() = auto_sources.clone();
+                    }
+                    player.set_auto_proxy_sources(auto_sources.clone());
                     let current_proxy_enabled = effective_proxy_enabled.get();
                     let desired_proxy_enabled = manual_proxy_mode;
                     let desired_scale = proxy_scale_for_mode(&proxy_mode);
@@ -15173,13 +15266,31 @@ pub fn build_window(
                         let paths = proxy_cache.borrow().proxies.clone();
                         player.update_proxy_paths(paths);
                     } else if !desired_proxy_enabled
-                        && preview_luts
+                        && (preview_luts || !auto_sources.is_empty())
                         && now_us - last_proxy_refresh_us_c.get() >= 1_000_000
                     {
                         last_proxy_refresh_us_c.set(now_us);
                         let variants = {
                             let proj = project.borrow();
-                            collect_unique_preview_lut_proxy_variants(&proj)
+                            let mut variants = if preview_luts {
+                                collect_unique_preview_lut_proxy_variants(&proj)
+                            } else {
+                                Vec::new()
+                            };
+                            if !auto_sources.is_empty() {
+                                // Auto-proxied sources play the proxy with a
+                                // live LUT, so they never need a
+                                // project-resolution LUT-baked preview file.
+                                variants.retain(|spec| !auto_sources.contains(&spec.source_path));
+                                let codec_now = preferences_state.borrow().proxy_codec;
+                                let scale = proxy_scale_for_mode(&auto_proxy_mode_now);
+                                variants.extend(
+                                    collect_unique_proxy_variants(&proj, scale, codec_now)
+                                        .into_iter()
+                                        .filter(|spec| auto_sources.contains(&spec.source_path)),
+                                );
+                            }
+                            variants
                         };
                         {
                             let mut cache = proxy_cache.borrow_mut();
@@ -16115,7 +16226,13 @@ pub fn build_window(
                     // selecting the same item doesn't yank focus away
                     // from (e.g.) a search box the user is typing in.
                     source_monitor_panel.grab_focus();
-                    let proxy_mode = preferences_state.borrow().proxy_mode.clone();
+                    let (proxy_mode, auto_scale) = {
+                        let prefs = preferences_state.borrow();
+                        (
+                            prefs.proxy_mode.clone(),
+                            auto_proxy_scale_for_source(&prefs, &library.borrow(), &path),
+                        )
+                    };
                     reload_source_preview_selection(
                         &path,
                         duration_ns,
@@ -16124,6 +16241,7 @@ pub fn build_window(
                         &project,
                         &proxy_cache,
                         &proxy_mode,
+                        auto_scale,
                         &source_original_uri_for_proxy_fallback,
                         &set_audio_only,
                     );
@@ -17709,6 +17827,7 @@ pub fn build_window(
         let sync_tracking_controls = sync_tracking_controls.clone();
         let minimap_weak = minimap_area.downgrade();
         let render_replace_cache_for_reload = render_replace_cache.clone();
+        let effective_auto_proxy_sources_for_reload = effective_auto_proxy_sources.clone();
         let render_replace_cache_for_flatten = render_replace_cache.clone();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
@@ -17949,6 +18068,8 @@ pub fn build_window(
             let preferences_state_reload = preferences_state.clone();
             let project_reload = project.clone();
             let proxy_cache_reload = proxy_cache.clone();
+            let library_reload = library.clone();
+            let effective_auto_proxy_sources_reload = effective_auto_proxy_sources_for_reload.clone();
             let bg_removal_cache_reload = bg_removal_cache.clone();
             let voice_enhance_cache_reload = voice_enhance_cache.clone();
             let render_replace_cache_reload = render_replace_cache_for_reload.clone();
@@ -17997,6 +18118,60 @@ pub fn build_window(
                                     "window:on_project_changed primed {} near-playhead proxy source(s) around {}ns",
                                     near_playhead_variants.len(),
                                     prev_pos
+                                );
+                            }
+                        } else {
+                            // Automatic proxies (Proxy mode Off): sources
+                            // above the threshold are primed the same way,
+                            // at the remembered proxy size, and handed to
+                            // the player before load_clips so the first
+                            // rebuild already resolves them.
+                            let (auto_sources, auto_scale, codec_now) = {
+                                let prefs = preferences_state_reload.borrow();
+                                let sources = if prefs.auto_proxy_min_height().is_some() {
+                                    auto_proxy_sources_from_library(
+                                        &library_reload.borrow(),
+                                        prefs.auto_proxy_threshold,
+                                    )
+                                } else {
+                                    HashSet::new()
+                                };
+                                (
+                                    sources,
+                                    proxy_scale_for_mode(&prefs.auto_proxy_mode()),
+                                    prefs.proxy_codec,
+                                )
+                            };
+                            *effective_auto_proxy_sources_reload.borrow_mut() = auto_sources.clone();
+                            prog_player_reload
+                                .borrow_mut()
+                                .set_auto_proxy_sources(auto_sources.clone());
+                            if !auto_sources.is_empty() {
+                                let (near_playhead_variants, clip_variants) = {
+                                    let proj = project_reload.borrow();
+                                    let near: Vec<_> = collect_near_playhead_proxy_variants(
+                                        &proj,
+                                        prev_pos,
+                                        NEAR_PLAYHEAD_PROXY_PRIME_WINDOW_NS,
+                                        NEAR_PLAYHEAD_PROXY_PRIME_MAX_SOURCES,
+                                        auto_scale,
+                                    )
+                                    .into_iter()
+                                    .filter(|spec| auto_sources.contains(&spec.source_path))
+                                    .collect();
+                                    let all: Vec<_> =
+                                        collect_unique_proxy_variants(&proj, auto_scale, codec_now)
+                                            .into_iter()
+                                            .filter(|spec| auto_sources.contains(&spec.source_path))
+                                            .collect();
+                                    (near, all)
+                                };
+                                let mut cache = proxy_cache_reload.borrow_mut();
+                                request_proxy_variants(&mut cache, &near_playhead_variants);
+                                request_proxy_variants(&mut cache, &clip_variants);
+                                log::debug!(
+                                    "window:on_project_changed auto-proxy primed {} source(s)",
+                                    clip_variants.len()
                                 );
                             }
                         }
@@ -20493,6 +20668,7 @@ pub fn build_window(
         let library_for_stt = library.clone();
         let prog_player = prog_player.clone();
         let effective_proxy_enabled = effective_proxy_enabled.clone();
+        let effective_auto_proxy_sources_poll = effective_auto_proxy_sources.clone();
         let status_label = status_label.clone();
         let status_progress = status_progress.clone();
         let player = player.clone();
@@ -20534,7 +20710,8 @@ pub fn build_window(
             }
             // Always sync proxy paths when proxies are effectively enabled — disk-cached proxies
             // are added synchronously by request() and never appear in `resolved`.
-            if effective_proxy_enabled.get() {
+            let auto_proxy_active = !effective_auto_proxy_sources_poll.borrow().is_empty();
+            if effective_proxy_enabled.get() || auto_proxy_active {
                 if !resolved.is_empty() || !proxy_cache.borrow().proxies.is_empty() {
                     let paths = proxy_cache.borrow().proxies.clone();
                     prog_player.borrow_mut().update_proxy_paths(paths);
@@ -20548,16 +20725,25 @@ pub fn build_window(
             // and the widget queue_draw fires independently — so this
             // just keeps the set in sync without per-edit plumbing.
             {
-                let ready = proxy_cache.borrow().ready_source_paths();
+                let mut ready = proxy_cache.borrow().ready_source_paths();
                 let enabled = effective_proxy_enabled.get();
+                if !enabled {
+                    // Proxy mode Off: only automatic-proxy sources play from
+                    // proxies, so only those earn the PROXY badge/watermark.
+                    let auto = effective_auto_proxy_sources_poll.borrow();
+                    ready.retain(|p| auto.contains(p));
+                }
                 let mut ts = timeline_state_stt.borrow_mut();
                 ts.proxy_ready_sources = ready;
-                ts.proxy_preview_enabled = enabled;
+                ts.proxy_preview_enabled = enabled || auto_proxy_active;
             }
             // Auto-reload source preview when its proxy completes.
-            let source_proxy_enabled = preferences_state.borrow().proxy_mode.is_enabled();
+            let current_source = source_marks.borrow().path.clone();
+            let source_proxy_enabled = preferences_state.borrow().proxy_mode.is_enabled()
+                || effective_auto_proxy_sources_poll
+                    .borrow()
+                    .contains(&current_source);
             if source_proxy_enabled && !resolved.is_empty() {
-                let current_source = source_marks.borrow().path.clone();
                 if !current_source.is_empty() {
                     let cache = proxy_cache.borrow();
                     for key in &resolved {

@@ -63,6 +63,35 @@ Proxy resolution is set as a *maximum height*. Source aspect ratio is preserved,
 
 ---
 
+## Automatic proxies for large sources
+
+Proxy mode **Off** is strict for ordinary footage, but very large sources are
+the one case where playing original media rarely makes sense. The
+**Automatic proxies for large sources** setting (Preferences → Proxies)
+keeps proxies off for everything *except* sources taller than a threshold:
+
+| Setting | Effect while Proxy mode is Off |
+|---|---|
+| Off | No proxies at all (the old strict behaviour) |
+| Sources taller than 1080p | 1440p, 4K, 5K… sources get a proxy |
+| Sources taller than 1440p | 4K and larger get a proxy |
+| Sources taller than 2160p (default) | Only 5K/6K/8K-class sources get a proxy |
+
+Automatic proxies use the **last proxy size you chose** in Proxy preview
+mode (1080p if you never changed it), the same codec and cache rules as
+manual proxies, and are generated at import, when a project opens, and when
+you add such a clip. The clip shows the PROXY badge and watermark like a
+manual proxy; smaller sources in the same project keep playing from original
+media with no badge. When Proxy preview mode is on, it covers every source
+and this setting is ignored.
+
+As soon as a proxy finishes for a clip that is already on screen, playback
+switches to it (a brief rebuild, even mid-play) instead of waiting for the
+next cut. Export always uses the original media.
+
+Over MCP: `set_auto_proxy_threshold` (`off` / `above_1080p` / `above_1440p` /
+`above_2160p`) and `get_preferences` → `auto_proxy_threshold`.
+
 ## Codec — H.264 vs HEVC
 
 | | H.264 (`libx264` / `h264_vaapi` / `h264_nvenc`) | HEVC (`libx265` / `hevc_vaapi` / `hevc_nvenc`) |

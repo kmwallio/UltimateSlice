@@ -907,6 +907,64 @@ fn default_last_non_off_proxy_mode() -> ProxyMode {
     ProxyMode::P1080
 }
 
+/// Automatic proxy generation for large sources while Proxy mode is `Off`.
+/// Sources whose video height exceeds the threshold get a proxy at the
+/// remembered proxy resolution; everything else keeps the strict-Off
+/// behaviour (original media, no proxy requests).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AutoProxyThreshold {
+    #[serde(rename = "off")]
+    Off,
+    // Explicit names: serde's snake_case would yield "above1080p" (digits
+    // do not start a word), which must match `as_str` for MCP/scripts.
+    #[serde(rename = "above_1080p")]
+    Above1080p,
+    #[serde(rename = "above_1440p")]
+    Above1440p,
+    #[serde(rename = "above_2160p")]
+    Above2160p,
+}
+
+impl Default for AutoProxyThreshold {
+    fn default() -> Self {
+        Self::Above2160p
+    }
+}
+
+impl AutoProxyThreshold {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Above1080p => "above_1080p",
+            Self::Above1440p => "above_1440p",
+            Self::Above2160p => "above_2160p",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value {
+            "above_1080p" | "1080" | "1080p" => Self::Above1080p,
+            "above_1440p" | "1440" | "1440p" => Self::Above1440p,
+            "above_2160p" | "2160" | "2160p" | "4k" => Self::Above2160p,
+            _ => Self::Off,
+        }
+    }
+
+    /// Height (in lines) a source must exceed to qualify; `None` when off.
+    pub fn min_height(&self) -> Option<u32> {
+        match self {
+            Self::Off => None,
+            Self::Above1080p => Some(1080),
+            Self::Above1440p => Some(1440),
+            Self::Above2160p => Some(2160),
+        }
+    }
+
+    pub fn applies_to_height(&self, height: u32) -> bool {
+        matches!(self.min_height(), Some(min) if height > min)
+    }
+}
+
 /// Codec used to encode proxy files. Defaults to H.264 for compatibility
 /// with everything; HEVC produces smaller files at the same visual
 /// quality and on Intel iGPUs the dedicated HEVC encoder is often faster
@@ -1721,6 +1779,10 @@ pub struct PreferencesState {
     /// user's preferred proxy quality.
     #[serde(default = "default_last_non_off_proxy_mode")]
     pub last_non_off_proxy_mode: ProxyMode,
+    /// While Proxy mode is `Off`, still generate proxies for sources taller
+    /// than this threshold (at the remembered proxy resolution).
+    #[serde(default)]
+    pub auto_proxy_threshold: AutoProxyThreshold,
     /// Codec used for proxy transcodes. H.264 is universal; HEVC produces
     /// smaller files at the same quality and is often faster on iGPUs.
     #[serde(default)]
@@ -1866,6 +1928,7 @@ impl Default for PreferencesState {
             source_playback_priority: PlaybackPriority::default(),
             proxy_mode: ProxyMode::default(),
             last_non_off_proxy_mode: default_last_non_off_proxy_mode(),
+            auto_proxy_threshold: AutoProxyThreshold::default(),
             proxy_codec: ProxyCodec::default(),
             persist_proxies_next_to_original_media: default_persist_proxies_next_to_original_media(
             ),
@@ -1933,6 +1996,23 @@ impl PreferencesState {
             ProxyMode::Off
         };
         self.set_proxy_mode(mode);
+    }
+
+    /// Minimum source height that triggers an automatic proxy while Proxy
+    /// mode is `Off`. `None` when manual proxies are on (they already cover
+    /// every source) or the automatic threshold is off.
+    pub fn auto_proxy_min_height(&self) -> Option<u32> {
+        if self.proxy_mode.is_enabled() {
+            None
+        } else {
+            self.auto_proxy_threshold.min_height()
+        }
+    }
+
+    /// Proxy resolution used for automatic proxies: the remembered manual
+    /// size (1080p by default).
+    pub fn auto_proxy_mode(&self) -> ProxyMode {
+        self.remembered_proxy_mode()
     }
 
     pub fn set_prerender_quality(&mut self, preset: PrerenderEncodingPreset, crf: u32) {
@@ -2733,6 +2813,43 @@ mod tests {
         prefs.set_proxy_enabled(true);
         assert_eq!(prefs.proxy_mode, ProxyMode::P640);
         assert_eq!(prefs.remembered_proxy_mode(), ProxyMode::P640);
+    }
+
+    #[test]
+    fn auto_proxy_threshold_defaults_to_above_2160p_and_round_trips() {
+        let parsed: UiState =
+            serde_json::from_str(r#"{"preferences":{"proxy_mode":"off"}}"#).unwrap();
+        assert_eq!(
+            parsed.preferences.auto_proxy_threshold,
+            AutoProxyThreshold::Above2160p
+        );
+        assert_eq!(parsed.preferences.auto_proxy_min_height(), Some(2160));
+        assert_eq!(parsed.preferences.auto_proxy_mode(), ProxyMode::P1080);
+        assert!(AutoProxyThreshold::Above2160p.applies_to_height(2988));
+        assert!(!AutoProxyThreshold::Above2160p.applies_to_height(2160));
+        assert!(!AutoProxyThreshold::Off.applies_to_height(10_000));
+        for t in [
+            AutoProxyThreshold::Off,
+            AutoProxyThreshold::Above1080p,
+            AutoProxyThreshold::Above1440p,
+            AutoProxyThreshold::Above2160p,
+        ] {
+            assert_eq!(AutoProxyThreshold::from_str(t.as_str()), t);
+        }
+        let encoded = serde_json::to_string(&parsed).unwrap();
+        assert!(encoded.contains(r#""auto_proxy_threshold":"above_2160p""#));
+    }
+
+    #[test]
+    fn auto_proxy_is_inactive_while_manual_proxy_mode_is_on() {
+        let mut prefs = PreferencesState::default();
+        prefs.set_proxy_mode(ProxyMode::P720);
+        assert_eq!(prefs.auto_proxy_min_height(), None);
+        prefs.set_proxy_mode(ProxyMode::Off);
+        assert_eq!(prefs.auto_proxy_min_height(), Some(2160));
+        assert_eq!(prefs.auto_proxy_mode(), ProxyMode::P720);
+        prefs.auto_proxy_threshold = AutoProxyThreshold::Off;
+        assert_eq!(prefs.auto_proxy_min_height(), None);
     }
 
     #[test]

@@ -945,6 +945,7 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
                     "source_playback_priority": prefs.source_playback_priority.as_str(),
                     "proxy_mode": prefs.proxy_mode.as_str(),
                     "last_non_off_proxy_mode": prefs.remembered_proxy_mode().as_str(),
+                    "auto_proxy_threshold": prefs.auto_proxy_threshold.as_str(),
                     "persist_proxies_next_to_original_media": prefs.persist_proxies_next_to_original_media,
                     "show_timeline_preview": prefs.show_timeline_preview,
                     "timeline_autoscroll": prefs.timeline_autoscroll.as_str(),
@@ -1161,6 +1162,21 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
             reply
                 .send(json!({
                     "success": true,
+                    "proxy_mode": new_state.proxy_mode.as_str(),
+                    "last_non_off_proxy_mode": new_state.remembered_proxy_mode().as_str()
+                }))
+                .ok();
+        }
+
+        McpCommand::SetAutoProxyThreshold { threshold, reply } => {
+            let parsed = crate::ui_state::AutoProxyThreshold::from_str(&threshold);
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.auto_proxy_threshold = parsed;
+            apply_preferences_state(new_state.clone());
+            reply
+                .send(json!({
+                    "success": true,
+                    "auto_proxy_threshold": new_state.auto_proxy_threshold.as_str(),
                     "proxy_mode": new_state.proxy_mode.as_str(),
                     "last_non_off_proxy_mode": new_state.remembered_proxy_mode().as_str()
                 }))
