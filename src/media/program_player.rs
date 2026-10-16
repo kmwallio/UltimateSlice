@@ -9456,9 +9456,17 @@ impl ProgramPlayer {
             self.state == PlayerState::Playing,
             self.transform_live,
             &self.playback_priority,
-            self.slots.len(),
+            self.visible_slot_count(),
             self.transition_overlap_active_now(),
         )
+    }
+
+    /// Slots that currently contribute pixels. A just-ended clip is kept as
+    /// a *hidden* slot for possible re-entry; counting it toward the ≥3-slot
+    /// drop-late policy made a plain 2-clip overlap after a cut flip into
+    /// leaky-queue mode and stall the compositor.
+    fn visible_slot_count(&self) -> usize {
+        self.slots.iter().filter(|slot| !slot.hidden).count()
     }
 
     fn should_drop_late_for_playback_mode(

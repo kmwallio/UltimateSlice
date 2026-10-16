@@ -24,6 +24,11 @@ You don't need proxies when:
 
 ---
 
+
+### Hardware transcoding
+
+On systems with a VA-API capable GPU (Intel, AMD), proxies without a LUT or stabilization are transcoded entirely on the GPU: decode, scaling and H.264/HEVC encoding all stay on the device. On a 5.3K HEVC 10-bit source this runs about 1.7× faster than the CPU path while using a tenth of the CPU, so the window where playback falls back to the original file is much shorter. The `Hardware encoder` preference (Auto by default) still controls the encoder; if the GPU path fails for a file, the usual software fallback takes over automatically.
+
 ## Quick decision tree
 
 | Your source | Recommended proxy mode | Recommended codec |

@@ -458,6 +458,16 @@ pub fn pick_encoder(
 /// IMPORTANT: this function does NOT set `-hwaccel_output_format`. Frames
 /// download to CPU memory automatically so existing software filter chains
 /// (lanczos / lut3d / etc.) keep working unchanged.
+/// True when ffmpeg can decode on VA-API here (hwaccel listed, a render node
+/// present, and the init probe passed). Independent of `pick_decode_hwaccel`,
+/// which may prefer CUDA/QSV as the *hint* — the GPU-resident proxy path needs
+/// VA-API specifically because it keeps frames on the VA device for
+/// `scale_vaapi` → `h264_vaapi`.
+pub fn vaapi_decode_usable() -> bool {
+    let caps = detect();
+    caps.has_hwaccel("vaapi") && caps.vaapi_device_present && caps.vaapi_init_ok
+}
+
 pub fn pick_decode_hwaccel(mode: HwEncoderMode) -> Option<&'static str> {
     pick_decode_hwaccel_with_caps(mode, detect())
 }

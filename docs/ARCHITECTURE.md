@@ -447,6 +447,15 @@ Other rules for this path:
   Pipelines express per-source software fallback locally — playbin's
   `force-sw-decoders` flag in the Source Monitor, uridecodebin's
   `force-sw-decoders` property here — never by mutating ranks.
+- **Drop-late policy counts visible slots only** (`visible_slot_count`): a
+  just-ended clip stays as a hidden slot for re-entry; counting it toward the
+  ≥3-slot leaky-queue mode stalled the compositor after a cut.
+- **Proxy transcodes are GPU-resident when they can be** (`proxy_cache.rs`
+  attempt 0): scale-only proxies with VA-API encode and VA-API decode
+  capability run `-hwaccel vaapi -hwaccel_output_format vaapi` →
+  `scale_vaapi` → `*_vaapi`, never downloading a frame. LUT / vidstab proxies
+  keep the CPU filter chain (the download those stages force is slower than
+  software decode). Failures fall through to the existing HW→SW ladder.
 - **Telemetry**: `compositor_frame_seq` feeds a rolling `effective_fps`;
   `decode_path_counts()` reports GPU vs software slots; both appear on the
   HUD (`OUT`, `DEC`) and in `get_performance_snapshot`.

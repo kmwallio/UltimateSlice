@@ -111,6 +111,19 @@ impl ProxyScale {
         }
     }
 
+    /// GPU-resident equivalent of [`ffmpeg_scale_filter`] for the VA-API
+    /// path: the decoded VA surface is scaled on the GPU and converted to
+    /// 8-bit NV12 for `h264_vaapi` / `hevc_vaapi`, so no frame is ever
+    /// downloaded to the CPU. Same dimension rules (even width, aspect
+    /// preserved, never upscale).
+    pub fn ffmpeg_vaapi_scale_filter(&self) -> String {
+        match self {
+            ProxyScale::MaxHeight(h) => {
+                format!("scale_vaapi=w=-2:h='min({h},ih)':format=nv12")
+            }
+        }
+    }
+
     fn suffix(&self) -> String {
         match self {
             ProxyScale::MaxHeight(h) => format!("{h}p"),
@@ -1633,6 +1646,19 @@ fn proxy_file_is_ready(path: &str, ffprobe_path: Option<&str>) -> bool {
     duration.is_some_and(|d| d.is_finite() && d > 0.0)
 }
 
+/// Whether a proxy transcode can run fully on the VA-API device
+/// (`-hwaccel vaapi -hwaccel_output_format vaapi` → `scale_vaapi` →
+/// `*_vaapi` encoder). Only for plain scale-only proxies: a LUT or vidstab
+/// stage is a CPU filter, and the GPU→CPU round trip it forces measured
+/// slower than software decode (see `run_transcode_command`).
+fn gpu_resident_proxy_eligible(
+    scale_only: bool,
+    hw_family: Option<HwEncoderFamily>,
+    vaapi_decode_usable: bool,
+) -> bool {
+    scale_only && matches!(hw_family, Some(HwEncoderFamily::Vaapi)) && vaapi_decode_usable
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_transcode_command(
     ffmpeg: &str,
@@ -1645,7 +1671,12 @@ fn run_transcode_command(
     hw_family: Option<HwEncoderFamily>,
     proxy_codec: ProxyCodec,
     hw_decode_method: Option<&str>,
+    // `Some(scale_vaapi filter)`: keep the whole transcode on the VA-API
+    // device (decode → scale/convert → encode) instead of the CPU filter
+    // chain. Requires `hw_family == Vaapi`.
+    gpu_resident_filter: Option<&str>,
 ) -> bool {
+    let gpu_resident = gpu_resident_filter.is_some() && matches!(hw_family, Some(HwEncoderFamily::Vaapi));
     let mut cmd = Command::new(ffmpeg);
     cmd.arg("-y")
         .arg("-hide_banner")
@@ -1680,7 +1711,20 @@ fn run_transcode_command(
     // on discrete NVIDIA) and QSV decode hints are still emitted —
     // their drivers handle the roundtrip more efficiently and NVDEC's
     // dedicated 10-bit HEVC silicon is genuinely faster than CPU.
-    if let Some(method) = hw_decode_method {
+    //
+    // The GPU-resident level below is the exception that makes VA-API decode
+    // a win: with `-hwaccel_output_format vaapi` the frames never leave the
+    // device, `scale_vaapi` scales/converts them there, and the VA encoder
+    // consumes them directly. Measured on a 5.3K HEVC 10-bit source: 2.7×
+    // realtime at ~95% of one core vs 1.6× realtime at ~900% CPU for
+    // software decode + lanczos + hwupload. Only used for scale-only proxies
+    // (no LUT / vidstab CPU stages).
+    if gpu_resident {
+        cmd.arg("-hwaccel")
+            .arg("vaapi")
+            .arg("-hwaccel_output_format")
+            .arg("vaapi");
+    } else if let Some(method) = hw_decode_method {
         if method != "vaapi" {
             cmd.arg("-hwaccel").arg(method);
         }
@@ -1688,8 +1732,9 @@ fn run_transcode_command(
     cmd.arg("-i").arg(source_path);
     // VA-API requires explicit format conversion + hwupload at the tail of
     // the software filter chain so the encoder receives GPU surfaces.
-    let effective_filter = match hw_family {
-        Some(HwEncoderFamily::Vaapi) => format!("{filter},format=nv12,hwupload"),
+    let effective_filter = match (gpu_resident_filter, hw_family) {
+        (Some(gpu_filter), Some(HwEncoderFamily::Vaapi)) => gpu_filter.to_string(),
+        (_, Some(HwEncoderFamily::Vaapi)) => format!("{filter},format=nv12,hwupload"),
         _ => filter.to_string(),
     };
     cmd.arg("-vf").arg(&effective_filter);
@@ -1783,13 +1828,13 @@ fn run_transcode_command(
         (None, ProxyCodec::H264) => "libx264",
         (None, ProxyCodec::Hevc) => "libx265",
     };
-    let dec_label = match hw_decode_method {
+    let dec_label = if gpu_resident { "vaapi-resident" } else { match hw_decode_method {
         Some("vaapi") => {
             "sw (vaapi decode skipped — slower than CPU for HEVC 10-bit on Intel iGPUs)"
         }
         Some(method) => method,
         None => "sw",
-    };
+    } };
     log::info!(
         "ProxyCache: spawning ffmpeg for {} (decode={dec_label}, encode={enc_label})",
         source_path
@@ -2064,6 +2109,8 @@ fn transcode_proxy(
 
     // Build the -vf filter string: scale, then vidstab (if enabled), then LUT chain.
     let mut filter = scale.ffmpeg_scale_filter().to_string();
+    // True when no CPU filter stage (vidstab / LUT) is appended below.
+    let scale_only = lut_paths.is_empty() && !(vidstab_enabled && vidstab_smoothing > 0.0);
 
     // Run vidstab two-pass analysis and add transform filter if successful.
     let mut vidstab_trf_path: Option<String> = None;
@@ -2137,22 +2184,56 @@ fn transcode_proxy(
         }
         let temp_proxy_path = format!("{proxy_path}.partial");
         let _ = std::fs::remove_file(&temp_proxy_path);
-        // Attempt 1: best-effort HW encode + HW decode (each independently
-        // gated on availability + per-source failure history).
+        // Attempt 0: fully GPU-resident VA-API transcode for scale-only
+        // proxies (no download/upload round trip). Any failure simply
+        // continues down the existing ladder for this source.
         let mut attempt_hw_enc = initial_hw_family;
         let mut attempt_hw_dec = initial_decode_hwaccel;
-        let mut command_ok = run_transcode_command(
-            &ffmpeg,
-            source_path,
-            &temp_proxy_path,
-            &filter,
-            cache_key,
-            estimated_size_bytes,
-            progress_tx,
-            attempt_hw_enc,
-            proxy_codec,
-            attempt_hw_dec,
-        );
+        let mut command_ok = false;
+        if gpu_resident_proxy_eligible(scale_only, attempt_hw_enc, hwaccel::vaapi_decode_usable()) {
+            let gpu_filter = scale.ffmpeg_vaapi_scale_filter();
+            log::info!(
+                "ProxyCache: GPU-resident VA-API transcode for {} ({gpu_filter})",
+                source_path
+            );
+            command_ok = run_transcode_command(
+                &ffmpeg,
+                source_path,
+                &temp_proxy_path,
+                &filter,
+                cache_key,
+                estimated_size_bytes,
+                progress_tx,
+                attempt_hw_enc,
+                proxy_codec,
+                None,
+                Some(&gpu_filter),
+            );
+            if !command_ok {
+                log::warn!(
+                    "ProxyCache: GPU-resident VA-API transcode failed for {}; falling back to the CPU filter chain",
+                    source_path
+                );
+                let _ = std::fs::remove_file(&temp_proxy_path);
+            }
+        }
+        // Attempt 1: best-effort HW encode + HW decode (each independently
+        // gated on availability + per-source failure history).
+        if !command_ok {
+            command_ok = run_transcode_command(
+                &ffmpeg,
+                source_path,
+                &temp_proxy_path,
+                &filter,
+                cache_key,
+                estimated_size_bytes,
+                progress_tx,
+                attempt_hw_enc,
+                proxy_codec,
+                attempt_hw_dec,
+                None,
+            );
+        }
         // Attempt 2: if HW encode was active, blame the encoder first
         // (more commonly fragile on 10-bit / unusual input) and retry with
         // libx264 while keeping the decoder choice.
@@ -2190,6 +2271,7 @@ fn transcode_proxy(
                 attempt_hw_enc,
                 proxy_codec,
                 attempt_hw_dec,
+                None,
             );
         }
         // Attempt 3: if HW decode was active and we still failed, fall
@@ -2225,6 +2307,7 @@ fn transcode_proxy(
                 attempt_hw_enc,
                 proxy_codec,
                 attempt_hw_dec,
+                None,
             );
         }
         if command_ok {
@@ -2380,6 +2463,23 @@ mod tests {
         );
         assert!(path_h264.is_some() && path_hevc.is_some());
         assert_ne!(path_h264, path_hevc);
+    }
+
+    #[test]
+    fn vaapi_scale_filter_mirrors_cpu_rules_and_converts_to_nv12() {
+        assert_eq!(
+            ProxyScale::MaxHeight(1080).ffmpeg_vaapi_scale_filter(),
+            "scale_vaapi=w=-2:h='min(1080,ih)':format=nv12"
+        );
+    }
+
+    #[test]
+    fn gpu_resident_proxy_requires_scale_only_vaapi_encode_and_vaapi_decode() {
+        assert!(gpu_resident_proxy_eligible(true, Some(HwEncoderFamily::Vaapi), true));
+        assert!(!gpu_resident_proxy_eligible(false, Some(HwEncoderFamily::Vaapi), true));
+        assert!(!gpu_resident_proxy_eligible(true, Some(HwEncoderFamily::Nvenc), true));
+        assert!(!gpu_resident_proxy_eligible(true, None, true));
+        assert!(!gpu_resident_proxy_eligible(true, Some(HwEncoderFamily::Vaapi), false));
     }
 
     #[test]
