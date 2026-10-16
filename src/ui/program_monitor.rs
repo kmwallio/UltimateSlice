@@ -821,10 +821,16 @@ pub fn build_program_monitor(
     let hud_stats_getter: Rc<dyn Fn() -> HudStats> = Rc::new(hud_stats_getter);
     let hud_da = DrawingArea::new();
     hud_da.set_visible(initial_show_hud);
-    hud_da.set_hexpand(true);
-    hud_da.set_vexpand(true);
-    hud_da.set_halign(gtk::Align::Fill);
-    hud_da.set_valign(gtk::Align::Fill);
+    // Content-sized and anchored top-left instead of a full-canvas layer:
+    // GSK re-rasterises every cairo node in the damaged region per video
+    // frame, so the HUD's cost is its own area, not the canvas's.
+    hud_da.set_hexpand(false);
+    hud_da.set_vexpand(false);
+    hud_da.set_halign(gtk::Align::Start);
+    hud_da.set_valign(gtk::Align::Start);
+    hud_da.set_margin_start(12);
+    hud_da.set_margin_top(12);
+    hud_da.set_size_request(HUD_PANEL_W, HUD_PANEL_H);
     hud_da.set_can_target(false);
     {
         let hud_visible = hud_visible.clone();
@@ -875,10 +881,11 @@ pub fn build_program_monitor(
                     }
                 }
             }
-            let box_w = text_w + pad * 2.0;
-            let box_h = line_h * lines.len() as f64 + pad * 2.0;
-            let x = 12.0;
-            let y = 12.0;
+            let box_w = (text_w + pad * 2.0).min(width as f64);
+            let box_h = (line_h * lines.len() as f64 + pad * 2.0).min(height as f64);
+            // The widget itself is positioned by its margins; draw at origin.
+            let x = 0.0;
+            let y = 0.0;
 
             // Dark translucent rounded background.
             let radius = 6.0;
@@ -1010,25 +1017,32 @@ pub fn build_program_monitor(
         Rc::new(Cell::new(initial_timecode_burnin_position));
     let tc_burnin_da = DrawingArea::new();
     tc_burnin_da.set_visible(initial_timecode_burnin_enabled);
-    tc_burnin_da.set_hexpand(true);
-    tc_burnin_da.set_vexpand(true);
-    tc_burnin_da.set_halign(gtk::Align::Fill);
-    tc_burnin_da.set_valign(gtk::Align::Fill);
+    // Content-sized pill positioned by alignment + margins (see the HUD
+    // note above); the draw func sizes it from the canvas it sits on.
+    tc_burnin_da.set_hexpand(false);
+    tc_burnin_da.set_vexpand(false);
     tc_burnin_da.set_can_target(false);
+    apply_timecode_burnin_layout(&tc_burnin_da, initial_timecode_burnin_position, 6.0, 1, 1);
     {
         let enabled = tc_burnin_enabled_state.clone();
         let position = tc_burnin_position_state.clone();
         let stats_getter = hud_stats_getter.clone();
-        tc_burnin_da.set_draw_func(move |_da, cr, width, height| {
+        let last_layout: Rc<Cell<(TimecodeBurninPosition, i32, i32, i32)>> =
+            Rc::new(Cell::new((initial_timecode_burnin_position, 0, 1, 1)));
+        tc_burnin_da.set_draw_func(move |da, cr, width, height| {
             if !enabled.get() || width <= 0 || height <= 0 {
                 return;
             }
             let stats = stats_getter();
             let text = timecode::format_ns_as_timecode(stats.playhead_ns, &stats.frame_rate);
-
-            let w = width as f64;
-            let h = height as f64;
-            let short_edge = w.min(h);
+            // Scale from the canvas (our parent overlay), not from this
+            // content-sized widget.
+            let (canvas_w, canvas_h) = da
+                .parent()
+                .map(|p| (p.width() as f64, p.height() as f64))
+                .filter(|(w, h)| *w > 0.0 && *h > 0.0)
+                .unwrap_or((width as f64, height as f64));
+            let short_edge = canvas_w.min(canvas_h);
             let font_size = (short_edge * 0.035).clamp(12.0, 28.0);
             let pad_x = font_size * 0.7;
             let pad_y = font_size * 0.35;
@@ -1046,7 +1060,19 @@ pub fn build_program_monitor(
             };
             let pill_w = ext.width() + pad_x * 2.0;
             let pill_h = font_size + pad_y * 2.0;
-            let (x, y) = position.get().anchor(w, h, pill_w, pill_h, margin);
+            // Keep the widget exactly pill-sized and anchored per the
+            // position preference; only touch layout when something changed.
+            let wanted = (
+                position.get(),
+                margin.round() as i32,
+                pill_w.ceil() as i32,
+                pill_h.ceil() as i32,
+            );
+            if last_layout.get() != wanted {
+                last_layout.set(wanted);
+                apply_timecode_burnin_layout(da, wanted.0, margin, wanted.2, wanted.3);
+            }
+            let (x, y) = (0.0, 0.0);
 
             let radius = (pill_h * 0.35).min(10.0);
             cr.set_source_rgba(0.0, 0.0, 0.0, 0.72);
@@ -3108,6 +3134,40 @@ mod tests {
     fn canvas_base_keeps_preview_background_class_for_empty_timelines() {
         assert!(PROGRAM_MONITOR_CANVAS_BASE_CSS_CLASSES.contains(&"preview-video"));
     }
+}
+
+/// Fixed size of the HUD panel widget (monospace 12 px lines + padding);
+/// the drawn box is the text's actual width, clipped to this.
+const HUD_PANEL_W: i32 = 220;
+const HUD_PANEL_H: i32 = 7 * 15 + 20;
+
+/// Anchor the timecode burn-in widget inside its overlay from the preset
+/// (alignment + margins) and give it the pill's exact size.
+fn apply_timecode_burnin_layout(
+    da: &DrawingArea,
+    position: TimecodeBurninPosition,
+    margin: f64,
+    pill_w: i32,
+    pill_h: i32,
+) {
+    use TimecodeBurninPosition as P;
+    let halign = match position {
+        P::TopLeft | P::BottomLeft => gtk::Align::Start,
+        P::TopCenter | P::BottomCenter => gtk::Align::Center,
+        P::TopRight | P::BottomRight => gtk::Align::End,
+    };
+    let valign = match position {
+        P::TopLeft | P::TopCenter | P::TopRight => gtk::Align::Start,
+        _ => gtk::Align::End,
+    };
+    let m = margin.round().max(0.0) as i32;
+    da.set_halign(halign);
+    da.set_valign(valign);
+    da.set_margin_start(m);
+    da.set_margin_end(m);
+    da.set_margin_top(m);
+    da.set_margin_bottom(m);
+    da.set_size_request(pill_w.max(1), pill_h.max(1));
 }
 
 /// Build a VU meter DrawingArea showing L/R audio peak levels in dBFS.

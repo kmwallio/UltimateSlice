@@ -1461,6 +1461,26 @@ impl SlotAppliedProps {
     }
 }
 
+/// Thread budget for a libav software decoder plugged into a preview slot
+/// (the fallback for HDR clips and codecs without a VA-API decoder). Scales
+/// with the machine instead of the old fixed 2/4: a 16-thread CPU decoding
+/// 5.3K HEVC in software was capped at 4 threads. Heavy codecs get half the
+/// cores (2–8), light ones a quarter (2–4), leaving headroom for the other
+/// slots and the compositor. `None` for non-libav elements.
+fn software_decoder_threads(factory_name: &str, cores: usize) -> Option<i32> {
+    let cores = cores.max(1) as i32;
+    if factory_name.starts_with("avdec_h265")
+        || factory_name.starts_with("avdec_vp9")
+        || factory_name.starts_with("avdec_av1")
+    {
+        Some((cores / 2).clamp(2, 8))
+    } else if factory_name.starts_with("avdec_h264") || factory_name.starts_with("avdec_vp8") {
+        Some((cores / 4).clamp(2, 4))
+    } else {
+        None
+    }
+}
+
 /// One decoder branch connected to the compositor/audiomixer.
 struct VideoSlot {
     /// Index into `ProgramPlayer::clips` for the clip loaded in this slot.
@@ -14614,12 +14634,15 @@ impl ProgramPlayer {
                 .factory()
                 .map(|f| f.name().to_string())
                 .unwrap_or_default();
-            if factory_name.starts_with("avdec_h264") || factory_name.starts_with("avdec_vp8") {
-                child.set_property("max-threads", 2i32);
-            } else if factory_name.starts_with("avdec_h265")
-                || factory_name.starts_with("avdec_vp9")
-            {
-                child.set_property("max-threads", 4i32);
+            if let Some(threads) = software_decoder_threads(
+                &factory_name,
+                std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4),
+            ) {
+                if child.find_property("max-threads").is_some() {
+                    child.set_property("max-threads", threads);
+                }
             } else if tune_multiqueue && factory_name == "multiqueue" {
                 child.set_property("max-size-time", 0u64);
                 child.set_property("max-size-bytes", 10_485_760u32);
@@ -19091,6 +19114,20 @@ mod tests {
             has_chroma_key,
             false,
         )
+    }
+
+    #[test]
+    fn software_decoder_threads_scale_with_cores_within_bounds() {
+        assert_eq!(super::software_decoder_threads("avdec_h265", 16), Some(8));
+        assert_eq!(super::software_decoder_threads("avdec_h265", 4), Some(2));
+        assert_eq!(super::software_decoder_threads("avdec_h265", 64), Some(8));
+        assert_eq!(super::software_decoder_threads("avdec_vp9", 12), Some(6));
+        assert_eq!(super::software_decoder_threads("avdec_av1", 8), Some(4));
+        assert_eq!(super::software_decoder_threads("avdec_h264", 16), Some(4));
+        assert_eq!(super::software_decoder_threads("avdec_h264", 4), Some(2));
+        assert_eq!(super::software_decoder_threads("avdec_vp8", 2), Some(2));
+        assert_eq!(super::software_decoder_threads("vah265dec", 16), None);
+        assert_eq!(super::software_decoder_threads("multiqueue", 16), None);
     }
 
     #[test]

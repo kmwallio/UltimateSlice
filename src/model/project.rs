@@ -215,35 +215,6 @@ impl TimecodeBurninPosition {
         Self::ALL.iter().copied().find(|p| p.as_str() == s)
     }
 
-    /// Compute the top-left corner of a `(pill_w, pill_h)` rectangle
-    /// inside a canvas of `(canvas_w, canvas_h)` with a margin
-    /// (typically ~2% of the short edge). Centered positions center
-    /// horizontally; the top/bottom axis is always margin-based.
-    pub fn anchor(
-        self,
-        canvas_w: f64,
-        canvas_h: f64,
-        pill_w: f64,
-        pill_h: f64,
-        margin: f64,
-    ) -> (f64, f64) {
-        let (hx, vy) = match self {
-            TimecodeBurninPosition::TopLeft | TimecodeBurninPosition::BottomLeft => (margin, 0.0),
-            TimecodeBurninPosition::TopCenter | TimecodeBurninPosition::BottomCenter => {
-                ((canvas_w - pill_w) * 0.5, 0.0)
-            }
-            TimecodeBurninPosition::TopRight | TimecodeBurninPosition::BottomRight => {
-                (canvas_w - pill_w - margin, 0.0)
-            }
-        };
-        let y = match self {
-            TimecodeBurninPosition::TopLeft
-            | TimecodeBurninPosition::TopCenter
-            | TimecodeBurninPosition::TopRight => margin,
-            _ => canvas_h - pill_h - margin,
-        };
-        (hx, y + vy)
-    }
 }
 
 /// An audio submix bus. Each `AudioRole` (Dialogue, Effects, Music) has a
