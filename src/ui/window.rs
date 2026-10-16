@@ -9992,7 +9992,15 @@ pub fn build_window(
     // Wire timeline's on_project_changed + on_seek + on_play_pause
     {
         let cb = on_project_changed.clone();
-        timeline_state.borrow_mut().on_project_changed = Some(Rc::new(move || cb()));
+        let ts_rev = timeline_state.clone();
+        timeline_state.borrow_mut().on_project_changed = Some(Rc::new(move || {
+            // Invalidate the timeline's playback render cache. try_borrow_mut:
+            // callers must not hold a borrow here, but never abort over it.
+            if let Ok(mut st) = ts_rev.try_borrow_mut() {
+                st.content_rev = st.content_rev.wrapping_add(1);
+            }
+            cb()
+        }));
     }
     // Multicam angle viewer panel widgets (created early so closures can capture them;
     // appended to the sidebar layout later in the function).
@@ -14203,6 +14211,9 @@ pub fn build_window(
 
     // ── Voiceover countdown overlay on the program monitor ────────────────
     let countdown_overlay_da = gtk4::DrawingArea::new();
+    // Hidden unless a countdown is running: an always-visible full-canvas
+    // cairo overlay is re-rasterised by GSK on every video frame.
+    countdown_overlay_da.set_visible(false);
     countdown_overlay_da.set_hexpand(true);
     countdown_overlay_da.set_vexpand(true);
     countdown_overlay_da.set_halign(gtk4::Align::Fill);
@@ -14962,6 +14973,7 @@ pub fn build_window(
             let v = cv.get();
             if v != last_val {
                 last_val = v;
+                da.set_visible(v > 0);
                 da.queue_draw();
             }
             glib::ControlFlow::Continue
@@ -15071,7 +15083,9 @@ pub fn build_window(
             Rc::new(RefCell::new(HashMap::new()));
         let prog_proxy_watermark_setter_poll = prog_proxy_watermark_setter.clone();
         let monitor_state_poll = monitor_state.clone();
+        let tick_stats: std::cell::Cell<(u32, f64, f64)> = std::cell::Cell::new((0, 0.0, 0.0));
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
+            let tick_t0 = std::time::Instant::now();
             let (pos_ns, playing, opacity_a, opacity_b, peaks, track_peaks, scope_frame, jkl_rate) = {
                 let mut player = pp.borrow_mut();
                 let now_us = glib::monotonic_time();
@@ -15208,6 +15222,20 @@ pub fn build_window(
             if !playing {
                 picture_a_poll.queue_draw();
                 picture_b_poll.queue_draw();
+            }
+            {
+                // Keep the timeline's playback-active flag truthful every tick
+                // (playback can end on its own at EOS); a redraw on the
+                // playing→stopped edge drops the track render cache.
+                let was_active = ts.borrow().playback_active;
+                if was_active != playing {
+                    ts.borrow_mut().playback_active = playing;
+                    if !playing {
+                        if let Some(ref w) = *cell.borrow() {
+                            w.queue_draw();
+                        }
+                    }
+                }
             }
             // Update VU meter with current audio peak levels. draw_vu_meter
             // is a pure function of the peaks, so skip the repaint whenever
@@ -15509,6 +15537,17 @@ pub fn build_window(
                     collect_subtitle_lines(editing, pos_ns, &mut lines, &mut font_cache);
                 }
                 prog_subtitle_setter_poll(lines);
+            }
+            if log::log_enabled!(log::Level::Debug) {
+                let ms = tick_t0.elapsed().as_secs_f64() * 1000.0;
+                let (n, sum, max) = tick_stats.get();
+                let (n, sum, max) = (n + 1, sum + ms, max.max(ms));
+                if n >= 30 {
+                    log::debug!("program tick: {} ticks avg {:.2} ms max {:.2} ms", n, sum / n as f64, max);
+                    tick_stats.set((0, 0.0, 0.0));
+                } else {
+                    tick_stats.set((n, sum, max));
+                }
             }
             glib::ControlFlow::Continue
         });
@@ -17599,7 +17638,7 @@ pub fn build_window(
     // Mini-map overview strip (between ruler and track canvas).
     let minimap_area = build_timeline_minimap(
         timeline_state.clone(),
-        timeline_area.clone(),
+        timeline_area.clone().upcast::<gtk4::Widget>(),
         timeline_ruler.clone(),
     );
     minimap_area.set_visible(preferences_state.borrow().show_timeline_minimap);

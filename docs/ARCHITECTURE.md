@@ -663,6 +663,42 @@ don't burn the same hours:
 
 ---
 
+## GTK rendering performance rules (GSK + cairo)
+
+Measured on GTK 4.22 with the Vulkan and NGL renderers (gdb/eu-stack sampling
+of the main thread during playback):
+
+- **Every cairo render node that intersects a frame's damage region is
+  re-rasterised (clear + replay + upload) on every frame**, whether or not the
+  widget was redrawn. A `gtk::DrawingArea` always produces one full-size cairo
+  node. During playback the Program Monitor damages the canvas ~30×/s and the
+  playhead damages the timeline ~20×/s, and the renderer works with the
+  *union* of the damage, so a cairo node anywhere in between is a per-frame
+  cost proportional to its area — even when its draw func returns early.
+- **Keep overlay DrawingAreas hidden unless they have something to draw.**
+  `src/ui/program_monitor.rs` overlays (safe areas, false colour, zebra, HUD,
+  aspect mask, burn-in, A/B, subtitles, trim display, proxy watermark), the
+  voiceover countdown in `window.rs` and `TransformOverlay` all sync
+  `set_visible` with their enable state in their setters. A new full-canvas
+  overlay must do the same; an invisible widget has no render node.
+- **Big, frequently redrawn content must not be a cairo node.** The timeline
+  track area is a custom widget (`src/ui/timeline/area.rs`,
+  `TimelineArea`) whose `snapshot()` appends a cached **texture** node for the
+  track content during playback (`TrackContentCache`, keyed by zoom, scroll
+  window, selection, `content_rev`, structural hash of the visible tracks,
+  thumbnail/waveform generation and device scale) plus small cairo/colour
+  nodes for the label column, status badges and playhead. Everything
+  interactive falls back to the full cairo draw (`draw_timeline`), which is
+  also what PNG export uses. Textures uploaded from `GdkMemoryTexture` are
+  cached by GSK across frames; cairo nodes are not.
+- **Measure before optimising.** `perf` may be unavailable
+  (`perf_event_paranoid=4`); sample with `gdb -batch -p PID -ex bt` or
+  `eu-stack -p PID` after launching the app with an `LD_PRELOAD` that calls
+  `prctl(PR_SET_PTRACER, PR_SET_PTRACER_ANY)`, and read per-thread CPU from
+  `/proc/<pid>/task/*/stat` (several threads share the process name — the
+  main thread is the one whose tid equals the pid). `RUST_LOG=…widget=debug`
+  logs timeline draw times; `GDK_DEBUG=frames` logs GTK paint durations.
+
 ## Adding a New Feature
 
 ### Adding a new timeline tool

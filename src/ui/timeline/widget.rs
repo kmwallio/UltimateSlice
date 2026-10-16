@@ -17,6 +17,8 @@ use gtk4::prelude::*;
 use gtk4::{
     self as gtk, DrawingArea, EventControllerKey, EventControllerScroll, GestureClick, GestureDrag,
 };
+use crate::ui::timeline::area::TimelineArea;
+use gtk::graphene;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
@@ -754,6 +756,13 @@ pub struct TimelineState {
     /// scroll, or playhead seek so a stale preview never lingers. Purely
     /// ephemeral view state — not persisted.
     pub hover_scrub: Option<HoverScrubPreview>,
+    /// True while the Program Monitor is playing (maintained by the 33 ms
+    /// tick in window.rs). Enables the track-content render cache, which is
+    /// only worth its staleness risk while the playhead drives redraws.
+    pub playback_active: bool,
+    /// Bumped on every `on_project_changed`; part of the render cache key
+    /// so project edits made during playback always repaint the tracks.
+    pub content_rev: u64,
     /// Modal frame-by-frame precision trim session layered on top of the
     /// existing trim tools. Stores the original drag-style snapshot plus the
     /// current synthetic trim position until the user commits or cancels.
@@ -1032,6 +1041,8 @@ impl TimelineState {
             active_snap_hit: None,
             minimap_widget: None,
             hover_scrub: None,
+            playback_active: false,
+            content_rev: 0,
             precision_trim_session: None,
             on_trim_preview: None,
         }
@@ -6105,7 +6116,7 @@ fn freeze_source_from_playhead(clip: &Clip, playhead_ns: u64) -> u64 {
 }
 
 #[allow(deprecated)]
-pub fn open_freeze_frame_dialog(state: Rc<RefCell<TimelineState>>, area: DrawingArea) {
+pub fn open_freeze_frame_dialog(state: Rc<RefCell<TimelineState>>, area: gtk::Widget) {
     if !state.borrow().can_create_freeze_frame_at_playhead() {
         return;
     }
@@ -6764,8 +6775,8 @@ fn apply_clip_context_menu_actionability(
 pub fn build_timeline(
     state: Rc<RefCell<TimelineState>>,
     ruler_area: Rc<RefCell<Option<DrawingArea>>>,
-) -> DrawingArea {
-    let area = DrawingArea::new();
+) -> TimelineArea {
+    let area = TimelineArea::new();
     area.set_vexpand(true);
     area.set_hexpand(true);
     area.set_halign(gtk::Align::Fill);
@@ -7212,7 +7223,7 @@ pub fn build_timeline(
             if let Some(pop) = pop_weak.upgrade() {
                 pop.popdown();
             }
-            open_freeze_frame_dialog(state.clone(), area.clone());
+            open_freeze_frame_dialog(state.clone(), area.clone().upcast::<gtk::Widget>());
         });
     }
 
@@ -7802,18 +7813,63 @@ pub fn build_timeline(
     }
 
     // Drawing
+    // Bumped whenever a thumbnail or waveform finishes loading (from either
+    // the snapshot's poll or the 200 ms timer's), so the playback render
+    // cache repaints to pick it up.
+    let asset_gen: Rc<std::cell::Cell<u64>> = Rc::new(std::cell::Cell::new(0));
     {
         let state = state.clone();
         let thumb_cache = thumb_cache.clone();
         let wave_cache = wave_cache.clone();
         let ruler_area = ruler_area.clone();
-        area.set_draw_func(move |area, cr, width, height| {
+        let asset_gen = asset_gen.clone();
+        let render_cache: Rc<RefCell<Option<TrackContentCache>>> = Rc::new(RefCell::new(None));
+        let draw_stats: std::cell::Cell<(u32, f64, f64, u32)> = std::cell::Cell::new((0, 0.0, 0.0, 0));
+        area.set_snapshot_func(move |area, snapshot, width, height| {
+            let t0 = std::time::Instant::now();
             let mut tcache = thumb_cache.borrow_mut();
-            tcache.poll();
             let mut wcache = wave_cache.borrow_mut();
-            wcache.poll();
+            if tcache.poll() | wcache.poll() {
+                asset_gen.set(asset_gen.get().wrapping_add(1));
+            }
             let st = state.borrow();
-            draw_timeline(cr, width, height, &st, &mut tcache, &mut wcache, false);
+            let mut slot = render_cache.borrow_mut();
+            let device_scale = area.scale_factor().max(1) as f64;
+            let w = width as f64;
+            let h = height as f64;
+            let fast = playback_fast_path_eligible(&st)
+                && snapshot_playback_fast_path(
+                    snapshot,
+                    w,
+                    h,
+                    &st,
+                    &mut tcache,
+                    &mut wcache,
+                    &mut slot,
+                    device_scale,
+                    asset_gen.get(),
+                );
+            if !fast {
+                // Not playing (or something interactive is live): one cairo
+                // node with the full draw, exactly as a DrawingArea would.
+                *slot = None;
+                let cr = snapshot.append_cairo(&graphene::Rect::new(0.0, 0.0, w as f32, h as f32));
+                draw_timeline(&cr, width, height, &st, &mut tcache, &mut wcache, false);
+            }
+            if log::log_enabled!(log::Level::Debug) {
+                let ms = t0.elapsed().as_secs_f64() * 1000.0;
+                let (n, sum, max, fast_n) = draw_stats.get();
+                let (n, sum, max, fast_n) = (n + 1, sum + ms, max.max(ms), fast_n + fast as u32);
+                if n >= 30 {
+                    log::debug!(
+                        "timeline snapshot: {} draws avg {:.2} ms max {:.2} ms ({} via texture fast path, playback_active={})",
+                        n, sum / n as f64, max, fast_n, st.playback_active
+                    );
+                    draw_stats.set((0, 0.0, 0.0, 0));
+                } else {
+                    draw_stats.set((n, sum, max, fast_n));
+                }
+            }
             if let Some(ruler) = ruler_area.borrow().as_ref() {
                 ruler.queue_draw();
             }
@@ -7831,10 +7887,12 @@ pub fn build_timeline(
         let area_weak = area.downgrade();
         let thumb_cache = thumb_cache.clone();
         let wave_cache = wave_cache.clone();
+        let asset_gen = asset_gen.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(200), move || {
             let thumbs_done = thumb_cache.borrow_mut().poll();
             let waves_done = wave_cache.borrow_mut().poll();
             if thumbs_done || waves_done {
+                asset_gen.set(asset_gen.get().wrapping_add(1));
                 if let Some(a) = area_weak.upgrade() {
                     a.queue_draw();
                 }
@@ -10101,7 +10159,7 @@ pub fn build_timeline(
                 Key::f | Key::F if shift && !ctrl => {
                     drop(st);
                     if let Some(a) = area_weak.upgrade() {
-                        open_freeze_frame_dialog(state.clone(), a);
+                        open_freeze_frame_dialog(state.clone(), a.upcast::<gtk::Widget>());
                     }
                     return glib::Propagation::Stop;
                 }
@@ -10520,7 +10578,7 @@ pub fn build_timeline(
 
 pub fn build_timeline_ruler(
     state: Rc<RefCell<TimelineState>>,
-    timeline_area: DrawingArea,
+    timeline_area: gtk::Widget,
 ) -> DrawingArea {
     let ruler = DrawingArea::new();
     ruler.set_content_height(RULER_HEIGHT.ceil() as i32);
@@ -10771,7 +10829,7 @@ fn draw_minimap(cr: &gtk::cairo::Context, width: f64, height: f64, st: &Timeline
 /// gesture controllers. Returns the DrawingArea (initially hidden).
 pub fn build_timeline_minimap(
     state: Rc<RefCell<TimelineState>>,
-    timeline_area: DrawingArea,
+    timeline_area: gtk::Widget,
     ruler: DrawingArea,
 ) -> DrawingArea {
     let minimap = DrawingArea::new();
@@ -10953,6 +11011,358 @@ pub fn export_timeline_snapshot_png(
 }
 
 /// Cairo drawing of the entire timeline
+/// Rasterised track-row *content* (everything right of the label column),
+/// uploaded once as a GPU texture and reused across playhead-driven redraws
+/// during playback (see `TimelineArea` for why this must be a texture node
+/// rather than a cairo blit).
+///
+/// Rendered one viewport-width wider than the widget so forward autoscroll
+/// (Smooth mode, or a Page jump smaller than a page) is served by drawing the
+/// same texture at a horizontal offset. Anything that could change the
+/// content — zoom, scroll beyond the margin, vertical scroll, selection,
+/// hover, project edits (`content_rev` + a structural hash), new thumbnails
+/// or waveforms (`asset_gen`) — changes `key` and forces a re-render. Drags
+/// and every other interactive state bypass the fast path entirely, and the
+/// cache is dropped when playback stops.
+pub struct TrackContentCache {
+    texture: gdk4::Texture,
+    key: u64,
+    scroll_offset: f64,
+    margin: f64,
+    logical_w: f64,
+    logical_h: f64,
+}
+
+/// Whether the snapshot may use the texture fast path: playing, nothing
+/// interactive or transient is being drawn, and no breadcrumb/empty state.
+fn playback_fast_path_eligible(st: &TimelineState) -> bool {
+    st.playback_active
+        && matches!(st.drag_op, DragOp::None)
+        && !st.loading
+        && !st.is_editing_compound()
+        && st.hover_scrub.is_none()
+        && st.active_snap_hit.is_none()
+        && st.marquee_selection.is_none()
+        && st.keyframe_marquee_selection.is_none()
+        && st.music_generation_armed_track_id.is_none()
+        && st.music_generation_region_draft.is_none()
+        && st.music_generation_overlays.is_empty()
+}
+
+/// Vertical scroll actually applied to the track rows for a screen draw.
+fn timeline_effective_scroll(
+    st: &TimelineState,
+    editing_tracks: &[crate::model::track::Track],
+    h: f64,
+    track_content_top: f64,
+) -> f64 {
+    let total_content = timeline_content_height_for_tracks(editing_tracks);
+    let visible = (h - track_content_top).max(0.0);
+    st.vertical_scroll_offset
+        .clamp(0.0, (total_content - visible).max(0.0))
+}
+
+/// Render the visible track rows' content into a texture `w + margin` wide.
+#[allow(clippy::too_many_arguments)]
+fn render_track_content_texture(
+    st: &TimelineState,
+    editing_tracks: &[crate::model::track::Track],
+    w: f64,
+    h: f64,
+    track_content_top: f64,
+    device_scale: f64,
+    key: u64,
+    cache: &mut crate::media::thumb_cache::ThumbnailCache,
+    wcache: &mut crate::media::waveform_cache::WaveformCache,
+) -> Option<TrackContentCache> {
+    let margin = (w - TRACK_LABEL_WIDTH).max(100.0).floor();
+    let logical_w = w + margin;
+    let surf_w = (logical_w * device_scale).ceil().max(1.0) as i32;
+    let surf_h = (h * device_scale).ceil().max(1.0) as i32;
+    let mut surface =
+        gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, surf_w, surf_h).ok()?;
+    surface.set_device_scale(device_scale, device_scale);
+    {
+        let ccr = gtk::cairo::Context::new(&surface).ok()?;
+        let (bg_r, bg_g, bg_b) = crate::ui::colors::COLOR_TIMELINE_BG;
+        ccr.set_source_rgb(bg_r, bg_g, bg_b);
+        ccr.paint().ok();
+        ccr.rectangle(0.0, track_content_top, logical_w, (h - track_content_top).max(0.0));
+        ccr.clip();
+        let grouped_peer_highlight_ids = st.grouped_peer_highlight_ids();
+        let linked_peer_highlight_ids = st.linked_peer_highlight_ids();
+        let effective_scroll = timeline_effective_scroll(st, editing_tracks, h, track_content_top);
+        let mut y = track_content_top - effective_scroll;
+        for &logical_idx in &visual_order(editing_tracks) {
+            let track = &editing_tracks[logical_idx];
+            let track_height = track_row_height(track);
+            if y + track_height > track_content_top && y < h {
+                draw_track_row_content(
+                    &ccr,
+                    logical_w,
+                    y,
+                    track_height,
+                    track,
+                    st,
+                    &grouped_peer_highlight_ids,
+                    &linked_peer_highlight_ids,
+                    cache,
+                    wcache,
+                );
+            }
+            y += track_height;
+        }
+    }
+    surface.flush();
+    let stride = surface.stride() as usize;
+    let bytes = {
+        let data = surface.data().ok()?;
+        glib::Bytes::from_owned(data.to_vec())
+    };
+    // Cairo ARGB32 is premultiplied native-endian; on little-endian that is
+    // GDK's B8G8R8A8 premultiplied layout (same mapping the PNG export uses).
+    let texture = gdk4::MemoryTexture::new(
+        surf_w,
+        surf_h,
+        gdk4::MemoryFormat::B8g8r8a8Premultiplied,
+        &bytes,
+        stride,
+    );
+    Some(TrackContentCache {
+        texture: texture.upcast(),
+        key,
+        scroll_offset: st.scroll_offset,
+        margin,
+        logical_w,
+        logical_h: h,
+    })
+}
+
+/// Label column (names, badges, live level meters) for the visible rows,
+/// drawn into a cairo node that is only `TRACK_LABEL_WIDTH` wide.
+fn draw_timeline_label_column(
+    cr: &gtk::cairo::Context,
+    w: f64,
+    h: f64,
+    st: &TimelineState,
+    editing_tracks: &[crate::model::track::Track],
+    track_content_top: f64,
+) {
+    let (bg_r, bg_g, bg_b) = crate::ui::colors::COLOR_TIMELINE_BG;
+    cr.set_source_rgb(bg_r, bg_g, bg_b);
+    cr.paint().ok();
+    cr.rectangle(0.0, track_content_top, TRACK_LABEL_WIDTH, (h - track_content_top).max(0.0));
+    cr.clip();
+    let effective_scroll = timeline_effective_scroll(st, editing_tracks, h, track_content_top);
+    let mut y = track_content_top - effective_scroll;
+    for &logical_idx in &visual_order(editing_tracks) {
+        let track = &editing_tracks[logical_idx];
+        let track_height = track_row_height(track);
+        if y + track_height > track_content_top && y < h {
+            draw_track_row_label(cr, w, y, track_height, logical_idx, track, st);
+        }
+        y += track_height;
+    }
+}
+
+/// Tool / magnetic / MusicGen status text at the top-left of the content area.
+fn draw_timeline_status_badges(cr: &gtk::cairo::Context, st: &TimelineState, track_content_top: f64) {
+    let tool_label = match st.active_tool {
+        ActiveTool::Razor => Some("✂ Razor (B to toggle)"),
+        ActiveTool::Slip => Some("↔ Slip (Y to toggle)"),
+        ActiveTool::Slide => Some("⇔ Slide (U to toggle)"),
+        _ => None,
+    };
+    let mut indicator_y = track_content_top + 16.0;
+    if let Some(label) = tool_label {
+        cr.set_source_rgb(1.0, 0.8, 0.0);
+        cr.set_font_size(12.0);
+        let _ = cr.move_to(TRACK_LABEL_WIDTH + 8.0, indicator_y);
+        let _ = cr.show_text(label);
+        indicator_y += 16.0;
+    }
+    if st.magnetic_mode {
+        cr.set_source_rgb(0.55, 0.95, 0.65);
+        cr.set_font_size(12.0);
+        let _ = cr.move_to(TRACK_LABEL_WIDTH + 8.0, indicator_y);
+        let _ = cr.show_text("[Magnetic]");
+        indicator_y += 16.0;
+    }
+    if st.music_generation_armed_track_id.is_some() {
+        cr.set_source_rgb(0.78, 0.88, 1.0);
+        cr.set_font_size(12.0);
+        let _ = cr.move_to(TRACK_LABEL_WIDTH + 8.0, indicator_y);
+        let _ = cr.show_text(
+            "♫ Drag on the armed audio track to define a MusicGen region (Esc to cancel)",
+        );
+    }
+
+}
+
+fn timeline_status_badges_present(st: &TimelineState) -> bool {
+    !matches!(st.active_tool, ActiveTool::Select | ActiveTool::Draw)
+        || st.magnetic_mode
+        || st.music_generation_armed_track_id.is_some()
+}
+
+/// Playback snapshot: texture node for the cached track content, a narrow
+/// cairo node for the label column, a tiny cairo node for status badges and a
+/// colour node for the playhead. Returns false (nothing appended) when the
+/// content texture could not be produced, so the caller takes the full path.
+#[allow(clippy::too_many_arguments)]
+fn snapshot_playback_fast_path(
+    snapshot: &gtk::Snapshot,
+    w: f64,
+    h: f64,
+    st: &TimelineState,
+    cache: &mut crate::media::thumb_cache::ThumbnailCache,
+    wcache: &mut crate::media::waveform_cache::WaveformCache,
+    slot: &mut Option<TrackContentCache>,
+    device_scale: f64,
+    asset_gen: u64,
+) -> bool {
+    let proj = st.project.borrow();
+    let editing_tracks = st.resolve_editing_tracks(&proj);
+    if !editing_tracks.iter().any(|t| !t.clips.is_empty()) {
+        return false; // empty-state hint is drawn by the full path
+    }
+    let track_content_top = 0.0; // no ruler overlay, no breadcrumb (not compound)
+    let key = track_content_cache_key(st, editing_tracks, w, h, device_scale, asset_gen);
+    let valid = slot.as_ref().map_or(false, |c| {
+        let d = st.scroll_offset - c.scroll_offset;
+        c.key == key && d >= 0.0 && d <= c.margin
+    });
+    if !valid {
+        *slot = render_track_content_texture(
+            st,
+            editing_tracks,
+            w,
+            h,
+            track_content_top,
+            device_scale,
+            key,
+            cache,
+            wcache,
+        );
+    }
+    let Some(c) = slot.as_ref() else {
+        return false;
+    };
+    let d = st.scroll_offset - c.scroll_offset;
+    let content_w = (w - TRACK_LABEL_WIDTH).max(0.0);
+    let content_h = (h - track_content_top).max(0.0);
+    snapshot.push_clip(&graphene::Rect::new(
+        TRACK_LABEL_WIDTH as f32,
+        track_content_top as f32,
+        content_w as f32,
+        content_h as f32,
+    ));
+    snapshot.append_texture(
+        &c.texture,
+        &graphene::Rect::new(-d as f32, 0.0, c.logical_w as f32, c.logical_h as f32),
+    );
+    snapshot.pop();
+    {
+        let cr = snapshot.append_cairo(&graphene::Rect::new(0.0, 0.0, TRACK_LABEL_WIDTH as f32, h as f32));
+        draw_timeline_label_column(&cr, w, h, st, editing_tracks, track_content_top);
+    }
+    if timeline_status_badges_present(st) {
+        let cr = snapshot.append_cairo(&graphene::Rect::new(
+            TRACK_LABEL_WIDTH as f32,
+            track_content_top as f32,
+            (content_w.min(640.0)) as f32,
+            60.0,
+        ));
+        draw_timeline_status_badges(&cr, st, track_content_top);
+    }
+    let ph_x = st.ns_to_x(st.editing_playhead_ns());
+    if ph_x >= TRACK_LABEL_WIDTH - 1.0 && ph_x <= w + 1.0 && content_h > 0.0 {
+        snapshot.append_color(
+            &gdk4::RGBA::new(1.0, 0.3, 0.3, 1.0),
+            &graphene::Rect::new((ph_x - 1.0) as f32, track_content_top as f32, 2.0, content_h as f32),
+        );
+    }
+    true
+}
+
+/// Hash of everything (other than the playhead and live meters) that affects
+/// how the visible track rows render. Cheap: O(visible clips) field reads.
+fn track_content_cache_key(
+    st: &TimelineState,
+    editing_tracks: &[crate::model::track::Track],
+    w: f64,
+    h: f64,
+    device_scale: f64,
+    asset_gen: u64,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hs = std::collections::hash_map::DefaultHasher::new();
+    w.to_bits().hash(&mut hs);
+    h.to_bits().hash(&mut hs);
+    device_scale.to_bits().hash(&mut hs);
+    asset_gen.hash(&mut hs);
+    st.content_rev.hash(&mut hs);
+    st.pixels_per_second.to_bits().hash(&mut hs);
+    st.vertical_scroll_offset.to_bits().hash(&mut hs);
+    st.selected_clip_id.hash(&mut hs);
+    st.selected_track_id.hash(&mut hs);
+    let mut sel: Vec<&String> = st.selected_clip_ids.iter().collect();
+    sel.sort();
+    sel.hash(&mut hs);
+    st.selection_anchor_clip_id.hash(&mut hs);
+    st.hover_transition_pair.hash(&mut hs);
+    std::mem::discriminant(&st.active_tool).hash(&mut hs);
+    st.magnetic_mode.hash(&mut hs);
+    st.show_waveform_on_video.hash(&mut hs);
+    st.show_timeline_preview.hash(&mut hs);
+    st.show_track_audio_levels.hash(&mut hs);
+    st.loading.hash(&mut hs);
+    st.missing_media_paths.len().hash(&mut hs);
+    st.hdr_media_paths.len().hash(&mut hs);
+    st.proxy_ready_sources.len().hash(&mut hs);
+    st.proxy_preview_enabled.hash(&mut hs);
+    st.compound_nav_stack.hash(&mut hs);
+    st.precision_trim_session.is_some().hash(&mut hs);
+    for (clip_id, times) in &st.selected_keyframe_local_times {
+        clip_id.hash(&mut hs);
+        times.len().hash(&mut hs);
+    }
+    for track in editing_tracks {
+        track.id.hash(&mut hs);
+        std::mem::discriminant(&track.kind).hash(&mut hs);
+        track.label.hash(&mut hs);
+        track.muted.hash(&mut hs);
+        track.locked.hash(&mut hs);
+        track.soloed.hash(&mut hs);
+        track.duck.hash(&mut hs);
+        std::mem::discriminant(&track.height_preset).hash(&mut hs);
+        std::mem::discriminant(&track.audio_role).hash(&mut hs);
+        std::mem::discriminant(&track.color_label).hash(&mut hs);
+        track.clips.len().hash(&mut hs);
+        for clip in &track.clips {
+            clip.id.hash(&mut hs);
+            clip.timeline_start.hash(&mut hs);
+            clip.source_in.hash(&mut hs);
+            clip.source_out.hash(&mut hs);
+            clip.speed.to_bits().hash(&mut hs);
+            clip.label.hash(&mut hs);
+            std::mem::discriminant(&clip.kind).hash(&mut hs);
+            std::mem::discriminant(&clip.color_label).hash(&mut hs);
+            clip.outgoing_transition.kind.hash(&mut hs);
+            clip.outgoing_transition.duration_ns.hash(&mut hs);
+            clip.volume.to_bits().hash(&mut hs);
+            clip.volume_keyframes.len().hash(&mut hs);
+            clip.opacity_keyframes.len().hash(&mut hs);
+            clip.scale_keyframes.len().hash(&mut hs);
+            clip.reverse.hash(&mut hs);
+            clip.freeze_frame.hash(&mut hs);
+            clip.lut_paths.len().hash(&mut hs);
+            clip.compound_tracks.is_some().hash(&mut hs);
+        }
+    }
+    hs.finish()
+}
+
 fn draw_timeline(
     cr: &gtk::cairo::Context,
     width: i32,
@@ -11137,35 +11547,7 @@ fn draw_timeline(
     }
 
     // Tool indicator
-    let tool_label = match st.active_tool {
-        ActiveTool::Razor => Some("✂ Razor (B to toggle)"),
-        ActiveTool::Slip => Some("↔ Slip (Y to toggle)"),
-        ActiveTool::Slide => Some("⇔ Slide (U to toggle)"),
-        _ => None,
-    };
-    let mut indicator_y = track_content_top + 16.0;
-    if let Some(label) = tool_label {
-        cr.set_source_rgb(1.0, 0.8, 0.0);
-        cr.set_font_size(12.0);
-        let _ = cr.move_to(TRACK_LABEL_WIDTH + 8.0, indicator_y);
-        let _ = cr.show_text(label);
-        indicator_y += 16.0;
-    }
-    if st.magnetic_mode {
-        cr.set_source_rgb(0.55, 0.95, 0.65);
-        cr.set_font_size(12.0);
-        let _ = cr.move_to(TRACK_LABEL_WIDTH + 8.0, indicator_y);
-        let _ = cr.show_text("[Magnetic]");
-        indicator_y += 16.0;
-    }
-    if st.music_generation_armed_track_id.is_some() {
-        cr.set_source_rgb(0.78, 0.88, 1.0);
-        cr.set_font_size(12.0);
-        let _ = cr.move_to(TRACK_LABEL_WIDTH + 8.0, indicator_y);
-        let _ = cr.show_text(
-            "♫ Drag on the armed audio track to define a MusicGen region (Esc to cancel)",
-        );
-    }
+    draw_timeline_status_badges(cr, st, track_content_top);
 
     let track_row_y = |track_idx: usize| {
         track_row_top_in_tracks(editing_tracks, track_idx) + track_content_top - effective_scroll
@@ -11634,6 +12016,46 @@ fn draw_track_row(
     cache: &mut crate::media::thumb_cache::ThumbnailCache,
     wcache: &mut crate::media::waveform_cache::WaveformCache,
 ) {
+    draw_track_row_content(
+        cr,
+        width,
+        y,
+        track_height,
+        track,
+        st,
+        grouped_peer_highlight_ids,
+        linked_peer_highlight_ids,
+        cache,
+        wcache,
+    );
+    draw_track_row_label(cr, width, y, track_height, track_idx, track, st);
+}
+
+/// Bottom separator of a track row across the content area (the label
+/// column draws its own); kept here so the cached content texture has it.
+fn draw_track_row_content_separator(cr: &gtk::cairo::Context, width: f64, y: f64, track_height: f64) {
+    cr.set_source_rgb(0.1, 0.1, 0.12);
+    cr.set_line_width(1.0);
+    cr.move_to(TRACK_LABEL_WIDTH, y + track_height);
+    cr.line_to(width, y + track_height);
+    cr.stroke().ok();
+}
+
+/// The content area of a track row (background, clips, transition markers,
+/// mute/lock overlays) — everything right of the label column. Cacheable
+/// during playback; see [`TrackContentCache`].
+fn draw_track_row_content(
+    cr: &gtk::cairo::Context,
+    width: f64,
+    y: f64,
+    track_height: f64,
+    track: &crate::model::track::Track,
+    st: &TimelineState,
+    grouped_peer_highlight_ids: &HashSet<String>,
+    linked_peer_highlight_ids: &HashSet<String>,
+    cache: &mut crate::media::thumb_cache::ThumbnailCache,
+    wcache: &mut crate::media::waveform_cache::WaveformCache,
+) {
     let active_drag_ids = active_drag_clip_ids(&st.drag_op);
     let (r, g, b) = match track.kind {
         TrackKind::Video => (0.16, 0.16, 0.18),
@@ -11729,7 +12151,23 @@ fn draw_track_row(
         cr.restore().ok();
     }
 
-    // Draw label column on top so it stays visible when timeline is scrolled
+    draw_track_row_content_separator(cr, width, y, track_height);
+}
+
+/// The label column of a track row (name, badges, live level meter, resize
+/// affordance, bottom separator). Drawn on top so it stays visible when the
+/// timeline is scrolled, and drawn live every frame — the level meter changes
+/// with the audio — while `draw_track_row` content may come from the render
+/// cache during playback.
+fn draw_track_row_label(
+    cr: &gtk::cairo::Context,
+    width: f64,
+    y: f64,
+    track_height: f64,
+    track_idx: usize,
+    track: &crate::model::track::Track,
+    st: &TimelineState,
+) {
     let is_active = st.selected_track_id.as_deref() == Some(&track.id);
     if is_active {
         cr.set_source_rgb(0.28, 0.28, 0.32);

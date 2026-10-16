@@ -62,6 +62,7 @@ Tracking docs:
 - [x] Adaptive VA-API source decode mode (hardware-first when available and enabled) with automatic software fallback on hardware-path errors
 - [x] GPU-resident Program Monitor decode: VA-API decode + `vapostproc` GPU scale/convert to the preview processing size, pre-staged on the main thread (no streaming-thread state changes), per-source software fallback, one app-level decoder rank policy shared by both monitors, HUD `OUT`/`DEC` telemetry; hardware acceleration and `Auto` preview quality are now the defaults
 - [ ] Automatic proxy generation for sources above a resolution threshold (e.g. >2160p) even when proxy mode is Off
+- [x] Playback responsiveness: timeline track area renders a cached texture node during playback (custom `TimelineArea` widget) and monitor overlays stay hidden when idle, cutting main-thread CPU from ~80% to ~20% at 30 fps
 - [ ] Program Monitor: the ≥3-slot drop-late policy counts hidden (just-ended) slots and can stall the compositor after a cut when clips overlap on one track — make it count visible slots only, or recover faster
 - [x] Source monitor playback-priority mode (Smooth/Balanced/Accurate) with frame-boundary seek deduplication for paused scrubbing
 - [x] Compact Source Monitor footer: transport split into two rows, Source-Record routing moved into a **Routing…** popover, and keyword editing collapsed behind a **Keywords** expander for better small-display usability

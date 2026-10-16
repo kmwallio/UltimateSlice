@@ -2003,7 +2003,7 @@ impl TransformOverlay {
             da.add_controller(key_ctrl);
         }
 
-        TransformOverlay {
+        let overlay = TransformOverlay {
             drawing_area: da,
             active_tool,
             scale,
@@ -2047,7 +2047,9 @@ impl TransformOverlay {
             drawing_fill,
             drawing_items_snapshot,
             selected_drawing_item,
-        }
+        };
+        overlay.sync_visibility();
+        overlay
     }
 
     /// Push the current drawing clip's items into the overlay so
@@ -2101,8 +2103,26 @@ impl TransformOverlay {
     /// Update the currently-active tool so the overlay's gesture
     /// router knows whether to enter Draw capture mode. Must be
     /// called whenever `TimelineState.active_tool` changes.
+    /// Hide the overlay whenever it has nothing to draw and no gesture would
+    /// act (no selected clip, Draw tool off, no SAM prompt / tracking edit).
+    /// GSK re-rasterises every cairo node intersecting the damaged region on
+    /// each frame, and the video damages the canvas ~30×/s, so an always
+    /// visible full-canvas overlay costs a clear + upload per frame even when
+    /// its draw func returns early. All gesture handlers already bail out in
+    /// exactly this state, so hiding changes no interaction.
+    fn sync_visibility(&self) {
+        let visible = self.selected.get()
+            || self.active_tool.get() == crate::ui::timeline::ActiveTool::Draw
+            || self.sam_prompt_mode.get()
+            || self.tracking_region_editing.get();
+        if self.drawing_area.is_visible() != visible {
+            self.drawing_area.set_visible(visible);
+        }
+    }
+
     pub fn set_active_tool(&self, tool: crate::ui::timeline::ActiveTool) {
         self.active_tool.set(tool);
+        self.sync_visibility();
         // Crosshair cursor in Draw mode is the clearest user-visible
         // signal that the tool toggled; default arrow otherwise.
         let cursor_name = if tool == crate::ui::timeline::ActiveTool::Draw {
@@ -2160,6 +2180,7 @@ impl TransformOverlay {
     /// Show or hide handles (true when a clip is selected).
     pub fn set_clip_selected(&self, selected: bool) {
         self.selected.set(selected);
+        self.sync_visibility();
         self.drawing_area.queue_draw();
     }
 
@@ -2221,6 +2242,7 @@ impl TransformOverlay {
     ) {
         self.tracking_region_enabled.set(enabled);
         self.tracking_region_editing.set(editing && enabled);
+        self.sync_visibility();
         self.tracking_center_x.set(center_x.clamp(0.0, 1.0));
         self.tracking_center_y.set(center_y.clamp(0.0, 1.0));
         self.tracking_width.set(width.clamp(0.05, 0.5));
@@ -2248,6 +2270,7 @@ impl TransformOverlay {
     /// box (see Phase 2a constraint #3 in sam-work.md).
     pub fn enter_sam_prompt_mode(&self, on_captured: impl Fn(f64, f64, f64, f64) + 'static) {
         self.sam_prompt_mode.set(true);
+        self.sync_visibility();
         self.sam_prompt_start.set(None);
         self.sam_prompt_current.set(None);
         *self.sam_prompt_callback.borrow_mut() = Some(Box::new(on_captured));
@@ -2260,6 +2283,7 @@ impl TransformOverlay {
     /// away or the clip selection changes mid-prompt.
     pub fn exit_sam_prompt_mode(&self) {
         self.sam_prompt_mode.set(false);
+        self.sync_visibility();
         self.sam_prompt_start.set(None);
         self.sam_prompt_current.set(None);
         self.sam_prompt_callback.borrow_mut().take();

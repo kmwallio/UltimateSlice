@@ -668,6 +668,13 @@ pub fn build_program_monitor(
     overlay.add_overlay(&picture_a);
     let safe_area_visible = Rc::new(Cell::new(initial_show_safe_areas));
     let safe_area_da = DrawingArea::new();
+    // Overlay DrawingAreas are kept *hidden* whenever they have nothing to
+    // draw: GSK re-rasterises every cairo node that intersects the damaged
+    // region on each frame, and the video damages the whole canvas ~30×/s,
+    // so an always-visible but empty full-canvas overlay still costs a
+    // clear + upload per frame (measured ~36% of a core for the stack of
+    // them). Each setter below syncs `set_visible` with its enable state.
+    safe_area_da.set_visible(initial_show_safe_areas);
     safe_area_da.set_hexpand(true);
     safe_area_da.set_vexpand(true);
     safe_area_da.set_halign(gtk::Align::Fill);
@@ -710,6 +717,7 @@ pub fn build_program_monitor(
     // help evaluate exposure without guessing from a standard video image.
     let false_color_visible = Rc::new(Cell::new(initial_show_false_color));
     let false_color_da = DrawingArea::new();
+    false_color_da.set_visible(initial_show_false_color);
     false_color_da.set_hexpand(true);
     false_color_da.set_vexpand(true);
     false_color_da.set_halign(gtk::Align::Fill);
@@ -758,6 +766,7 @@ pub fn build_program_monitor(
     let zebra_visible = Rc::new(Cell::new(initial_show_zebra));
     let zebra_threshold_cell = Rc::new(Cell::new(initial_zebra_threshold));
     let zebra_da = DrawingArea::new();
+    zebra_da.set_visible(initial_show_zebra);
     zebra_da.set_hexpand(true);
     zebra_da.set_vexpand(true);
     zebra_da.set_halign(gtk::Align::Fill);
@@ -811,6 +820,7 @@ pub fn build_program_monitor(
     let hud_visible = Rc::new(Cell::new(initial_show_hud));
     let hud_stats_getter: Rc<dyn Fn() -> HudStats> = Rc::new(hud_stats_getter);
     let hud_da = DrawingArea::new();
+    hud_da.set_visible(initial_show_hud);
     hud_da.set_hexpand(true);
     hud_da.set_vexpand(true);
     hud_da.set_halign(gtk::Align::Fill);
@@ -922,6 +932,7 @@ pub fn build_program_monitor(
     // effectively free.
     let aspect_mask_preset: Rc<Cell<AspectMaskPreset>> = Rc::new(Cell::new(initial_aspect_mask));
     let aspect_mask_da = DrawingArea::new();
+    aspect_mask_da.set_visible(initial_aspect_mask != AspectMaskPreset::None);
     aspect_mask_da.set_hexpand(true);
     aspect_mask_da.set_vexpand(true);
     aspect_mask_da.set_halign(gtk::Align::Fill);
@@ -998,6 +1009,7 @@ pub fn build_program_monitor(
     let tc_burnin_position_state: Rc<Cell<TimecodeBurninPosition>> =
         Rc::new(Cell::new(initial_timecode_burnin_position));
     let tc_burnin_da = DrawingArea::new();
+    tc_burnin_da.set_visible(initial_timecode_burnin_enabled);
     tc_burnin_da.set_hexpand(true);
     tc_burnin_da.set_vexpand(true);
     tc_burnin_da.set_halign(gtk::Align::Fill);
@@ -1089,6 +1101,7 @@ pub fn build_program_monitor(
     let ab_surface_dims: Rc<Cell<(i32, i32)>> = Rc::new(Cell::new((0, 0)));
 
     let ab_da = DrawingArea::new();
+    ab_da.set_visible(initial_ab_enabled);
     ab_da.set_hexpand(true);
     ab_da.set_vexpand(true);
     ab_da.set_halign(gtk::Align::Fill);
@@ -1244,6 +1257,8 @@ pub fn build_program_monitor(
     let subtitle_lines: Rc<RefCell<Vec<SubtitleLine>>> = Rc::new(RefCell::new(Vec::new()));
     let subtitle_visible: Rc<Cell<bool>> = Rc::new(Cell::new(true));
     let subtitle_da = DrawingArea::new();
+    // Shown only while there are subtitle lines to paint (see the setter).
+    subtitle_da.set_visible(false);
     subtitle_da.set_hexpand(true);
     subtitle_da.set_vexpand(true);
     subtitle_da.set_halign(gtk::Align::Fill);
@@ -1768,6 +1783,7 @@ pub fn build_program_monitor(
             if safe_area_btn.is_active() != enabled {
                 safe_area_btn.set_active(enabled);
             }
+            safe_area_da.set_visible(enabled);
             safe_area_da.queue_draw();
         })
     };
@@ -1790,6 +1806,7 @@ pub fn build_program_monitor(
             if fc_btn.is_active() != enabled {
                 fc_btn.set_active(enabled);
             }
+            fc_da.set_visible(enabled);
             fc_da.queue_draw();
         })
     };
@@ -1814,6 +1831,7 @@ pub fn build_program_monitor(
             if z_btn.is_active() != enabled {
                 z_btn.set_active(enabled);
             }
+            z_da.set_visible(enabled);
             z_da.queue_draw();
         })
     };
@@ -1837,6 +1855,7 @@ pub fn build_program_monitor(
             if hud_btn.is_active() != enabled {
                 hud_btn.set_active(enabled);
             }
+            hud_da.set_visible(enabled);
             hud_da.queue_draw();
         })
     };
@@ -1879,6 +1898,7 @@ pub fn build_program_monitor(
                 aspect_mask_dropdown.set_selected(idx);
                 aspect_mask_updating.set(false);
             }
+            aspect_mask_da.set_visible(preset != AspectMaskPreset::None);
             aspect_mask_da.queue_draw();
         })
     };
@@ -1910,9 +1930,11 @@ pub fn build_program_monitor(
     // Wire subtitle overlay checkbox toggle.
     {
         let sv = subtitle_visible.clone();
+        let sl = subtitle_lines.clone();
         let da = subtitle_da.clone();
         subtitle_overlay_btn.connect_toggled(move |btn| {
             sv.set(btn.is_active());
+            da.set_visible(btn.is_active() && !sl.borrow().is_empty());
             da.queue_draw();
         });
     }
@@ -1923,11 +1945,13 @@ pub fn build_program_monitor(
     // are unchanged, which is the vast majority of ticks.
     let subtitle_text_setter: Rc<dyn Fn(Vec<SubtitleLine>)> = {
         let sl = subtitle_lines.clone();
+        let sv = subtitle_visible.clone();
         let da = subtitle_da.clone();
         Rc::new(move |lines: Vec<SubtitleLine>| {
             if *sl.borrow() == lines {
                 return;
             }
+            da.set_visible(sv.get() && !lines.is_empty());
             *sl.borrow_mut() = lines;
             da.queue_draw();
         })
@@ -1964,6 +1988,7 @@ pub fn build_program_monitor(
             if ab_compare_btn.is_active() != enabled {
                 ab_compare_btn.set_active(enabled);
             }
+            ab_da.set_visible(enabled);
             ab_da.queue_draw();
         })
     };
@@ -2120,6 +2145,7 @@ pub fn build_program_monitor(
                 tc_burnin_dropdown.set_selected(idx);
             }
             updating.set(false);
+            tc_burnin_da.set_visible(enabled);
             tc_burnin_da.queue_draw();
         })
     };
@@ -2194,6 +2220,8 @@ pub fn build_program_monitor(
         Rc::new(RefCell::new(ThumbnailCache::new()));
 
     let trim_display_da = DrawingArea::new();
+    // Shown only during an active trim preview (see the setter).
+    trim_display_da.set_visible(false);
     trim_display_da.set_hexpand(true);
     trim_display_da.set_vexpand(true);
     trim_display_da.set_halign(gtk::Align::Fill);
@@ -2254,6 +2282,7 @@ pub fn build_program_monitor(
                 // Still store None so we don't paint a stale overlay if the
                 // user re-enables mid-session.
                 *preview_state.borrow_mut() = None;
+                da.set_visible(false);
                 da.queue_draw();
                 return;
             }
@@ -2265,6 +2294,7 @@ pub fn build_program_monitor(
                     }
                 }
             }
+            da.set_visible(preview.is_some());
             *preview_state.borrow_mut() = preview;
             da.queue_draw();
         })
@@ -2283,6 +2313,8 @@ pub fn build_program_monitor(
     let proxy_watermark_active: Rc<Cell<bool>> = Rc::new(Cell::new(false));
 
     let proxy_watermark_da = DrawingArea::new();
+    // Shown only while the user toggle is on AND a proxy is active (see the setters).
+    proxy_watermark_da.set_visible(false);
     proxy_watermark_da.set_hexpand(true);
     proxy_watermark_da.set_vexpand(true);
     proxy_watermark_da.set_halign(gtk::Align::Fill);
@@ -2304,11 +2336,13 @@ pub fn build_program_monitor(
     // Wire the CheckButton.
     {
         let user_enabled = proxy_watermark_user_enabled.clone();
+        let active = proxy_watermark_active.clone();
         let da = proxy_watermark_da.clone();
         let on_changed = on_proxy_watermark_changed.clone();
         proxy_watermark_btn.connect_toggled(move |btn| {
             let v = btn.is_active();
             user_enabled.set(v);
+            da.set_visible(v && active.get());
             da.queue_draw();
             on_changed(v);
         });
@@ -2316,12 +2350,14 @@ pub fn build_program_monitor(
 
     let proxy_watermark_setter: Rc<dyn Fn(bool)> = {
         let active = proxy_watermark_active.clone();
+        let user_enabled = proxy_watermark_user_enabled.clone();
         let da = proxy_watermark_da.clone();
         Rc::new(move |is_active: bool| {
             if active.get() == is_active {
                 return;
             }
             active.set(is_active);
+            da.set_visible(user_enabled.get() && is_active);
             da.queue_draw();
         })
     };
