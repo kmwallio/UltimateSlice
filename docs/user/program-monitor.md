@@ -346,6 +346,7 @@ so you can see exactly what's on either side of the cut while dragging.
 - Timeline position is tracked via wall-clock timing for reliable playhead movement — no seek-anchor heuristics needed.
 - Audio boundaries are enforced via GStreamer seek stop positions, so audio stops precisely at the clip's source out-point.
 - When clip boundaries are crossed during playback (a clip starts or ends), the pipeline is briefly rebuilt with the new set of active clips.
+- Edits you make while playing (colour values, transform, opacity, volume, masks, titles, adding/moving/trimming clips that are not currently on screen) are applied in place without interrupting playback. Removing or replacing a clip that is on screen, adding an effect to it for the first time, or changing its in/out point still briefly rebuilds or reseeks that clip.
 - During those boundary rebuilds, audio-only preview playback is paused/re-synced to the current timeline position before resume so audio does not run ahead and end earlier than video.
 - All per-clip effects (color, denoise, sharpness, crop, rotate, flip, scale, position, title overlay, speed) are applied per-slot during playback.
 - Motion-tracked clip and first-mask attachments are resolved into the same transform/mask evaluation path used by normal preview playback, so tracked overlays in Program Monitor match export timing and placement.

@@ -18210,9 +18210,19 @@ pub fn build_window(
 
                 let project_file_path = { project_reload.borrow().file_path.clone() };
                 let master_gain_db = { project_reload.borrow().master_gain_db };
+                // Playing: first try to apply the edit to the running
+                // pipeline in place (no teardown, no seek, no clock reset).
+                // Falls back to the full reload below when the edit changes
+                // the active clip set or a slot's element shape.
+                // (Independent of `use_light_refresh`, which only skips the
+                // proxy priming above — the running pipeline is the same.)
+                let live_applied = was_playing
+                    && prog_player_reload
+                        .borrow_mut()
+                        .try_live_reload(clips.clone());
                 let topology_matches = {
                     let pp = prog_player_reload.borrow();
-                    pp.clips_topology_matches(&clips)
+                    live_applied || pp.clips_topology_matches(&clips)
                 };
                 {
                     let mut pp = prog_player_reload.borrow_mut();
@@ -18224,7 +18234,9 @@ pub fn build_window(
                     );
                     pp.set_project_dimensions(proj_w, proj_h);
                     pp.set_frame_rate(fr_num, fr_den);
-                    if topology_matches && !use_light_refresh {
+                    if live_applied {
+                        // Already applied to the running pipeline.
+                    } else if topology_matches && !use_light_refresh {
                         // Pipeline topology unchanged — update clip data
                         // in-place without tearing down decoders.  This
                         // avoids the multi-second blocking pipeline rebuild
@@ -18247,7 +18259,9 @@ pub fn build_window(
                     // with `prev_pos` so that gap reads the intended
                     // position. Phase 2's real seek then reconciles
                     // the pipeline state.
-                    pp.timeline_pos_ns = prev_pos.min(pp.timeline_dur_ns);
+                    if !live_applied {
+                        pp.timeline_pos_ns = prev_pos.min(pp.timeline_dur_ns);
+                    }
                     // Apply the project's Loudness Radar master gain so
                     // playback reflects the normalized mix.
                     pp.set_master_gain_db(master_gain_db);
@@ -18267,7 +18281,9 @@ pub fn build_window(
                     let phase2_started = std::time::Instant::now();
                     let mut pp = prog_player_reload_phase2.borrow_mut();
                     if !pp.clips.is_empty() {
-                        if was_playing {
+                        if live_applied {
+                            // The running pipeline already reflects the edit.
+                        } else if was_playing {
                             // Preserve playback behavior after clip reloads.
                             let _ = pp.seek(prev_pos);
                             pp.play();

@@ -2159,6 +2159,9 @@ pub struct ProgramPlayer {
     /// changes); the play/full-rebuild paths reset the clock after the
     /// audio sync instead.
     audio_sync_wall_clock: bool,
+    /// Scratch for `try_live_reload` (moves a clip list through a
+    /// temporary swap of `self.clips`).
+    live_reload_scratch: Option<Vec<ProgramClip>>,
     /// (sample instant, compositor frame seq) for the rolling effective-FPS
     /// estimate surfaced on the HUD / performance snapshot.
     fps_sample: Option<(Instant, u64)>,
@@ -2891,6 +2894,7 @@ impl ProgramPlayer {
                 dropped_frames_last_seen: HashMap::new(),
                 hw_decode_failed_paths: HashSet::new(),
                 audio_sync_wall_clock: false,
+                live_reload_scratch: None,
                 fps_sample: None,
                 effective_fps: 0.0,
             },
@@ -4485,6 +4489,327 @@ impl ProgramPlayer {
                 && a.track_index == b.track_index
         });
         video_ok && audio_ok
+    }
+
+    /// Hash of everything about a clip that fixes its slot's element *shape*
+    /// (what `build_slot_for_clip` / `build_effects_bin` instantiate) or its
+    /// decode source. Live-applied properties (opacity, transform, crop,
+    /// colour *values* once their stage exists, volume/pan, masks, HSL,
+    /// title text/style, transitions, track mix) and pure time mapping (see
+    /// `clip_mapping_signature`) are neutralised first, so two clips with
+    /// the same signature can share a running slot. Anything not listed
+    /// here counts as shape, which errs on the side of a rebuild.
+    fn clip_shape_signature(clip: &ProgramClip) -> u64 {
+        use std::hash::{Hash, Hasher};
+        // Stage-presence decisions, mirrored from build_effects_bin.
+        let need_balance = clip.brightness as f64 != 0.0
+            || clip.contrast as f64 != 1.0
+            || clip.saturation as f64 != 1.0
+            || (clip.exposure as f64).abs() > f64::EPSILON
+            || !clip.brightness_keyframes.is_empty()
+            || !clip.contrast_keyframes.is_empty()
+            || !clip.saturation_keyframes.is_empty();
+        let need_coloradj = (clip.temperature as f64 - 6500.0).abs() > 1.0
+            || (clip.tint as f64).abs() > 0.001
+            || !clip.temperature_keyframes.is_empty()
+            || !clip.tint_keyframes.is_empty();
+        let need_3point = [
+            clip.shadows,
+            clip.midtones,
+            clip.highlights,
+            clip.black_point,
+            clip.highlights_warmth,
+            clip.highlights_tint,
+            clip.midtones_warmth,
+            clip.midtones_tint,
+            clip.shadows_warmth,
+            clip.shadows_tint,
+        ]
+        .iter()
+        .any(|v| (*v as f64).abs() > f64::EPSILON);
+        let blur_sigma = (clip.denoise as f64 * 4.0 - clip.sharpness as f64 * 6.0).clamp(-20.0, 20.0);
+        let need_blur = blur_sigma.abs() > f64::EPSILON;
+        let need_squareblur = (clip.blur as f64).abs() > f64::EPSILON || !clip.blur_keyframes.is_empty();
+        let need_title = !clip.title_text.is_empty();
+
+        let mut c = clip.clone();
+        // Colour values (stage presence is hashed separately above).
+        c.brightness = 0.0;
+        c.contrast = 1.0;
+        c.saturation = 1.0;
+        c.exposure = 0.0;
+        c.temperature = 6500.0;
+        c.tint = 0.0;
+        c.shadows = 0.0;
+        c.midtones = 0.0;
+        c.highlights = 0.0;
+        c.black_point = 0.0;
+        c.highlights_warmth = 0.0;
+        c.highlights_tint = 0.0;
+        c.midtones_warmth = 0.0;
+        c.midtones_tint = 0.0;
+        c.shadows_warmth = 0.0;
+        c.shadows_tint = 0.0;
+        c.denoise = 0.0;
+        c.sharpness = 0.0;
+        c.blur = 0.0;
+        c.brightness_keyframes.clear();
+        c.contrast_keyframes.clear();
+        c.saturation_keyframes.clear();
+        c.temperature_keyframes.clear();
+        c.tint_keyframes.clear();
+        c.blur_keyframes.clear();
+        // Transform / crop / opacity (compositor pad + probes, live).
+        c.opacity = 1.0;
+        c.scale = 1.0;
+        c.position_x = 0.0;
+        c.position_y = 0.0;
+        c.rotate = 0;
+        c.flip_h = false;
+        c.flip_v = false;
+        c.crop_left = 0;
+        c.crop_right = 0;
+        c.crop_top = 0;
+        c.crop_bottom = 0;
+        c.opacity_keyframes.clear();
+        c.scale_keyframes.clear();
+        c.position_x_keyframes.clear();
+        c.position_y_keyframes.clear();
+        c.rotate_keyframes.clear();
+        c.crop_left_keyframes.clear();
+        c.crop_right_keyframes.clear();
+        c.crop_top_keyframes.clear();
+        c.crop_bottom_keyframes.clear();
+        // Audio mix (pad volume / panorama, live) and voice isolation gating.
+        c.volume = 1.0;
+        c.pan = 0.0;
+        c.volume_keyframes.clear();
+        c.pan_keyframes.clear();
+        c.track_muted = false;
+        c.track_gain_linear = 1.0;
+        c.track_pan = 0.0;
+        c.voice_isolation = 0.0;
+        c.voice_isolation_pad_ns = 0;
+        c.voice_isolation_fade_ns = 0;
+        c.voice_isolation_floor = 0.0;
+        c.voice_isolation_merged_intervals_ns.clear();
+        // Masks / HSL (shared mutexes read by the probes) and tracking.
+        c.masks.clear();
+        c.hsl_qualifier = None;
+        c.tracking_binding = None;
+        // Title text/style (textoverlay properties, live) — presence is shape.
+        if !c.title_text.is_empty() {
+            c.title_text = "x".to_string();
+        }
+        c.title_secondary_text.clear();
+        c.title_font.clear();
+        c.title_color = 0;
+        c.title_x = 0.0;
+        c.title_y = 0.0;
+        c.title_outline_color = 0;
+        c.title_outline_width = 0.0;
+        c.title_shadow = false;
+        c.title_shadow_color = 0;
+        c.title_shadow_offset_x = 0.0;
+        c.title_shadow_offset_y = 0.0;
+        c.title_bg_box = false;
+        c.title_bg_box_color = 0;
+        c.title_bg_box_padding = 0.0;
+        c.title_clip_bg_color = 0;
+        // Transitions (zorder/alpha/crop appliers, live).
+        c.transition_after.clear();
+        c.transition_after_ns = 0;
+        // Time mapping — covered by clip_mapping_signature.
+        c.source_in_ns = 0;
+        c.source_out_ns = 0;
+        c.timeline_start_ns = 0;
+        c.speed = 1.0;
+        c.speed_keyframes.clear();
+        c.reverse = false;
+        c.media_duration_ns = None;
+
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}", c).hash(&mut h);
+        (need_balance, need_coloradj, need_3point, need_blur, need_squareblur, need_title).hash(&mut h);
+        h.finish()
+    }
+
+    /// Hash of the fields that decide *where* a slot's decoder sits in its
+    /// source (a change needs a reseek, not a rebuild).
+    fn clip_mapping_signature(clip: &ProgramClip) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        clip.source_in_ns.hash(&mut h);
+        clip.source_out_ns.hash(&mut h);
+        clip.timeline_start_ns.hash(&mut h);
+        clip.speed.to_bits().hash(&mut h);
+        format!("{:?}", clip.speed_keyframes).hash(&mut h);
+        clip.reverse.hash(&mut h);
+        clip.transition_after_ns.hash(&mut h);
+        clip.media_duration_ns.hash(&mut h);
+        h.finish()
+    }
+
+    /// Apply a reloaded clip list to a *playing* pipeline without tearing
+    /// anything down: slots are re-pointed at the new clips by id, a slot is
+    /// flush-seeked only when its time mapping changed, live properties are
+    /// re-applied by the usual tick appliers, and the audio mixer is
+    /// resynced (wall-clock aligned) only when an active audio clip changed.
+    /// Returns `false` without touching state when the edit needs the full
+    /// reload (an active clip appeared/vanished, a slot's element shape
+    /// changed, prerender/blend/transform-drag modes are live, …) — the
+    /// caller then takes the existing `load_clips` / `seek` / `play` path.
+    pub fn try_live_reload(&mut self, mut clips: Vec<ProgramClip>) -> bool {
+        if self.state != PlayerState::Playing
+            || self.slots.is_empty()
+            || self.transform_live
+            || self.prerender_active_clips.is_some()
+            || self
+                .slots
+                .iter()
+                .any(|s| s.is_prerender_slot || s.is_blend_mode)
+        {
+            log::debug!("live_reload: declined (state/slots/mode)");
+            return false;
+        }
+        clips.sort_by_key(|c| c.timeline_start_ns);
+        let (new_audio, new_video): (Vec<ProgramClip>, Vec<ProgramClip>) =
+            clips.into_iter().partition(|c| c.is_audio_only);
+        let pos = self
+            .wall_clock_timeline_pos_ns()
+            .unwrap_or(self.timeline_pos_ns);
+
+        // Re-point every slot at the same clip (by id) in the new list.
+        let mut remap: Vec<(usize, usize, bool)> = Vec::with_capacity(self.slots.len());
+        for (si, slot) in self.slots.iter().enumerate() {
+            let Some(old) = self.clips.get(slot.clip_idx) else {
+                log::debug!("live_reload: declined (slot {si} has no clip)");
+                return false;
+            };
+            let Some(ni) = new_video.iter().position(|c| c.id == old.id) else {
+                log::debug!("live_reload: declined (slot {si} clip {} gone)", old.id);
+                return false;
+            };
+            let new = &new_video[ni];
+            if Self::clip_shape_signature(old) != Self::clip_shape_signature(new) {
+                log::debug!(
+                    "live_reload: declined (slot {si} shape changed)\n  old: {:?}\n  new: {:?}",
+                    old,
+                    new
+                );
+                return false;
+            }
+            let reseek = Self::clip_mapping_signature(old) != Self::clip_mapping_signature(new);
+            remap.push((si, ni, reseek));
+        }
+        // The visible slots must be exactly the clips active at `pos` under
+        // the new list (evaluated with the real active-set logic).
+        let desired_ids: Vec<String> = {
+            let old = std::mem::replace(&mut self.clips, new_video);
+            let ids = self
+                .clips_active_at(pos)
+                .into_iter()
+                .filter_map(|i| self.clips.get(i).map(|c| c.id.clone()))
+                .collect();
+            let new_video = std::mem::replace(&mut self.clips, old);
+            // (moved back out below)
+            self.live_reload_scratch = Some(new_video);
+            ids
+        };
+        let new_video = self.live_reload_scratch.take().unwrap_or_default();
+        let mut visible_ids: Vec<String> = self
+            .slots
+            .iter()
+            .filter(|s| !s.hidden)
+            .filter_map(|s| self.clips.get(s.clip_idx).map(|c| c.id.clone()))
+            .collect();
+        let mut desired_sorted = desired_ids.clone();
+        desired_sorted.sort();
+        visible_ids.sort();
+        if desired_sorted != visible_ids {
+            log::debug!(
+                "live_reload: declined (active set changed: desired={:?} visible={:?})",
+                desired_sorted,
+                visible_ids
+            );
+            return false;
+        }
+
+        // Audio: resync only when the active audio set or any active audio
+        // clip changed, or the audio index space shifted.
+        let old_audio_ids: Vec<&str> = self.audio_clips.iter().map(|c| c.id.as_str()).collect();
+        let new_audio_ids: Vec<&str> = new_audio.iter().map(|c| c.id.as_str()).collect();
+        let active_old: Vec<usize> = self.audio_clips_active_at(pos);
+        let audio_changed = old_audio_ids != new_audio_ids
+            || active_old.iter().any(|&i| {
+                match (self.audio_clips.get(i), new_audio.get(i)) {
+                    (Some(a), Some(b)) => format!("{a:?}") != format!("{b:?}"),
+                    _ => true,
+                }
+            });
+
+        // Commit.
+        self.invalidate_short_frame_cache("live-reload");
+        self.clips = new_video;
+        self.audio_clips = new_audio;
+        self.neutralize_baked_effects_for_sidecar_clips();
+        let max_track_index = self
+            .clips
+            .iter()
+            .chain(self.audio_clips.iter())
+            .map(|c| c.track_index)
+            .max();
+        self.audio_track_peak_db = max_track_index
+            .map(|idx| vec![[-60.0, -60.0]; idx + 1])
+            .unwrap_or_default();
+        let vdur = self.clips.iter().map(|c| c.timeline_end_ns()).max().unwrap_or(0);
+        let adur = self.audio_clips.iter().map(|c| c.timeline_end_ns()).max().unwrap_or(0);
+        self.timeline_dur_ns = vdur.max(adur);
+        self.last_seeked_frame_pos = None;
+        self.prewarmed_boundary_ns = None;
+        self.last_boundary_rebuild_clips.clear();
+        for &(si, ni, _) in &remap {
+            self.slots[si].clip_idx = ni;
+            self.slots[si].applied.invalidate();
+        }
+        self.current_idx = self.clip_at(pos);
+        self.rebuild_adjustment_overlays();
+        let mut reseeked = 0usize;
+        for &(si, ni, reseek) in &remap {
+            if !reseek {
+                continue;
+            }
+            let slot = &self.slots[si];
+            let clip = &self.clips[ni];
+            if clip.is_image && !clip.animated_svg && !slot.animated_svg_rendered {
+                continue;
+            }
+            let _ = Self::seek_slot_decoder_with_retry(
+                slot,
+                clip,
+                pos,
+                gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
+                self.frame_duration_ns,
+            );
+            reseeked += 1;
+        }
+        self.apply_keyframed_video_slot_properties(pos);
+        self.apply_transition_effects(pos);
+        if audio_changed {
+            self.audio_sync_wall_clock = true;
+            self.force_sync_audio_to(pos);
+            self.audio_sync_wall_clock = false;
+        }
+        log::info!(
+            "live_reload: {} video + {} audio clips applied in place at {:.2}s (slots={}, reseeked={}, audio_resync={})",
+            self.clips.len(),
+            self.audio_clips.len(),
+            pos as f64 / 1e9,
+            self.slots.len(),
+            reseeked,
+            audio_changed
+        );
+        true
     }
 
     /// Update clip data in-place without tearing down the GStreamer pipeline.
@@ -17522,6 +17847,45 @@ mod tests {
             &[2],
             true,
         ));
+    }
+
+    #[test]
+    fn clip_signatures_separate_live_mapping_and_shape_changes() {
+        let base = make_clip();
+        let shape0 = ProgramPlayer::clip_shape_signature(&base);
+        let map0 = ProgramPlayer::clip_mapping_signature(&base);
+        // Live-applied edits keep both signatures.
+        let mut live = base.clone();
+        live.opacity = 0.5;
+        live.scale = 1.3;
+        live.volume = 0.2;
+        live.crop_left = 10;
+        assert_eq!(ProgramPlayer::clip_shape_signature(&live), shape0);
+        assert_eq!(ProgramPlayer::clip_mapping_signature(&live), map0);
+        // A trim / move changes mapping only.
+        let mut moved = base.clone();
+        moved.timeline_start_ns += 1_000_000_000;
+        moved.source_in_ns += 500_000_000;
+        assert_eq!(ProgramPlayer::clip_shape_signature(&moved), shape0);
+        assert_ne!(ProgramPlayer::clip_mapping_signature(&moved), map0);
+        // Turning a neutral colour stage on changes shape (element inserted).
+        let mut colour = base.clone();
+        colour.brightness = 0.1;
+        assert_ne!(ProgramPlayer::clip_shape_signature(&colour), shape0);
+        // …but changing its value once present does not.
+        let mut colour2 = colour.clone();
+        colour2.brightness = 0.3;
+        assert_eq!(
+            ProgramPlayer::clip_shape_signature(&colour2),
+            ProgramPlayer::clip_shape_signature(&colour)
+        );
+        // A LUT or a source change is shape.
+        let mut lut = base.clone();
+        lut.lut_paths.push("/tmp/x.cube".to_string());
+        assert_ne!(ProgramPlayer::clip_shape_signature(&lut), shape0);
+        let mut src = base.clone();
+        src.source_path = "/tmp/other.mp4".to_string();
+        assert_ne!(ProgramPlayer::clip_shape_signature(&src), shape0);
     }
 
     #[test]

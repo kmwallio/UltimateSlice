@@ -521,6 +521,42 @@ Paused. Two rules keep audio aligned:
   (+N ms)". Do not enable this mode on paths that reset the clock afterwards
   (`play()`, full rebuild) or audio ends up *ahead* by the same amount.
 
+### Live reload: edits during playback
+
+`on_project_changed` → `reload_program_player` used to stop, rebuild/seek and
+restart the preview for every edit, which costs 0.6–1 s of black/stalled
+frames when the user tweaks a value while playing. While playing it now
+calls `ProgramPlayer::try_live_reload(clips)` first and only falls back to
+`soft_reload_clips` / `load_clips` (+ seek + play) when that declines. The
+contract (all checks happen before anything is mutated):
+
+- **Shape vs mapping vs live fields.** `clip_shape_signature` hashes the
+  parts of a `ProgramClip` that change the slot's element chain: media path
+  and kind, HDR/anamorphic/LUT presence, and the `need_*` stage flags that
+  `build_slot_for_clip` consults (balance, colour-adjust, 3-point, blur,
+  square-blur, title). `clip_mapping_signature` hashes what the decoder seek
+  depends on (source in/out, timeline start, speed + keyframes, reverse,
+  transition-after, media duration). Everything else — colour values,
+  transform/crop/opacity, volume/pan/mix, masks, HSL, tracking, title text,
+  transitions — is a *live* field pushed by the per-tick appliers. If a new
+  slot-build-time decision is added to `build_slot_for_clip`, add it to the
+  shape signature or live reload will keep a stale chain.
+- **Visible-set equality.** The clips the new timeline wants active at the
+  wall-clock position (`clip_at`/visible slot logic, run against the new
+  list via the `live_reload_scratch` swap) must be exactly the clip ids of
+  the slots currently playing. A removed/added *visible* clip is a rebuild;
+  a clip added or moved elsewhere is not.
+- **Declines**: not Playing, no slots, transform-live/prerender/blend slots
+  in use, a slot's clip gone, or a shape change — each is debug-logged as
+  `live_reload: declined (...)` so a regression is visible in the log.
+- **Commit**: swap `clips`/`audio_clips`, remap `slot.clip_idx` by id,
+  invalidate `SlotAppliedProps`, clear boundary prewarm/debounce state,
+  reseek only mapping-changed slots (FLUSH|ACCURATE), re-run the keyframed
+  property + transition appliers at the current position, and resync the
+  audio mixer only if the active audio set or any active audio clip changed
+  (wall-clock aligned, see the resync rules above). The caller must *not*
+  touch `timeline_pos_ns` or call `seek`/`play` afterwards.
+
 ### Export: GPU input decode
 
 `export_project_impl` (wrapped by `export_project_with_cancel`) carries a

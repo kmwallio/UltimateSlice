@@ -329,6 +329,7 @@ Tracking docs:
   - [x] Keep transport controls/timecode/playhead fully synchronized between docked + popped-out monitor
   - [x] Persist monitor window geometry and last docked/popped state across sessions
 - [ ] Preview rendering performance pass
+  - [x] Apply edits made during playback in place (live reload: id-based slot remap, reseek only on source-mapping change, audio resync only on audio change) instead of stop/rebuild/seek/play, so value tweaks while playing no longer stall the preview
   - [x] Build a compositor-based preview pipeline (`compositor` + layered video tracks) so B-roll/overlays render in preview without clip switching — see Picture-in-Picture section under Video Transform
   - [x] Run decode + waveform/thumbnail extraction on background workers with bounded queues and cancellation to keep GTK main thread responsive
   - [x] Move media import probing (duration + audio-only detection) to background threads via `MediaProbeCache`
