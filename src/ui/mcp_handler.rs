@@ -377,7 +377,16 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
                     "transition_hit_rate_percent": snapshot.transition_hit_rate_percent,
                     "transition_low_hitrate_pressure": snapshot.transition_low_hitrate_pressure,
                     "prerender_queue_pressure": snapshot.prerender_queue_pressure,
-                    "transition_metrics": transition_metrics
+                    "transition_metrics": transition_metrics,
+                    "effective_fps": snapshot.effective_fps,
+                    "compositor_frames_total": snapshot.compositor_frames_total,
+                    "dropped_frames_total": snapshot.dropped_frames_total,
+                    "gpu_decoded_slots": snapshot.gpu_decoded_slots,
+                    "software_decoded_slots": snapshot.software_decoded_slots,
+                    "hardware_decode_active": snapshot.hardware_decode_active,
+                    "preview_divisor": snapshot.preview_divisor,
+                    "processing_width": snapshot.processing_width,
+                    "processing_height": snapshot.processing_height
                 }))
                 .ok();
         }
@@ -1032,6 +1041,9 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
                 prefs.clone()
             };
             crate::ui_state::save_preferences_state(&new_state);
+            crate::media::hw_decode_policy::apply_va_decoder_rank_policy(enabled);
+            // Program Monitor decode branches rebuild with the new policy.
+            prog_player.borrow_mut().set_hardware_acceleration(enabled);
             match player.borrow().set_hardware_acceleration(enabled) {
                 Ok(()) => {
                     reply

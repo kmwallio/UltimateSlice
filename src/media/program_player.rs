@@ -1443,6 +1443,9 @@ struct SlotAppliedProps {
     rotate_deg: std::cell::Cell<Option<i32>>,
     /// (flip_h, flip_v) last applied to `videoflip_flip`.
     flip: std::cell::Cell<Option<(bool, bool)>>,
+    /// (width, height, xpos, ypos) last written to the compositor sink pad by
+    /// `apply_zoom_to_slot_with_canvas_offset`.
+    zoom: std::cell::Cell<Option<(i32, i32, i32, i32)>>,
 }
 
 impl SlotAppliedProps {
@@ -1454,6 +1457,7 @@ impl SlotAppliedProps {
         self.crop_state.set(None);
         self.rotate_deg.set(None);
         self.flip.set(None);
+        self.zoom.set(None);
     }
 }
 
@@ -1550,6 +1554,34 @@ struct VideoSlot {
     /// Shared HSL qualifier read by the HSL pad probe.  Updated live from
     /// inspector slider changes without requiring a pipeline rebuild.
     hsl_data: Arc<Mutex<Option<crate::model::clip::HslQualifier>>>,
+    /// Pre-staged GPU scale/convert chain (`vapostproc`, its capsfilter) —
+    /// present only when the slot was built with hardware acceleration on.
+    /// Registered here so teardown flushes, removes and nulls them with the
+    /// rest of the branch.
+    hw_postproc: Option<gst::Element>,
+    hw_postproc_caps: Option<gst::Element>,
+    /// True once the decoder's video pad was linked through `hw_postproc`
+    /// (set from `pad-added`; read for telemetry and error attribution).
+    gpu_linked: Arc<AtomicBool>,
+}
+
+/// A slot's pre-staged GPU chain: `vapostproc ! capsfilter(fitted sysmem
+/// RGBA/NV12)`, built by `build_hw_postproc_chain`.
+struct HwChain {
+    vpp: gst::Element,
+    out_caps: gst::Element,
+}
+
+/// Everything the `pad-added` handler needs to route a hardware-decoded pad
+/// through a slot's pre-staged GPU chain (see `build_hw_postproc_chain`).
+struct HwChainPads {
+    vpp_sink: gst::Pad,
+    caps_src: gst::Pad,
+    caps_elem: gst::Element,
+    /// Processing box (project ÷ preview divisor) the output is fitted into.
+    box_w: i32,
+    box_h: i32,
+    format: &'static str,
 }
 
 /// Result of `compute_reuse_plan()`: whether all current decoder slots can be
@@ -1622,6 +1654,20 @@ pub struct ProgramPerformanceSnapshot {
     pub transition_low_hitrate_pressure: bool,
     pub prerender_queue_pressure: bool,
     pub transition_metrics: Vec<TransitionPrerenderMetricPoint>,
+    /// Rolling frames-per-second leaving the compositor (0 when not playing).
+    pub effective_fps: f64,
+    /// Cumulative compositor output frames since the player was created.
+    pub compositor_frames_total: u64,
+    /// Cumulative QoS-reported dropped frames since the last clip load.
+    pub dropped_frames_total: u64,
+    /// Live video slots decoded on the GPU (VA-API + vapostproc) vs software.
+    pub gpu_decoded_slots: usize,
+    pub software_decoded_slots: usize,
+    /// Whether new video branches may take the GPU path right now.
+    pub hardware_decode_active: bool,
+    pub preview_divisor: u32,
+    pub processing_width: u32,
+    pub processing_height: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2079,6 +2125,14 @@ pub struct ProgramPlayer {
     /// per-source last-seen values and accumulate only the delta.
     dropped_frames_total: Arc<AtomicU64>,
     dropped_frames_last_seen: HashMap<String, u64>,
+    /// Effective sources whose hardware-decoded branch raised a bus error.
+    /// Those sources rebuild on software decode for the rest of the session
+    /// (cleared when hardware acceleration is toggled back on).
+    hw_decode_failed_paths: HashSet<String>,
+    /// (sample instant, compositor frame seq) for the rolling effective-FPS
+    /// estimate surfaced on the HUD / performance snapshot.
+    fps_sample: Option<(Instant, u64)>,
+    effective_fps: f64,
 }
 
 impl ProgramPlayer {
@@ -2804,6 +2858,9 @@ impl ProgramPlayer {
                 lut_cache: HashMap::new(),
                 dropped_frames_total: Arc::new(AtomicU64::new(0)),
                 dropped_frames_last_seen: HashMap::new(),
+                hw_decode_failed_paths: HashSet::new(),
+                fps_sample: None,
+                effective_fps: 0.0,
             },
             paintable,
             paintable2,
@@ -2845,10 +2902,13 @@ impl ProgramPlayer {
             return;
         }
         self.hardware_acceleration_enabled = enabled;
+        if enabled {
+            // Give previously failed sources another chance on the GPU path.
+            self.hw_decode_failed_paths.clear();
+        }
         // Existing decoder branches were built with the previous decode policy
-        // (force-sw-decoders + the vapostproc insertion in the pad-added
-        // handler).  Tear them down so the next frame request rebuilds them
-        // with the new policy.
+        // (force-sw-decoders + the pre-staged vapostproc chain).  Tear them
+        // down so the next frame request rebuilds them with the new policy.
         self.teardown_slots();
         self.invalidate_short_frame_cache("hardware-acceleration-changed");
         self.prewarmed_boundary_ns = None;
@@ -2865,137 +2925,334 @@ impl ProgramPlayer {
     /// path wired (so a hardware decoder's full-resolution frame would be
     /// downloaded to the CPU — slower than software) or for content the GPU
     /// path can't handle correctly (HDR — see the call site).
-    fn configure_video_branch_decoder(&self, decoder: &gst::Element, allow_hardware: bool) {
+    fn configure_video_branch_decoder(
+        &self,
+        decoder: &gst::Element,
+        allow_hardware: bool,
+        effective_path: &str,
+    ) {
         if decoder.has_property("force-sw-decoders") {
             // Only allow hardware decoders when we can actually consume their
             // GPU surfaces via vapostproc.  If hardware acceleration is off,
-            // vapostproc is unavailable, or the caller opts out, force software —
-            // otherwise a hardware decoder's full-resolution frame would be
-            // downloaded to the CPU for the effects bin, which is slower than
-            // plain software decode.
-            let force_sw = !self.hw_video_postproc_active() || !allow_hardware;
+            // vapostproc is unavailable, the caller opts out, or this source
+            // already failed on the GPU path, force software — otherwise a
+            // hardware decoder's full-resolution frame would be downloaded to
+            // the CPU for the effects bin, which is slower than plain software
+            // decode.
+            let failed = self.hw_decode_failed_paths.contains(effective_path);
+            let force_sw = !self.hw_video_postproc_active() || !allow_hardware || failed;
             decoder.set_property("force-sw-decoders", force_sw);
         }
     }
 
-    /// True when the GPU-resident Program Monitor decode path should be used for
-    /// new video branches.
+    /// True when the GPU-resident Program Monitor decode path should be used
+    /// for new video branches: the preference is on and `vapostproc` exists
+    /// (without it a hardware decoder's full-resolution frame would be
+    /// downloaded to the CPU — measured slower than software decode).
     ///
-    /// DISABLED: the GPU path inserted `vapostproc` dynamically inside the
-    /// `pad-added` callback, which called `sync_state_with_parent()` on the
-    /// decoder's streaming thread.  At a mid-playback *clip boundary* (the
-    /// pipeline is already PLAYING) that blocking state change stalls the
-    /// streaming thread, freezing playback at every clip transition — it only
-    /// happened to be benign at initial single-clip preroll.  Until the
-    /// insertion is re-implemented without a blocking state change on the
-    /// streaming thread, the Program Monitor decodes video in software (with
-    /// `force-sw-decoders` so the Source Monitor's raised VA ranks can't leak in
-    /// and trigger a GPU-decode→CPU-download path).  Proxies (now higher
-    /// quality) plus the parallel LUT keep heavy-source playback smooth, and the
-    /// Source Monitor's static-filter HW path is unaffected.
+    /// Threading rule for this path (the reason it was once disabled): the
+    /// `vapostproc ! capsfilter` pair is created, added, linked and
+    /// state-synced on the **main thread** at slot-build time
+    /// (`build_hw_postproc_chain`), and the `pad-added` callback — which runs
+    /// on the decoder's streaming thread — only ever *links pads*
+    /// (`link_video_pad_for_slot`).  Never call `sync_state_with_parent` /
+    /// `set_state` from `pad-added`: at a mid-playback clip boundary that
+    /// blocks the streaming thread and froze playback at every transition.
     fn hw_video_postproc_active(&self) -> bool {
-        // Retain the fields for a future safe re-enable.
-        let _ = (self.hardware_acceleration_enabled, self.vapostproc_available);
-        false
+        self.hardware_acceleration_enabled && self.vapostproc_available
     }
 
-    /// Try to link a hardware-decoded video pad to `effects_sink` through a
-    /// GPU-resident `vapostproc` scale.  uridecodebin hands vapostproc a
-    /// zero-copy VA surface, which it scales down to project resolution on the
-    /// GPU; only the small frame is downloaded, and the effects bin's existing
-    /// videoconvertscale performs the colorimetry-correct YUV→RGBA exactly as on
-    /// the software path (so colour / LUT output is byte-for-byte unchanged).
+    /// Output format requested from `vapostproc`.
     ///
-    /// Only used when the pad already carries a GPU memory feature
-    /// (`memory:VAMemory` / `memory:DMABuf`), i.e. the source was actually
-    /// hardware-decoded — so software-decoded sources (ProRes, images) keep the
-    /// direct link and never pay an upload round-trip.  Returns true if the GPU
-    /// path linked; false to fall back to a direct pad→effects_sink link.
-    ///
-    /// Currently unreachable — gated off by `hw_video_postproc_active()` because
-    /// the `sync_state_with_parent()` here stalls when run from `pad-added` at a
-    /// mid-playback clip boundary.  Retained for a future re-implementation that
-    /// performs the state change off the streaming thread.
-    #[allow(dead_code)]
-    fn try_link_hw_video_postproc(
-        pipeline: &gst::Bin,
-        pad: &gst::Pad,
-        effects_sink: &gst::Pad,
-        project_width: u32,
-        project_height: u32,
-    ) -> bool {
-        // uridecodebin downloads VA frames to system memory by default, so the
-        // pad's *current* caps look like plain system memory even for a
-        // hardware-decoded source.  Query the pad's *capability* instead: only a
-        // hardware decoder upstream can advertise VA / DMABuf memory.  (Verified
-        // on Intel Arc: HW source → non-empty, software source → empty.)  This
-        // also matters for correctness — vapostproc rejects system-memory input
-        // and would fail at preroll (black branch), so we must never route a
-        // software-decoded source through it.
-        let can_gpu = ["video/x-raw(memory:VAMemory)", "video/x-raw(memory:DMABuf)"]
-            .iter()
-            .filter_map(|s| s.parse::<gst::Caps>().ok())
-            .any(|filter| !pad.query_caps(Some(&filter)).is_empty());
-        if !can_gpu {
-            return false;
+    /// `RGBA` lets the GPU do the YUV→RGB conversion as well as the scale, so
+    /// the effects bin's `videoconvertscale` is a passthrough (measured ~2×
+    /// faster than NV12 + CPU conversion on a 5.3K HEVC 10-bit source, PSNR
+    /// ~44 dB against the software path — the same tolerance the colour
+    /// pipeline already accepts for the GPU scale).  LUT'd clips keep `NV12`
+    /// so the BT.709 `capssetter` colorimetry override + CPU conversion in
+    /// `build_effects_bin` still governs the pre-LUT RGB values.
+    fn hw_postproc_output_format(clip: &ProgramClip) -> &'static str {
+        if clip.lut_paths.is_empty() {
+            "RGBA"
+        } else {
+            "NV12"
         }
-        let (Ok(vpp), Ok(caps_elem)) = (
+    }
+
+    /// Pre-stage the GPU scale/convert chain for a slot on the main thread:
+    /// `vapostproc ! capsfilter(≤ processing dims, even, DAR-preserving)`.
+    /// Both elements are added to the pipeline and linked to each other; the
+    /// capsfilter's src stays unlinked until `pad-added` decides — from the
+    /// decoded memory type — whether the decoder pad routes through it.
+    fn build_hw_postproc_chain(&self, clip: &ProgramClip) -> Option<HwChain> {
+        let (vpp, caps_elem) = match (
             gst::ElementFactory::make("vapostproc").build(),
             gst::ElementFactory::make("capsfilter").build(),
-        ) else {
-            return false;
+        ) {
+            (Ok(v), Ok(c)) => (v, c),
+            _ => return None,
         };
-        // Even, project-resolution sysmem caps (no memory feature) force
-        // vapostproc to scale DOWN on the GPU and download only the small frame.
-        // Format is left unconstrained so the effects bin's converter does the
-        // colour conversion.
-        let w = (project_width.max(2) as i32) & !1;
-        let h = (project_height.max(2) as i32) & !1;
-        caps_elem.set_property(
-            "caps",
-            &gst::Caps::builder("video/x-raw")
-                .field("width", w)
-                .field("height", h)
-                .build(),
-        );
-        let teardown = |pipeline: &gst::Bin, vpp: &gst::Element, caps_elem: &gst::Element| {
-            let _ = vpp.set_state(gst::State::Null);
-            let _ = caps_elem.set_state(gst::State::Null);
-            let _ = pipeline.remove_many([vpp, caps_elem]);
-        };
-        if pipeline.add_many([&vpp, &caps_elem]).is_err() {
-            return false;
+        let (proc_w, proc_h) = self.preview_processing_dimensions();
+        let w = (proc_w.max(2) as i32) & !1;
+        let h = (proc_h.max(2) as i32) & !1;
+        // Placeholder: the full processing box.  `pad-added` replaces this
+        // with the exact DAR-fitted size once the decoder's frame size is
+        // known (`fit_hw_output_caps`); should that be unavailable,
+        // `add-borders` makes vapostproc letterbox on the GPU rather than
+        // stretch.  No memory feature on the caps: sysmem output means only
+        // the small frame is downloaded from the GPU.
+        vpp.set_property("add-borders", true);
+        let caps = gst::Caps::builder("video/x-raw")
+            .field("format", Self::hw_postproc_output_format(clip))
+            .field("width", w)
+            .field("height", h)
+            .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
+            .build();
+        caps_elem.set_property("caps", &caps);
+        if self.pipeline.add_many([&vpp, &caps_elem]).is_err() {
+            return None;
         }
-        // Static internal + downstream links first, then sync state, then link
-        // the dynamic upstream pad last (standard dynamic-pad pattern).
         if gst::Element::link(&vpp, &caps_elem).is_err() {
-            teardown(pipeline, &vpp, &caps_elem);
+            let _ = self.pipeline.remove_many([&vpp, &caps_elem]);
+            return None;
+        }
+        // Zero-copy re-arm.  The slot is flush-seeked right after its pad
+        // links, and that flush races the decoder's *first* caps negotiation:
+        // vapostproc's setcaps fails with not-negotiated (pad flushing), so
+        // when the decoder immediately runs its ALLOCATION query vapostproc
+        // has no downstream pool yet and proposes nothing — the decoder then
+        // settles on "use the other pool for copy" and every 5.3K frame is
+        // downloaded by the decoder and re-uploaded here (~60 ms/frame,
+        // ~10 fps in-app vs >100 fps in isolation, where nothing seeks).
+        // Once a buffer actually leaves vapostproc its downstream pool is
+        // negotiated, so a RECONFIGURE pushed upstream makes the decoder
+        // redo the allocation query ("input state hasn't changed") and adopt
+        // the proposed VA pool.  Re-armed after every FLUSH_STOP so later
+        // seeks can't regress it.  Runs on the streaming thread; pushing an
+        // upstream event there is ordinary dataflow, not a state change.
+        if let (Some(vpp_src), Some(vpp_sink)) = (vpp.static_pad("src"), vpp.static_pad("sink")) {
+            let armed = Arc::new(AtomicBool::new(true));
+            let sink_for_probe = vpp_sink;
+            vpp_src.add_probe(
+                gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+                move |_pad, info| {
+                    match info.data {
+                        Some(gst::PadProbeData::Event(ref ev))
+                            if ev.type_() == gst::EventType::FlushStop =>
+                        {
+                            armed.store(true, Ordering::Relaxed);
+                        }
+                        Some(gst::PadProbeData::Buffer(_)) => {
+                            if armed.swap(false, Ordering::Relaxed) {
+                                let sent = sink_for_probe.push_event(gst::event::Reconfigure::new());
+                                log::debug!(
+                                    "ProgramPlayer: GPU chain re-armed decoder allocation (reconfigure sent={})",
+                                    sent
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                    gst::PadProbeReturn::Ok
+                },
+            );
+        }
+        Some(HwChain {
+            vpp,
+            out_caps: caps_elem,
+        })
+    }
+
+    /// True when `pad` can produce GPU-resident frames, i.e. an upstream
+    /// hardware decoder advertises VA / DMABuf memory.  uridecodebin downloads
+    /// VA frames to system memory by default, so the pad's *current* caps look
+    /// like plain sysmem even for a hardware-decoded source — the capability
+    /// query is what distinguishes it (verified on Intel Arc: HW source →
+    /// non-empty, software source → empty).  Software-decoded sources
+    /// (ProRes, images) must keep the direct link so they never pay an
+    /// upload round-trip through vapostproc.
+    fn pad_can_gpu(pad: &gst::Pad) -> bool {
+        ["video/x-raw(memory:VAMemory)", "video/x-raw(memory:DMABuf)"]
+            .iter()
+            .filter_map(|s| s.parse::<gst::Caps>().ok())
+            .any(|filter| !pad.query_caps(Some(&filter)).is_empty())
+    }
+
+    /// Fit a `src_w×src_h` (with pixel aspect `par`) frame into a
+    /// `box_w×box_h` box preserving display aspect ratio; even dimensions,
+    /// never below 2.  `vapostproc` does **not** preserve aspect when
+    /// fixating range caps (it takes the largest width *and* height), so the
+    /// GPU chain's exact output size is computed here instead.
+    fn fit_into_box(src_w: i32, src_h: i32, par: f64, box_w: i32, box_h: i32) -> (i32, i32) {
+        let box_w = box_w.max(2);
+        let box_h = box_h.max(2);
+        if src_w <= 0 || src_h <= 0 || !(par > 0.0) {
+            return (box_w & !1, box_h & !1);
+        }
+        let dar = src_w as f64 * par / src_h as f64;
+        let box_dar = box_w as f64 / box_h as f64;
+        let (w, h) = if dar >= box_dar {
+            (box_w, (box_w as f64 / dar).round() as i32)
+        } else {
+            ((box_h as f64 * dar).round() as i32, box_h)
+        };
+        ((w.max(2)) & !1, (h.max(2)) & !1)
+    }
+
+    /// Exact output caps for a slot's GPU chain, fitted to the decoder pad's
+    /// negotiated size.  Falls back to the full processing box (letterboxed
+    /// on the GPU by `vapostproc add-borders=true`) when the pad carries no
+    /// fixed size.
+    fn fit_hw_output_caps(pad: &gst::Pad, hw: &HwChainPads) -> gst::Caps {
+        let (mut w, mut h) = (hw.box_w & !1, hw.box_h & !1);
+        if let Some(s) = pad.current_caps().as_ref().and_then(|c| c.structure(0).map(|s| s.to_owned())) {
+            if let (Ok(sw), Ok(sh)) = (s.get::<i32>("width"), s.get::<i32>("height")) {
+                let par = s
+                    .get::<gst::Fraction>("pixel-aspect-ratio")
+                    .ok()
+                    .map(|f| f.numer() as f64 / (f.denom().max(1)) as f64)
+                    .unwrap_or(1.0);
+                let fitted = Self::fit_into_box(sw, sh, par, hw.box_w, hw.box_h);
+                w = fitted.0;
+                h = fitted.1;
+            }
+        }
+        gst::Caps::builder("video/x-raw")
+            .field("format", hw.format)
+            .field("width", w)
+            .field("height", h)
+            .field("pixel-aspect-ratio", gst::Fraction::new(1, 1))
+            .build()
+    }
+
+    /// Link a freshly exposed decoder video pad into its slot.  **Pad links
+    /// only — no state changes** (this runs on the streaming thread; the one
+    /// property write — the capsfilter's `caps` — is thread-safe and happens
+    /// before the chain carries data).  Routes through the pre-staged
+    /// `vapostproc` chain when the pad is hardware decoded, else straight
+    /// into the effects bin.  Returns `Ok(true)` when the GPU route was taken.
+    fn link_video_pad_for_slot(
+        pad: &gst::Pad,
+        effects_sink: &gst::Pad,
+        hw_chain: Option<&HwChainPads>,
+    ) -> Result<bool, gst::PadLinkError> {
+        if let Some(hw) = hw_chain {
+            if !effects_sink.is_linked() && Self::pad_can_gpu(pad) {
+                let caps = Self::fit_hw_output_caps(pad, hw);
+                log::info!("ProgramPlayer: GPU chain output caps {}", caps);
+                hw.caps_elem.set_property("caps", &caps);
+                let (vpp_sink, caps_src) = (&hw.vpp_sink, &hw.caps_src);
+                if caps_src.link(effects_sink).is_ok() {
+                    match pad.link(vpp_sink) {
+                        Ok(_) => return Ok(true),
+                        Err(e) => {
+                            // Undo so the direct link below can proceed.
+                            let _ = caps_src.unlink(effects_sink);
+                            log::warn!(
+                                "ProgramPlayer: GPU pad link failed ({:?}); falling back to direct link",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        pad.link(effects_sink).map(|_| false)
+    }
+
+    /// Attribute a main-pipeline bus error to a GPU-linked slot.  When the
+    /// error originated inside such a slot's decoder or `vapostproc`, record
+    /// the slot's effective source so it is rebuilt on software decode and
+    /// return true (the caller performs the teardown + rebuild).
+    fn note_hw_decode_error(&mut self, src: Option<&gst::Object>) -> bool {
+        if !self.hw_video_postproc_active() {
             return false;
         }
-        let Some(caps_src) = caps_elem.static_pad("src") else {
-            teardown(pipeline, &vpp, &caps_elem);
+        let Some(src) = src else {
             return false;
         };
-        if caps_src.link(effects_sink).is_err() {
-            teardown(pipeline, &vpp, &caps_elem);
+        let src_name = src.name();
+        let mut failed_paths: Vec<String> = Vec::new();
+        for slot in &self.slots {
+            if !slot.gpu_linked.load(Ordering::Relaxed) {
+                continue;
+            }
+            let inside = src.has_as_ancestor(&slot.decoder)
+                || src_name == slot.decoder.name()
+                || slot
+                    .hw_postproc
+                    .as_ref()
+                    .map_or(false, |v| src_name == v.name());
+            if inside {
+                if let Some(clip) = self.clips.get(slot.clip_idx) {
+                    let (path, ..) = self.resolve_source_path_for_clip(clip);
+                    failed_paths.push(path);
+                }
+            }
+        }
+        if failed_paths.is_empty() {
             return false;
         }
-        if vpp.sync_state_with_parent().is_err() || caps_elem.sync_state_with_parent().is_err() {
-            let _ = caps_src.unlink(effects_sink);
-            teardown(pipeline, &vpp, &caps_elem);
-            return false;
-        }
-        let Some(vpp_sink) = vpp.static_pad("sink") else {
-            let _ = caps_src.unlink(effects_sink);
-            teardown(pipeline, &vpp, &caps_elem);
-            return false;
-        };
-        if pad.link(&vpp_sink).is_err() {
-            let _ = caps_src.unlink(effects_sink);
-            teardown(pipeline, &vpp, &caps_elem);
-            return false;
+        for path in failed_paths {
+            log::warn!(
+                "ProgramPlayer: hardware decode error from {} for {} — this source falls back to software decode",
+                src_name,
+                path
+            );
+            self.hw_decode_failed_paths.insert(path);
         }
         true
+    }
+
+    /// Update the rolling effective display FPS from the compositor output
+    /// frame counter.  Called once per poll tick; re-samples every 500 ms.
+    fn sample_effective_fps(&mut self) {
+        let now = Instant::now();
+        let seq = self.compositor_frame_seq.load(Ordering::Relaxed);
+        match self.fps_sample {
+            None => self.fps_sample = Some((now, seq)),
+            Some((t0, s0)) => {
+                let dt = now.saturating_duration_since(t0).as_secs_f64();
+                if dt >= 0.5 {
+                    self.effective_fps = if self.state == PlayerState::Playing {
+                        seq.saturating_sub(s0) as f64 / dt
+                    } else {
+                        0.0
+                    };
+                    self.fps_sample = Some((now, seq));
+                }
+            }
+        }
+    }
+
+    /// Rolling effective Program Monitor display rate (frames leaving the
+    /// compositor per second while playing; 0 when not playing).
+    pub fn effective_fps(&self) -> f64 {
+        self.effective_fps
+    }
+
+    /// Cumulative frames that left the compositor since the player was
+    /// created (shared handle for UI overlays).
+    pub fn compositor_frames_handle(&self) -> Arc<AtomicU64> {
+        self.compositor_frame_seq.clone()
+    }
+
+    /// (GPU-decoded, software-decoded) counts over the live video slots whose
+    /// decoder pad has linked.
+    pub fn decode_path_counts(&self) -> (usize, usize) {
+        let mut gpu = 0;
+        let mut sw = 0;
+        for slot in &self.slots {
+            if slot.is_prerender_slot || !slot.video_linked.load(Ordering::Relaxed) {
+                continue;
+            }
+            if slot.gpu_linked.load(Ordering::Relaxed) {
+                gpu += 1;
+            } else {
+                sw += 1;
+            }
+        }
+        (gpu, sw)
     }
 
     pub fn set_proxy_scale_divisor(&mut self, divisor: u32) {
@@ -5343,6 +5600,7 @@ impl ProgramPlayer {
     pub fn poll(&mut self) -> bool {
         self.consume_pending_short_frame_capture();
         let _eos = self.poll_bus();
+        self.sample_effective_fps();
         self.poll_background_prerender_results();
         if self.pending_prerender_promote && self.state == PlayerState::Playing {
             self.pending_prerender_promote = false;
@@ -6493,6 +6751,8 @@ impl ProgramPlayer {
                                 pad.set_property("xpos", xpos);
                                 pad.set_property("ypos", ypos);
                             }
+                            // Direct pad write bypassed the zoom cache.
+                            slot.applied.zoom.set(None);
                         }
                     }
                 }
@@ -8145,6 +8405,8 @@ impl ProgramPlayer {
             (None, None)
         };
 
+        let (gpu_decoded_slots, software_decoded_slots) = self.decode_path_counts();
+        let (proc_w, proc_h) = self.preview_processing_dimensions();
         ProgramPerformanceSnapshot {
             player_state: match self.state {
                 PlayerState::Playing => "playing",
@@ -8175,6 +8437,15 @@ impl ProgramPlayer {
             transition_low_hitrate_pressure: self.transition_low_hitrate_pressure(),
             prerender_queue_pressure: self.prerender_pending.len() >= 4,
             transition_metrics,
+            effective_fps: self.effective_fps,
+            compositor_frames_total: self.compositor_frame_seq.load(Ordering::Relaxed),
+            dropped_frames_total: self.dropped_frames_total.load(Ordering::Relaxed),
+            gpu_decoded_slots,
+            software_decoded_slots,
+            hardware_decode_active: self.hw_video_postproc_active(),
+            preview_divisor: self.preview_divisor.max(1),
+            processing_width: proc_w,
+            processing_height: proc_h,
         }
     }
 
@@ -8275,7 +8546,7 @@ impl ProgramPlayer {
         };
         // Warm the same decoder the live branch will use (HW or forced-SW), so
         // the prewarmed codec/init state matches what the main branch plugs.
-        self.configure_video_branch_decoder(&decoder, !clip.is_hdr);
+        self.configure_video_branch_decoder(&decoder, !clip.is_hdr, &effective_path);
         let Ok(fakesink) = gst::ElementFactory::make("fakesink")
             .property("sync", false)
             .build()
@@ -8781,10 +9052,18 @@ impl ProgramPlayer {
             return;
         }
         let tx = self.prerender_result_tx.clone();
-        let prerender_divisor = if self.proxy_enabled {
-            self.proxy_scale_divisor.max(1)
-        } else {
-            1
+        // Never bake a segment finer than the live processing resolution:
+        // the compositor caps already sit at project / preview_divisor, so a
+        // full-resolution segment would just be downscaled on every frame.
+        // (`preview_divisor` is part of the segment signature, so a quality
+        // change invalidates segments rendered at the old size.)
+        let prerender_divisor = {
+            let proxy_div = if self.proxy_enabled {
+                self.proxy_scale_divisor.max(1)
+            } else {
+                1
+            };
+            proxy_div.max(self.preview_divisor.max(1))
         };
         let out_w = (self.project_width / prerender_divisor).max(2);
         let out_h = (self.project_height / prerender_divisor).max(2);
@@ -10206,25 +10485,36 @@ impl ProgramPlayer {
             && pad.find_property("width").is_some()
             && pad.find_property("height").is_some()
         {
+            let has_pos = pad.find_property("xpos").is_some() && pad.find_property("ypos").is_some();
+            let (xpos, ypos) = if !has_pos {
+                (0, 0)
+            } else if direct_translation {
+                (
+                    Self::direct_canvas_origin(pw, sw as f64, position_x) + extra_x_px,
+                    Self::direct_canvas_origin(ph, sh as f64, position_y) + extra_y_px,
+                )
+            } else {
+                let total_x = pw * (scale - 1.0);
+                let total_y = ph * (scale - 1.0);
+                (
+                    (-(total_x * (1.0 + position_x) / 2.0)).round() as i32 + extra_x_px,
+                    (-(total_y * (1.0 + position_y) / 2.0)).round() as i32 + extra_y_px,
+                )
+            };
+            // This runs on every 30 FPS tick for every visible slot; skip the
+            // four GObject sets (each of which can re-trigger the aggregator's
+            // converter setup) when nothing changed.
+            let key = (sw, sh, xpos, ypos);
+            if slot.applied.zoom.get() == Some(key) {
+                return;
+            }
             pad.set_property("width", sw);
             pad.set_property("height", sh);
-            if pad.find_property("xpos").is_some() && pad.find_property("ypos").is_some() {
-                let (xpos, ypos) = if direct_translation {
-                    (
-                        Self::direct_canvas_origin(pw, sw as f64, position_x) + extra_x_px,
-                        Self::direct_canvas_origin(ph, sh as f64, position_y) + extra_y_px,
-                    )
-                } else {
-                    let total_x = pw * (scale - 1.0);
-                    let total_y = ph * (scale - 1.0);
-                    (
-                        (-(total_x * (1.0 + position_x) / 2.0)).round() as i32 + extra_x_px,
-                        (-(total_y * (1.0 + position_y) / 2.0)).round() as i32 + extra_y_px,
-                    )
-                };
+            if has_pos {
                 pad.set_property("xpos", xpos);
                 pad.set_property("ypos", ypos);
             }
+            slot.applied.zoom.set(Some(key));
             return;
         }
 
@@ -10887,6 +11177,12 @@ impl ProgramPlayer {
         if let Some(sink_pad) = slot.effects_bin.static_pad("sink") {
             let _ = sink_pad.send_event(gst::event::FlushStart::new());
         }
+        // GPU chain sits between decoder and effects_bin: flush its entry too.
+        if let Some(ref vpp) = slot.hw_postproc {
+            if let Some(sink_pad) = vpp.static_pad("sink") {
+                let _ = sink_pad.send_event(gst::event::FlushStart::new());
+            }
+        }
         // Flush queue sink directly as belt-and-suspenders.
         if let Some(ref q) = slot.slot_queue {
             if let Some(sink_pad) = q.static_pad("sink") {
@@ -10910,6 +11206,12 @@ impl ProgramPlayer {
 
         // 1. Detach branch elements from the pipeline.
         self.pipeline.remove(&slot.decoder).ok();
+        if let Some(ref vpp) = slot.hw_postproc {
+            self.pipeline.remove(vpp).ok();
+        }
+        if let Some(ref cf) = slot.hw_postproc_caps {
+            self.pipeline.remove(cf).ok();
+        }
         self.pipeline
             .remove(slot.effects_bin.upcast_ref::<gst::Element>())
             .ok();
@@ -10943,6 +11245,12 @@ impl ProgramPlayer {
         // they added up to ~110ms per slot and can deadlock if an
         // internal streaming thread is still shutting down.
         let _ = slot.decoder.set_state(gst::State::Null);
+        if let Some(ref vpp) = slot.hw_postproc {
+            let _ = vpp.set_state(gst::State::Null);
+        }
+        if let Some(ref cf) = slot.hw_postproc_caps {
+            let _ = cf.set_state(gst::State::Null);
+        }
         let _ = slot.effects_bin.set_state(gst::State::Null);
         if let Some(ref q) = slot.slot_queue {
             let _ = q.set_state(gst::State::Null);
@@ -10992,7 +11300,12 @@ impl ProgramPlayer {
         // pad alone doesn't propagate back upstream, so those threads stay
         // stuck — and the later set_state(Null) deadlocks on STREAM_LOCK.
         for slot in &self.slots {
-            // Video chain: effects_bin sink → queue → compositor pad
+            // Video chain: [vapostproc →] effects_bin sink → queue → compositor pad
+            if let Some(ref vpp) = slot.hw_postproc {
+                if let Some(sink_pad) = vpp.static_pad("sink") {
+                    let _ = sink_pad.send_event(gst::event::FlushStart::new());
+                }
+            }
             if let Some(sink_pad) = slot.effects_bin.static_pad("sink") {
                 let _ = sink_pad.send_event(gst::event::FlushStart::new());
             }
@@ -12450,6 +12763,9 @@ impl ProgramPlayer {
             slot_queue: None,
             comp_arrival_seq: Arc::new(AtomicU64::new(0)),
             hidden: false,
+            hw_postproc: None,
+            hw_postproc_caps: None,
+            gpu_linked: Arc::new(AtomicBool::new(false)),
             animated_svg_rendered: false,
             is_prerender_slot: false,
             prerender_segment_start_ns: None,
@@ -12477,7 +12793,7 @@ impl ProgramPlayer {
         // handler, so allowing a hardware decoder here would just download every
         // full-resolution frame to the CPU — slower than software.  Force
         // software for this offscreen branch.
-        self.configure_video_branch_decoder(&decoder, false);
+        self.configure_video_branch_decoder(&decoder, false, source_path);
         if self.pipeline.add(&decoder).is_err() {
             return None;
         }
@@ -12796,6 +13112,9 @@ impl ProgramPlayer {
             slot_queue: Some(slot_queue),
             comp_arrival_seq,
             hidden: false,
+            hw_postproc: None,
+            hw_postproc_caps: None,
+            gpu_linked: Arc::new(AtomicBool::new(false)),
             animated_svg_rendered: false,
             is_prerender_slot: true,
             prerender_segment_start_ns: Some(segment_start_ns),
@@ -13655,6 +13974,9 @@ impl ProgramPlayer {
                 slot_queue: Some(slot_queue.clone()),
                 comp_arrival_seq: comp_arrival_seq.clone(),
                 hidden: false,
+                hw_postproc: None,
+                hw_postproc_caps: None,
+                    gpu_linked: Arc::new(AtomicBool::new(false)),
                 animated_svg_rendered: false,
                 is_prerender_slot: false,
                 prerender_segment_start_ns: None,
@@ -13739,6 +14061,9 @@ impl ProgramPlayer {
                 slot_queue: Some(slot_queue),
                 comp_arrival_seq,
                 hidden: false,
+                hw_postproc: None,
+                hw_postproc_caps: None,
+                    gpu_linked: Arc::new(AtomicBool::new(false)),
                 animated_svg_rendered: false,
                 is_prerender_slot: false,
                 prerender_segment_start_ns: None,
@@ -13780,7 +14105,7 @@ impl ProgramPlayer {
         // tone-mapping runs, clipping wide-gamut range the software path keeps
         // as 10-bit up to the tone-map.  HDR preview is approximate either way
         // (true HDR is the separate libplacebo pipeline).
-        self.configure_video_branch_decoder(&decoder, !clip.is_hdr);
+        self.configure_video_branch_decoder(&decoder, !clip.is_hdr, &effective_path);
 
         // Add to pipeline.
         if self.pipeline.add(&decoder).is_err() {
@@ -13796,6 +14121,14 @@ impl ProgramPlayer {
             log::warn!("ProgramPlayer: failed to add effects_bin to pipeline");
             return None;
         }
+        // GPU-resident scale/convert chain, pre-staged on the main thread
+        // (see `hw_video_postproc_active` for the threading rule).  HDR clips
+        // stay on software decode (see `configure_video_branch_decoder`).
+        let hw_chain = if self.hw_video_postproc_active() && !clip.is_hdr && !clip.is_image {
+            self.build_hw_postproc_chain(&clip)
+        } else {
+            None
+        };
 
         // Request compositor sink pad (zorder > 0; 0 is reserved for black bg).
         let comp_pad = match self.compositor.request_pad_simple("sink_%u") {
@@ -14120,11 +14453,19 @@ impl ProgramPlayer {
         let audio_linked_for_cb = audio_linked.clone();
         let clip_id_for_cb = clip.id.clone();
         let pipeline_for_cb: gst::Bin = self.pipeline.clone().upcast();
-        // HDR clips stay on software decode (see configure_video_branch_decoder),
-        // so they also never take the vapostproc insertion below.
-        let hw_postproc = self.hw_video_postproc_active() && !clip.is_hdr;
-        let proj_w_for_cb = self.project_width;
-        let proj_h_for_cb = self.project_height;
+        let gpu_linked = Arc::new(AtomicBool::new(false));
+        let gpu_linked_for_cb = gpu_linked.clone();
+        let hw_pads_for_cb: Option<HwChainPads> = hw_chain.as_ref().and_then(|c| {
+            let (box_w, box_h) = self.preview_processing_dimensions();
+            Some(HwChainPads {
+                vpp_sink: c.vpp.static_pad("sink")?,
+                caps_src: c.out_caps.static_pad("src")?,
+                caps_elem: c.out_caps.clone(),
+                box_w: box_w.max(2) as i32,
+                box_h: box_h.max(2) as i32,
+                format: Self::hw_postproc_output_format(&clip),
+            })
+        });
         decoder.connect_pad_added(move |_dec, pad| {
             let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
             if let Some(caps) = caps {
@@ -14137,42 +14478,26 @@ impl ProgramPlayer {
                     );
                     if name.starts_with("video/") {
                         if let Some(ref sink) = effects_sink {
-                            // GPU-resident path: when hardware acceleration is on
-                            // and this pad carries a GPU surface, scale it down on
-                            // the GPU via vapostproc before the effects bin so the
-                            // full-resolution frame never hits the CPU.  Falls back
-                            // to a direct link for software-decoded sources or on
-                            // any failure.
-                            let via_gpu = hw_postproc
-                                && Self::try_link_hw_video_postproc(
-                                    &pipeline_for_cb,
-                                    pad,
-                                    sink,
-                                    proj_w_for_cb,
-                                    proj_h_for_cb,
-                                );
-                            if via_gpu {
-                                video_linked_for_cb.store(true, Ordering::Relaxed);
-                                log::info!(
-                                    "ProgramPlayer: video linked via GPU vapostproc clip={}",
-                                    clip_id_for_cb
-                                );
-                            } else {
-                                match pad.link(sink) {
-                                    Ok(_) => {
-                                        video_linked_for_cb.store(true, Ordering::Relaxed);
-                                        log::info!(
-                                            "ProgramPlayer: video linked clip={}",
-                                            clip_id_for_cb
-                                        );
-                                    }
-                                    Err(e) => {
-                                        log::warn!(
-                                            "ProgramPlayer: video link FAILED clip={} err={:?}",
-                                            clip_id_for_cb,
-                                            e
-                                        );
-                                    }
+                            // Pad links only — never a state change here (this
+                            // is the decoder's streaming thread).  The GPU chain,
+                            // when present, was pre-staged and state-synced on
+                            // the main thread at slot build.
+                            match Self::link_video_pad_for_slot(pad, sink, hw_pads_for_cb.as_ref()) {
+                                Ok(via_gpu) => {
+                                    video_linked_for_cb.store(true, Ordering::Relaxed);
+                                    gpu_linked_for_cb.store(via_gpu, Ordering::Relaxed);
+                                    log::info!(
+                                        "ProgramPlayer: video linked clip={} path={}",
+                                        clip_id_for_cb,
+                                        if via_gpu { "gpu-vapostproc" } else { "direct" }
+                                    );
+                                }
+                                Err(e) => {
+                                    log::warn!(
+                                        "ProgramPlayer: video link FAILED clip={} err={:?}",
+                                        clip_id_for_cb,
+                                        e
+                                    );
                                 }
                             }
                         }
@@ -14235,8 +14560,13 @@ impl ProgramPlayer {
             None
         });
 
-        // Sync all slot elements to the pipeline state.
+        // Sync all slot elements to the pipeline state (main thread — the
+        // only place the GPU chain's state is ever changed).
         let _ = effects_bin.sync_state_with_parent();
+        if let Some(ref c) = hw_chain {
+            let _ = c.vpp.sync_state_with_parent();
+            let _ = c.out_caps.sync_state_with_parent();
+        }
         let _ = slot_queue.sync_state_with_parent();
         if let Some(ref ac) = audio_conv {
             let _ = ac.sync_state_with_parent();
@@ -14296,6 +14626,9 @@ impl ProgramPlayer {
             slot_queue: Some(slot_queue.clone()),
             comp_arrival_seq: comp_arrival_seq.clone(),
             hidden: false,
+            hw_postproc: hw_chain.as_ref().map(|c| c.vpp.clone()),
+            hw_postproc_caps: hw_chain.as_ref().map(|c| c.out_caps.clone()),
+            gpu_linked: gpu_linked.clone(),
             animated_svg_rendered,
             is_prerender_slot: false,
             prerender_segment_start_ns: None,
@@ -14375,6 +14708,9 @@ impl ProgramPlayer {
             slot_queue: Some(slot_queue),
             comp_arrival_seq,
             hidden: false,
+            hw_postproc: hw_chain.as_ref().map(|c| c.vpp.clone()),
+            hw_postproc_caps: hw_chain.as_ref().map(|c| c.out_caps.clone()),
+            gpu_linked: gpu_linked.clone(),
             animated_svg_rendered,
             is_prerender_slot: false,
             prerender_segment_start_ns: None,
@@ -15747,6 +16083,7 @@ impl ProgramPlayer {
         let mut eos = false;
         let mut main_not_negotiated = false;
         let mut main_not_linked = false;
+        let mut main_hw_decode_failed = false;
         if let Some(bus) = self.pipeline.bus() {
             while let Some(msg) = bus.pop() {
                 match msg.view() {
@@ -15828,6 +16165,9 @@ impl ProgramPlayer {
                         let err = e.error().to_string();
                         let debug = e.debug();
                         log::error!("poll_bus: main pipeline error: {} ({:?})", err, debug);
+                        if self.note_hw_decode_error(msg.src()) {
+                            main_hw_decode_failed = true;
+                        }
                         if Self::should_recover_not_negotiated(&err, debug.as_deref()) {
                             main_not_negotiated = true;
                         } else if Self::should_recover_not_linked(&err, debug.as_deref()) {
@@ -15860,7 +16200,9 @@ impl ProgramPlayer {
                 }
             }
         }
-        if main_not_negotiated {
+        if main_hw_decode_failed || main_not_negotiated {
+            // A failed GPU-decoded branch rebuilds the same way: its source is
+            // now in `hw_decode_failed_paths`, so the rebuilt slot is software.
             self.recover_main_pipeline_not_negotiated();
         } else if main_not_linked {
             // NOT_LINKED errors (qtdemux streaming stall) are recovered the
@@ -18664,6 +19006,23 @@ mod tests {
         )
     }
 
+    #[test]
+    fn hw_fit_into_box_preserves_display_aspect_with_even_dims() {
+        // 5.3K GoPro 4:3-ish frame into a 480×270 box: height-bound.
+        assert_eq!(ProgramPlayer::fit_into_box(5312, 4648, 1.0, 480, 270), (308, 270));
+        // 16:9 into 16:9: fills the box.
+        assert_eq!(ProgramPlayer::fit_into_box(3840, 2160, 1.0, 1920, 1080), (1920, 1080));
+        // Ultra-wide into 16:9: width-bound, even height.
+        assert_eq!(ProgramPlayer::fit_into_box(2560, 1080, 1.0, 1920, 1080), (1920, 810));
+        // Anamorphic PAR widens the display aspect.
+        assert_eq!(ProgramPlayer::fit_into_box(1440, 1080, 4.0 / 3.0, 1920, 1080), (1920, 1080));
+        // Odd results are rounded down to even and never below 2.
+        assert_eq!(ProgramPlayer::fit_into_box(1001, 1000, 1.0, 101, 100), (100, 100));
+        assert_eq!(ProgramPlayer::fit_into_box(1, 100000, 1.0, 480, 270), (2, 270));
+        // Unknown size falls back to the (even) box.
+        assert_eq!(ProgramPlayer::fit_into_box(0, 0, 1.0, 481, 271), (480, 270));
+    }
+
     fn make_test_slot_ext(
         has_videobalance: bool,
         has_coloradj_rgb: bool,
@@ -18721,6 +19080,9 @@ mod tests {
             slot_queue: None,
             comp_arrival_seq: Arc::new(AtomicU64::new(0)),
             hidden: false,
+            hw_postproc: None,
+            hw_postproc_caps: None,
+            gpu_linked: Arc::new(AtomicBool::new(false)),
             animated_svg_rendered: false,
             is_prerender_slot: false,
             prerender_segment_start_ns: None,

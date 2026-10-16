@@ -193,6 +193,11 @@ pub struct HudStats {
     pub width: u32,
     pub height: u32,
     pub dropped_frames: u64,
+    /// Rolling frames/second actually leaving the compositor (0 when paused).
+    pub effective_fps: f64,
+    /// Live video slots decoded on the GPU vs in software.
+    pub gpu_slots: usize,
+    pub sw_slots: usize,
 }
 
 impl Default for HudStats {
@@ -206,6 +211,9 @@ impl Default for HudStats {
             width: 1920,
             height: 1080,
             dropped_frames: 0,
+            effective_fps: 0.0,
+            gpu_slots: 0,
+            sw_slots: 0,
         }
     }
 }
@@ -834,6 +842,8 @@ pub fn build_program_monitor(
                 format!("FRM  {}", total_frames),
                 format!("FPS  {}", fps_label),
                 format!("RES  {}×{}", stats.width, stats.height),
+                format!("OUT  {:.1} fps", stats.effective_fps),
+                format!("DEC  GPU {} / SW {}", stats.gpu_slots, stats.sw_slots),
                 format!("DROP {}", stats.dropped_frames),
             ];
 

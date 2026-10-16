@@ -346,6 +346,15 @@ fire `on_project_changed`, **don't call it from inside the method**. Instead:
   Get the paintable as: `sink.property::<glib::Object>("paintable").dynamic_cast::<gdk4::Paintable>()`.
 - **Playback**: One shared `Player` instance (in `Rc<RefCell<Player>>`).
   Currently used as both a source monitor and a timeline player — they share the same pipeline.
+- **Audio-only extraction pipelines must not decode video**: every
+  `uridecodebin` that only consumes audio (`waveform_cache.rs`,
+  `audio_sync.rs`, `stt_cache.rs`) sets `caps = audio/x-raw` **and**
+  `expose-all-streams = false`. Without both, decodebin still plugs a decoder
+  for the video stream and decodes every frame into an unlinked pad — on a
+  5.3K HEVC source that is ~60% of a core (or the shared GPU decoder) for the
+  whole clip, and it paced the timeline waveform extraction at ~1× realtime
+  (measured 60 s → 0.17 s for 10 s of audio). Copy that pattern for any new
+  audio-only extractor.
 - **Duration probe**: `gstreamer_pbutils::Discoverer` — run synchronously during import
   (acceptable; import is user-triggered, not in a tight loop).
 - **API note**: In gstreamer-rs 0.25, `get_state(timeout)` became `state(Some(timeout))`.
@@ -374,6 +383,73 @@ prerender cache instead (see below).
 **Voice isolation is NOT a filter in this graph.** It's implemented as
 per-frame volume sampling on the audiomixer pad (see
 `ProgramClip::volume_at_timeline_ns`, `apply_main_audio_slot_volumes`).
+
+### GPU-resident Program Monitor decode (VA-API)
+
+`ProgramPlayer::build_slot_for_clip` decodes each clip with `uridecodebin`.
+When the hardware-acceleration preference is on and `vapostproc` exists
+(`hw_video_postproc_active`), the slot gets a GPU scale/convert chain:
+
+```
+uridecodebin ─(VA surface)─▶ vapostproc ▶ capsfilter(≤ proc dims, RGBA|NV12) ▶ effects_bin ▶ …
+             └(sysmem, software decoder)────────────────────────────────────▶ effects_bin ▶ …
+```
+
+**Threading rule (the reason this path was once disabled):** the
+`vapostproc ! capsfilter` pair is created, added to the pipeline, linked to
+each other and `sync_state_with_parent()`'d on the **main thread** at slot
+build (`build_hw_postproc_chain`, next to the effects bin). The `pad-added`
+callback runs on the decoder's **streaming thread** and only ever *links
+pads* (`link_video_pad_for_slot`): if the pad's capability query advertises
+`memory:VAMemory` / `memory:DMABuf` it links `capsfilter.src → effects_bin`
+and `pad → vapostproc.sink`, else `pad → effects_bin` directly. Never call
+`sync_state_with_parent` / `set_state` from `pad-added` — at a mid-playback
+clip boundary that blocks the streaming thread and freezes playback at every
+transition. The two elements are registered on `VideoSlot`
+(`hw_postproc`, `hw_postproc_caps`) so `teardown_single_slot` /
+`teardown_slots` flush, remove and null them with the branch.
+
+Other rules for this path:
+
+- **Scale target is the processing resolution** (`preview_processing_dimensions`,
+  i.e. project ÷ preview divisor). The exact output size is computed in
+  `pad-added` from the decoder pad's negotiated size (`fit_into_box` /
+  `fit_hw_output_caps`, even dims, display-aspect preserved) and written to
+  the capsfilter before linking. Do **not** use range caps here: `vapostproc`
+  fixates ranges to the largest width *and* height and stretches the frame.
+  `add-borders=true` on `vapostproc` is the fallback when the pad carries no
+  fixed size. Only the small frame is downloaded; the effects bin's
+  `videoconvertscale add-borders=true` letterboxes at 1:1.
+- **Zero-copy re-arm (flush race)**: the slot is flush-seeked right after its
+  pad links, and that flush races the decoder's first caps negotiation —
+  `vapostproc`'s setcaps fails (pad flushing), so the decoder's immediate
+  ALLOCATION query gets no VA pool proposal and it settles on "use the other
+  pool for copy": every full-resolution frame is downloaded by the decoder
+  and re-uploaded by `vapostproc` (~60 ms/frame; ~10 fps in-app vs >100 fps
+  in isolation, where nothing seeks). `build_hw_postproc_chain` installs a
+  probe on `vapostproc:src` that pushes a RECONFIGURE upstream on the first
+  buffer after each FLUSH_STOP; by then `vapostproc` has negotiated its
+  downstream pool, so the decoder's repeated allocation query adopts the VA
+  pool. Keep this probe if you touch the rebuild/seek ordering.
+- **Output format** (`hw_postproc_output_format`): `RGBA` for clips without a
+  LUT (GPU colour conversion, ~2× faster than NV12 + CPU conversion, PSNR
+  ~44 dB vs software); `NV12` for LUT'd clips so the BT.709 `capssetter`
+  colorimetry override in `build_effects_bin` still governs pre-LUT values.
+- **HDR clips and images stay on software decode** (`configure_video_branch_decoder`
+  `allow_hardware = !clip.is_hdr`; no chain for `is_image`).
+- **Runtime fallback**: `note_hw_decode_error` attributes a bus error to a
+  GPU-linked slot, records its effective source in `hw_decode_failed_paths`,
+  and the normal teardown + rebuild re-plugs that source with
+  `force-sw-decoders`. The set is cleared when the preference is toggled on.
+- **Global decoder ranks live in one place**: `crate::media::hw_decode_policy`
+  (`apply_va_decoder_rank_policy`, `gpu_decode_available`). Ranks follow the
+  preference (startup, preference change, MCP `set_hardware_acceleration`).
+  Pipelines express per-source software fallback locally — playbin's
+  `force-sw-decoders` flag in the Source Monitor, uridecodebin's
+  `force-sw-decoders` property here — never by mutating ranks.
+- **Telemetry**: `compositor_frame_seq` feeds a rolling `effective_fps`;
+  `decode_path_counts()` reports GPU vs software slots; both appear on the
+  HUD (`OUT`, `DEC`) and in `get_performance_snapshot`.
 
 ### Live property updates vs. slot rebuilds vs. prerender swap
 

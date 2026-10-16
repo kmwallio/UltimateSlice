@@ -286,6 +286,21 @@ pub fn show_preferences_dialog(
     let hw_accel = CheckButton::with_label("Enable hardware acceleration");
     hw_accel.set_active(current.hardware_acceleration_enabled);
     hw_accel.set_halign(gtk::Align::Start);
+    let hw_accel_note = Label::new(Some(
+        if crate::media::hw_decode_policy::gpu_decode_available() {
+            "GPU video decode (VA-API + vapostproc) is available on this system. \
+             Applies to both the Source and Program monitors; footage is decoded \
+             and downscaled on the GPU before any CPU effects run."
+        } else {
+            "No GPU video decode path was found on this system (needs the GStreamer \
+             VA-API decoders and vapostproc). Playback uses software decode."
+        },
+    ));
+    hw_accel_note.set_halign(gtk::Align::Start);
+    hw_accel_note.set_wrap(true);
+    hw_accel_note.set_xalign(0.0);
+    hw_accel_note.add_css_class("dim-label");
+    hw_accel_note.add_css_class("caption");
     let playback_priority = build_pref_dropdown(
         &[
             ("smooth", "Smooth (prioritize playback continuity)"),
@@ -338,6 +353,7 @@ pub fn show_preferences_dialog(
 
     playback_box.append(&playback_label);
     playback_box.append(&hw_accel);
+    playback_box.append(&hw_accel_note);
     playback_box.append(&hint);
     playback_box.append(&Label::new(Some("Hardware encoder (proxy / prerender)")));
     playback_box.append(&hw_encoder_combo.dropdown);

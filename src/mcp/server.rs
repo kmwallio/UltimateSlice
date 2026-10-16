@@ -213,7 +213,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "get_performance_snapshot",
-            "description": "Return compact Program Monitor performance counters for tuning: prerender queue state, rebuild telemetry, and transition prerender hit/miss metrics.",
+            "description": "Return compact Program Monitor performance counters for tuning: effective display FPS, compositor/dropped frame totals, GPU vs software decoded slot counts, preview processing resolution, prerender queue state, rebuild telemetry, and transition prerender hit/miss metrics.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {

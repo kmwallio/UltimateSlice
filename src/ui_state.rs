@@ -700,8 +700,11 @@ pub enum PreviewQuality {
 }
 
 impl Default for PreviewQuality {
+    /// `Auto` tracks the monitor widget size and caps the processing height
+    /// at 1440p, so a 4K project never composites at full 3840×2160 RGBA by
+    /// default (see `auto_preview_divisor` in `ui/window.rs`).
     fn default() -> Self {
-        Self::Full
+        Self::Auto
     }
 }
 
@@ -1703,7 +1706,10 @@ impl ExportQueueState {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreferencesState {
-    #[serde(default)]
+    /// GPU video decode (VA-API) for both monitors.  Defaults on; both
+    /// players gate on actual runtime availability (VA decoders +
+    /// vapostproc), so the flag is harmless where no GPU path exists.
+    #[serde(default = "default_hardware_acceleration_enabled")]
     pub hardware_acceleration_enabled: bool,
     #[serde(default)]
     pub playback_priority: PlaybackPriority,
@@ -1855,7 +1861,7 @@ fn default_ai_backend() -> String {
 impl Default for PreferencesState {
     fn default() -> Self {
         Self {
-            hardware_acceleration_enabled: false,
+            hardware_acceleration_enabled: default_hardware_acceleration_enabled(),
             playback_priority: PlaybackPriority::default(),
             source_playback_priority: PlaybackPriority::default(),
             proxy_mode: ProxyMode::default(),
@@ -1940,6 +1946,10 @@ fn default_show_timeline_preview() -> bool {
 }
 
 fn default_persist_proxies_next_to_original_media() -> bool {
+    true
+}
+
+fn default_hardware_acceleration_enabled() -> bool {
     true
 }
 

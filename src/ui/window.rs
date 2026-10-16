@@ -6612,7 +6612,12 @@ pub fn build_window(
     let initial_timeline_autoscroll = preferences_state.borrow().timeline_autoscroll;
     let initial_show_track_audio_levels = preferences_state.borrow().show_track_audio_levels;
     let (player_obj, paintable) =
-        Player::new(initial_hw_accel).expect("Failed to create GStreamer player");
+        {
+            // Global VA-API decoder ranks follow the preference (one policy
+            // for both monitors); must run before any pipeline autoplugs.
+            crate::media::hw_decode_policy::apply_va_decoder_rank_policy(initial_hw_accel);
+            Player::new(initial_hw_accel).expect("Failed to create GStreamer player")
+        };
     player_obj.set_source_playback_priority(initial_source_playback_priority);
     let player = Rc::new(RefCell::new(player_obj));
     let source_original_uri_for_proxy_fallback: std::sync::Arc<std::sync::Mutex<Option<String>>> =
@@ -6888,6 +6893,9 @@ pub fn build_window(
             // with the chosen palette + accent and updates the timeline
             // selection accent; the global style change redraws the widget tree.
             crate::ui::theme::apply(new_state.theme_mode, &new_state.accent_color);
+            crate::media::hw_decode_policy::apply_va_decoder_rank_policy(
+                new_state.hardware_acceleration_enabled,
+            );
             if let Err(e) = player
                 .borrow()
                 .set_hardware_acceleration(new_state.hardware_acceleration_enabled)
@@ -14026,17 +14034,27 @@ pub fn build_window(
                 let project = project.clone();
                 let ts = timeline_state.clone();
                 let dropped_handle = prog_player.borrow().dropped_frames_handle();
+                let prog_player = prog_player.clone();
                 move || {
                     let (width, height, frame_rate) = {
                         let p = project.borrow();
                         (p.width, p.height, p.frame_rate.clone())
                     };
+                    // The HUD draws outside the poll tick, but never block a
+                    // frame on the player borrow.
+                    let (effective_fps, (gpu_slots, sw_slots)) = prog_player
+                        .try_borrow()
+                        .map(|p| (p.effective_fps(), p.decode_path_counts()))
+                        .unwrap_or((0.0, (0, 0)));
                     crate::ui::program_monitor::HudStats {
                         playhead_ns: ts.borrow().playhead_ns,
                         frame_rate,
                         width,
                         height,
                         dropped_frames: dropped_handle.load(std::sync::atomic::Ordering::Relaxed),
+                        effective_fps,
+                        gpu_slots,
+                        sw_slots,
                     }
                 }
             },
@@ -15042,6 +15060,15 @@ pub fn build_window(
         let prog_frame_updater_poll = prog_frame_updater.clone();
         let prog_subtitle_setter_poll = prog_subtitle_text_setter.clone();
         let prog_hud_redraw_poll = prog_hud_redraw.clone();
+        // The HUD/burn-in overlays are full-canvas Cairo rasters; repaint
+        // them when the playhead moves, and otherwise only every 500 ms so
+        // the OUT fps / DEC readouts stay fresh while paused.
+        let last_hud_redraw_at: Rc<Cell<std::time::Instant>> =
+            Rc::new(Cell::new(std::time::Instant::now()));
+        // Subtitle font descriptions are parsed from the clip's font string on
+        // every tick a subtitle is visible; memoise per distinct font string.
+        let subtitle_font_cache: Rc<RefCell<HashMap<String, String>>> =
+            Rc::new(RefCell::new(HashMap::new()));
         let prog_proxy_watermark_setter_poll = prog_proxy_watermark_setter.clone();
         let monitor_state_poll = monitor_state.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(33), move || {
@@ -15209,7 +15236,16 @@ pub fn build_window(
                 speed_lbl.set_text(&format!("{arrow} {abs}×"));
                 speed_lbl.set_visible(true);
             }
-            prog_hud_redraw_poll();
+            {
+                let now = std::time::Instant::now();
+                if pos_ns != last_pos_ns_c.get()
+                    || now.saturating_duration_since(last_hud_redraw_at.get())
+                        >= std::time::Duration::from_millis(500)
+                {
+                    prog_hud_redraw_poll();
+                    last_hud_redraw_at.set(now);
+                }
+            }
             if pos_ns != last_pos_ns_c.get() {
                 let frame_rate = { project.borrow().frame_rate.clone() };
                 // When inside a compound deep-dive, the program player reports
@@ -15338,6 +15374,7 @@ pub fn build_window(
                     tracks: &[crate::model::track::Track],
                     pos_ns: u64,
                     lines: &mut Vec<crate::ui::program_monitor::SubtitleLine>,
+                    font_cache: &mut HashMap<String, String>,
                 ) {
                     for track in tracks {
                         for clip in &track.clips {
@@ -15348,7 +15385,7 @@ pub fn build_window(
                                     let internal_pos = pos_ns
                                         .saturating_sub(clip.timeline_start)
                                         .saturating_add(clip.source_in);
-                                    collect_subtitle_lines(inner, internal_pos, lines);
+                                    collect_subtitle_lines(inner, internal_pos, lines, font_cache);
                                 }
                                 continue;
                             }
@@ -15365,16 +15402,20 @@ pub fn build_window(
                                         let oc = clip.subtitle_outline_color;
                                         let bc = clip.subtitle_bg_box_color;
                                         let hc = clip.subtitle_highlight_color;
-                                        let base_size =
-                                            crate::media::title_font::parse_subtitle_font(
-                                                &clip.subtitle_font,
-                                            )
-                                            .size_points();
-                                        let font_desc =
-                                            crate::media::title_font::build_preview_subtitle_font_desc(
-                                                &clip.subtitle_font,
-                                                base_size,
-                                            );
+                                        let font_desc = font_cache
+                                            .entry(clip.subtitle_font.clone())
+                                            .or_insert_with(|| {
+                                                let base_size =
+                                                    crate::media::title_font::parse_subtitle_font(
+                                                        &clip.subtitle_font,
+                                                    )
+                                                    .size_points();
+                                                crate::media::title_font::build_preview_subtitle_font_desc(
+                                                    &clip.subtitle_font,
+                                                    base_size,
+                                                )
+                                            })
+                                            .clone();
 
                                         // Build word-level display with active word highlighting.
                                         // Fixed groups: divide words into groups of N, show the
@@ -15460,7 +15501,13 @@ pub fn build_window(
                 };
                 // SAFETY: proj is borrowed immutably for this block.
                 let editing: &[crate::model::track::Track] = unsafe { &*editing_ptr };
-                collect_subtitle_lines(editing, pos_ns, &mut lines);
+                {
+                    let mut font_cache = subtitle_font_cache.borrow_mut();
+                    if font_cache.len() > 256 {
+                        font_cache.clear();
+                    }
+                    collect_subtitle_lines(editing, pos_ns, &mut lines, &mut font_cache);
+                }
                 prog_subtitle_setter_poll(lines);
             }
             glib::ControlFlow::Continue

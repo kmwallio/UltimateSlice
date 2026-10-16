@@ -212,6 +212,16 @@ When **Motion Tracking → Edit Region in Monitor** is enabled for the selected 
   - **FRM** — current frame number since the start of the timeline.
   - **FPS** — project frame rate (e.g. `24`, `29.97`, `59.94`).
   - **RES** — project canvas resolution (width × height).
+  - **OUT** — frames per second actually leaving the preview compositor
+    (rolling 500 ms window; `0.0` while paused). Compare with **FPS**: if
+    `OUT` sits well below the project rate during playback, the pipeline is
+    not keeping up — enable hardware acceleration, lower preview quality, or
+    enable proxies.
+  - **DEC** — how many live video clips are decoded on the GPU vs in
+    software (`GPU 2 / SW 0`). A big source showing under `SW` with hardware
+    acceleration on means its decoder had no GPU path (HDR, image, a codec
+    without a VA-API decoder, or a source that failed on the GPU and fell
+    back).
   - **DROP** — cumulative video frames the preview pipeline has dropped
     under QoS pressure since the project was loaded. Reset on project
     open/new; a steadily climbing counter is a hint to drop preview
@@ -360,6 +370,8 @@ so you can see exactly what's on either side of the cut while dragging.
 - Post-seek wait budgets are automatically tightened when the boundary was prewarmed by a sidecar pipeline, since warm file cache enables faster decoder settle.
 - Occlusion audio-only decode substitution is currently disabled in preview rebuilds to prioritize reliable mixed audio from overlapping video tracks.
 - Proxy preview mode can be enabled in **Preferences → Playback** to generate lightweight proxy files for smoother playback with large media. Export always uses original full-resolution media.
+- With **hardware acceleration** on (the default), each clip's video is decoded by the GPU's VA-API decoder and scaled/converted to the preview processing size on the GPU (`vapostproc`) before the CPU effects chain, so 4K–6K HEVC sources play in real time without proxies on supported hardware. The HUD's `OUT`/`DEC` lines and the `get_performance_snapshot` MCP tool (`effective_fps`, `gpu_decoded_slots`, `software_decoded_slots`) show whether the path is active.
+- Background prerender segments are rendered at the live processing resolution (project ÷ preview divisor, or the proxy scale when proxies are on), never larger.
 - **Background Removal**: Clips with "Remove Background" enabled in the Inspector use a pre-processed alpha-channel video (VP9 alpha WebM) for both preview and export. Processing runs offline using ONNX Runtime inference (MODNet segmentation model) and progress is shown in the status bar. The MODNet model can be downloaded from **Preferences → Models**.
 - Preview quality (`Full` / `Half` / `Quarter`) downscales the composed monitor output while preserving full-frame fit/framing in the Program Monitor.
 - Preview quality `Auto` dynamically adjusts effective monitor output quality from the current Program Monitor canvas size (including resize/zoom changes) to balance clarity and performance.

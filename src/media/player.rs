@@ -58,8 +58,6 @@ pub struct Player {
     hw_prescale_queue: Option<gst::Element>,
     /// Whether VA-API decoder plugins are available in this runtime.
     vaapi_available: bool,
-    /// Original decoder ranks for VA decoder factories (restored in HW mode).
-    va_decoder_original_ranks: Vec<(String, gst::Rank)>,
     /// Original decoder ranks for Apple VideoToolbox decoders.
     apple_decoder_original_ranks: Vec<(String, gst::Rank)>,
     /// Active source decode mode.
@@ -158,21 +156,11 @@ impl Player {
         // to coerce a u32 into GstPlayFlags (which panics on some builds).
         pipeline.set_property_from_str("flags", "audio+video");
 
-        let va_decoder_names = [
-            "vah264dec",
-            "vah265dec",
-            "vampeg2dec",
-            "vavp8dec",
-            "vavp9dec",
-            "vaav1dec",
-        ];
-        let mut va_decoder_original_ranks: Vec<(String, gst::Rank)> = Vec::new();
-        for name in &va_decoder_names {
-            if let Some(factory) = gst::ElementFactory::find(name) {
-                va_decoder_original_ranks.push(((*name).to_string(), factory.rank()));
-            }
-        }
-        let vaapi_available = !va_decoder_original_ranks.is_empty();
+        // VA-API decoder *ranks* are owned by the app-level policy
+        // (`crate::media::hw_decode_policy`), applied from the
+        // hardware-acceleration preference.  This player only decides, per
+        // URI, whether to opt out via playbin's `force-sw-decoders` flag.
+        let vaapi_available = crate::media::hw_decode_policy::va_decoders_available();
         let apple_decoder_names = ["vtdec", "vtdec_hw"];
         let mut apple_decoder_original_ranks: Vec<(String, gst::Rank)> = Vec::new();
         for name in &apple_decoder_names {
@@ -418,7 +406,6 @@ impl Player {
             hw_prescale_caps: hw_prescale_caps_field,
             hw_prescale_queue: hw_prescale_queue_field,
             vaapi_available,
-            va_decoder_original_ranks,
             apple_decoder_original_ranks,
             decode_mode,
             current_uri,
@@ -787,14 +774,20 @@ impl Player {
         // the odd-height "not valid for dmabuf" errors that plagued earlier
         // raw-DMABuf attempts.  Either way playsink never sees an odd-dimension
         // frame, so the display path stays valid.
+        // Per-URI software fallback is expressed on *this* playbin only
+        // (the `force-sw-decoders` play flag) — never by mutating global
+        // decoder ranks, which would silently flip the Program Monitor's
+        // autoplug choice too.  Global ranks follow the preference via
+        // `hw_decode_policy::apply_va_decoder_rank_policy`.
         let filter = match mode {
             SourceDecodeMode::SoftwareFiltered => {
-                self.set_va_decoder_rank_policy(false);
+                self.pipeline
+                    .set_property_from_str("flags", "audio+video+force-sw-decoders");
                 self.set_apple_decoder_rank_policy(false);
                 self.software_video_filter.clone()
             }
             SourceDecodeMode::HardwareFast => {
-                self.set_va_decoder_rank_policy(true);
+                self.pipeline.set_property_from_str("flags", "audio+video");
                 self.set_apple_decoder_rank_policy(true);
                 self.hw_video_filter
                     .clone()
@@ -805,18 +798,6 @@ impl Player {
             self.pipeline.set_property("video-filter", &filter);
         }
         *self.decode_mode.lock().unwrap() = mode;
-    }
-
-    fn set_va_decoder_rank_policy(&self, restore_original: bool) {
-        for (name, original_rank) in &self.va_decoder_original_ranks {
-            if let Some(factory) = gst::ElementFactory::find(name) {
-                if restore_original {
-                    factory.set_rank(*original_rank);
-                } else {
-                    factory.set_rank(gst::Rank::MARGINAL);
-                }
-            }
-        }
     }
 
     fn set_apple_decoder_rank_policy(&self, restore_original: bool) {

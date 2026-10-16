@@ -35,12 +35,15 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 
 ## Hardware Acceleration (Playback)
 
-- **Enable hardware acceleration** toggles the saved preference value and applies immediately to **source preview playback**.
-- The setting is persisted across launches and available via MCP automation.
-- Scope today:
-  - affects source preview decode-mode selection (hardware-fast path when VA decoders are available, software-filtered fallback otherwise),
-  - hardware-path errors automatically downgrade the current source to software decode for stability,
-  - does not change export behavior.
+- **Enable hardware acceleration** (default **on**) uses the GPU's VA-API video decoders for both the **Source Monitor** and the **Program Monitor**. Footage is decoded *and* downscaled to the preview processing size on the GPU before any CPU effects run, so only a small frame is ever downloaded — the difference between stuttering and smooth playback for 4K–6K HEVC sources.
+- The note under the checkbox tells you whether a GPU decode path was found on this system (it needs the GStreamer VA-API decoders and `vapostproc`). Where none exists, the setting is harmless and playback uses software decode.
+- The setting is persisted across launches and available via MCP automation (`set_hardware_acceleration`, which now applies to both monitors).
+- Details:
+  - Program Monitor: each clip is routed through a GPU scaler when its decoder actually produced a GPU surface; software-decoded sources (ProRes, images) keep their direct path. HDR clips stay on software decode so tone-mapping keeps the 10-bit intermediate.
+  - A hardware-path error on a source automatically falls that source back to software decode for the session (toggle the preference off and on to retry).
+  - The HUD overlay's `DEC GPU n / SW m` line shows how many live clips are on each path.
+  - The GPU downscale is visually equivalent to the CPU path (about 42 dB PSNR at 1080p); at Quarter preview the two resampling filters differ a little more on very large sources. Export is unaffected.
+  - Does not change export behavior.
 
 ## Program Monitor Playback Priority
 
@@ -119,8 +122,8 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 ## Preview Quality (Playback)
 
 - **Preview quality** scales down Program Monitor preview processing resolution (effects/compositor) and output resolution for preview playback:
-  - `Auto`: adapts quality to the current Program Monitor canvas size.
-  - `Full` (default): renders at project resolution (e.g. 1920×1080).
+  - `Auto` (default): adapts quality to the current Program Monitor canvas size and caps the processing height at 1440p, so a 4K project is composited at ~1080p-class resolution unless the monitor is actually showing more.
+  - `Full`: renders at project resolution (e.g. 1920×1080 — or the full 3840×2160 for a 4K project, which is CPU-expensive).
   - `Half`: halves both dimensions (e.g. 960×540) — 4× fewer pixels, significantly less memory and CPU.
   - `Quarter`: quarters both dimensions (e.g. 480×270) — 16× fewer pixels, best for low-memory devices.
 - Reduced preview quality keeps the same framing as Full quality: the full composed frame is scaled to fit the monitor (no top-left cropping).
