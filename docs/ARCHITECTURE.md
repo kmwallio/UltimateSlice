@@ -521,6 +521,26 @@ Paused. Two rules keep audio aligned:
   (+N ms)". Do not enable this mode on paths that reset the clock afterwards
   (`play()`, full rebuild) or audio ends up *ahead* by the same amount.
 
+### Export: GPU input decode
+
+`export_project_impl` (wrapped by `export_project_with_cancel`) carries a
+`gpu_decode` flag. When `hwaccel::vaapi_decode_usable()` and the output is
+8-bit SDR, each plain video input that ffprobe reports as a VA-decodable SDR
+source is decoded on the device (`-hwaccel vaapi -hwaccel_output_format
+vaapi`, keyed by ffmpeg input index in `gpu_inputs`) and its per-input
+filter chain is prefixed by `gpu_decode_filter_prefix` — `scale_vaapi` to the
+output box + `hwdownload,format=nv12` — so the CPU chain receives an
+already-fitted frame. HDR, anamorphic, bg-removed and non-VA inputs keep the
+software decode. Failure ladder: GPU decode → software decode → software
+encode. `ULTIMATESLICE_EXPORT_NO_GPU_DECODE` is the escape hatch. Measured
+on this machine: the ffprobe CSV writer orders fields by the stream's native
+layout, so probe with `-of default` and parse key=value.
+
+**GPU compositing was evaluated and rejected**: `vacompositor` stalls even
+with one layer on the Intel driver here, and after GPU decode the CPU
+`compositor` handles three 5K layers at 29 fps on ~1.6 cores, so there is
+nothing to win for the complexity.
+
 ### Audio-track clip speed in the mixer
 
 Audio-track clips go through `audio_multi_pipeline`. Their source position

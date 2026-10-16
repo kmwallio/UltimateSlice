@@ -769,6 +769,105 @@ pub fn export_project(
 pub fn export_project_with_cancel(
     project: &Project,
     output_path: &str,
+    options: ExportOptions,
+    estimated_size_bytes: Option<u64>,
+    bg_removal_paths: &std::collections::HashMap<String, String>,
+    frame_interp_paths: &std::collections::HashMap<String, String>,
+    render_replace_paths: &std::collections::HashMap<String, String>,
+    tx: mpsc::Sender<ExportProgress>,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> Result<()> {
+    export_project_impl(
+        project,
+        output_path,
+        options,
+        estimated_size_bytes,
+        bg_removal_paths,
+        frame_interp_paths,
+        render_replace_paths,
+        tx,
+        cancel_flag,
+        export_gpu_decode_allowed(),
+    )
+}
+
+/// Whether export inputs may be decoded on the VA-API device
+/// (`ULTIMATESLICE_EXPORT_NO_GPU_DECODE` disables it; otherwise it follows
+/// the same capability probe the proxy transcoder uses).
+fn export_gpu_decode_allowed() -> bool {
+    std::env::var_os("ULTIMATESLICE_EXPORT_NO_GPU_DECODE").is_none()
+        && crate::media::hwaccel::vaapi_decode_usable()
+}
+
+/// VA-API decodable, SDR, 8/10-bit 4:2:0 or 4:2:2 input as reported by
+/// ffprobe (`codec_name`, `color_transfer`, `pix_fmt`). HDR sources keep
+/// the CPU tonemap chain at source depth; exotic pixel formats stay on
+/// software decode so a doomed first attempt doesn't cost a retry.
+fn export_input_vaapi_decodable_from_probe(codec: &str, transfer: &str, pix_fmt: &str) -> bool {
+    let codec_ok = matches!(codec, "h264" | "hevc" | "vp9" | "av1" | "mpeg2video");
+    let transfer = transfer.to_ascii_lowercase();
+    let sdr = !(transfer.contains("smpte2084") || transfer.contains("arib-std-b67"));
+    let pix_ok = matches!(
+        pix_fmt,
+        "yuv420p" | "yuvj420p" | "nv12" | "yuv420p10le" | "p010le" | "yuv422p" | "yuvj422p" | "yuv422p10le"
+    );
+    codec_ok && sdr && pix_ok
+}
+
+fn export_input_vaapi_decodable(path: &str) -> bool {
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_name,color_transfer,pix_fmt",
+            "-of",
+            "default=noprint_wrappers=1",
+            path,
+        ])
+        .output()
+        .ok();
+    let text = output
+        .as_ref()
+        .and_then(|o| String::from_utf8(o.stdout.clone()).ok())
+        .unwrap_or_default();
+    // key=value lines: CSV output orders fields by the stream's native
+    // layout, not the requested order, so parse by key.
+    let get = |key: &str| -> String {
+        text.lines()
+            .find_map(|l| l.strip_prefix(key).and_then(|r| r.strip_prefix('=')))
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let (codec, transfer, pix_fmt) = (get("codec_name"), get("color_transfer"), get("pix_fmt"));
+    if codec.is_empty() {
+        return false;
+    }
+    export_input_vaapi_decodable_from_probe(&codec, &transfer, &pix_fmt)
+}
+
+/// Filter prefix for a GPU-decoded input: scale/convert to the output box on
+/// the VA device, then download the *small* frame for the CPU chain. The
+/// chain's own `scale` then sees an already-fitted frame (no second
+/// resample); `pad` letterboxes as before. Empty when the input is not GPU
+/// decoded.
+fn gpu_decode_filter_prefix(gpu_decoded: bool, out_w: u32, out_h: u32) -> String {
+    if gpu_decoded {
+        format!(
+            "scale_vaapi=w={out_w}:h={out_h}:force_original_aspect_ratio=decrease:force_divisible_by=2:format=nv12,hwdownload,format=nv12,"
+        )
+    } else {
+        String::new()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn export_project_impl(
+    project: &Project,
+    output_path: &str,
     mut options: ExportOptions,
     estimated_size_bytes: Option<u64>,
     bg_removal_paths: &std::collections::HashMap<String, String>,
@@ -776,6 +875,7 @@ pub fn export_project_with_cancel(
     render_replace_paths: &std::collections::HashMap<String, String>,
     tx: mpsc::Sender<ExportProgress>,
     cancel_flag: Option<Arc<AtomicBool>>,
+    gpu_decode: bool,
 ) -> Result<()> {
     // GIF outputs have no audio stream — surround layouts have nothing to do
     // there. Silently downgrade so the rest of the pipeline can ignore the
@@ -960,9 +1060,64 @@ pub fn export_project_with_cancel(
         Ok(clip.source_path.clone())
     };
 
+    // GPU (VA-API) input decode: eligible video inputs are decoded on the
+    // device and scaled to the output box there, so only the small frame is
+    // downloaded (a 5.3K HEVC source decoded on the CPU and lanczos-scaled
+    // dominated export time). Keyed by ffmpeg input index. Excluded: HDR
+    // (tonemap runs at source depth), anamorphic (desqueeze runs before the
+    // scale), bg-removed VP9-alpha sidecars, 10-bit / 4:2:2 output profiles
+    // (the device path converts to 8-bit NV12), and anything ffprobe does not
+    // report as a VA-decodable SDR source.
+    let gpu_decode_8bit_output = !options.hdr_passthrough
+        && !(options.video_codec == VideoCodec::H265
+            && options.hevc_pixel_profile != crate::ui_state::HevcPixelProfile::Main8);
+    let mut gpu_inputs: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    if gpu_decode && gpu_decode_8bit_output {
+        let mut probe_cache: std::collections::HashMap<String, bool> =
+            std::collections::HashMap::new();
+        for (idx, clip) in primary_clips
+            .iter()
+            .chain(secondary_clips_flat.iter())
+            .enumerate()
+        {
+            let plain_video = clip.kind == ClipKind::Video
+                && !clip.animated_svg
+                && !uses_bg_removal_path(clip)
+                && build_anamorphic_filter(clip).is_empty();
+            if !plain_video {
+                continue;
+            }
+            let Ok(path) = resolve_export_path(clip) else {
+                continue;
+            };
+            let ok = *probe_cache
+                .entry(path.clone())
+                .or_insert_with(|| export_input_vaapi_decodable(&path));
+            if ok {
+                gpu_inputs.insert(idx);
+            }
+        }
+        if !gpu_inputs.is_empty()
+            && !matches!(
+                export_hw_family,
+                Some(crate::media::hwaccel::HwEncoderFamily::Vaapi)
+            )
+        {
+            // `-vaapi_device` was only emitted for VA-API *encode*; the
+            // decoders need the device too (must precede the inputs).
+            if let Some(node) = crate::media::hwaccel::detect().vaapi_render_node.as_ref() {
+                cmd.arg("-vaapi_device").arg(node);
+            }
+        }
+        log::info!(
+            "export: GPU (VA-API) decode for {} of {} video inputs",
+            gpu_inputs.len(),
+            primary_clips.len() + secondary_clips_flat.len()
+        );
+    }
     // Inputs: primary video clips (0..primary_clips.len())
     // Adjustment clips are already filtered out of primary_clips.
-    for clip in &primary_clips {
+    for (input_idx, clip) in primary_clips.iter().enumerate() {
         if clip.kind == ClipKind::Title {
             let dur_s = clip.duration() as f64 / 1_000_000_000.0;
             let bg = title_clip_lavfi_color(
@@ -979,6 +1134,12 @@ pub fn export_project_with_cancel(
             if clip.kind == ClipKind::Image && !clip.animated_svg {
                 cmd.arg("-loop").arg("1");
             }
+            if gpu_inputs.contains(&input_idx) {
+                cmd.arg("-hwaccel")
+                    .arg("vaapi")
+                    .arg("-hwaccel_output_format")
+                    .arg("vaapi");
+            }
             cmd.arg("-ss")
                 .arg(format!("{in_s:.6}"))
                 .arg("-t")
@@ -990,7 +1151,8 @@ pub fn export_project_with_cancel(
 
     // Inputs: secondary video clips (primary_clips.len()..primary_clips.len()+secondary_clips_flat.len())
     // Adjustment clips are already filtered out of secondary_track_clips.
-    for clip in &secondary_clips_flat {
+    for (sec_pos, clip) in secondary_clips_flat.iter().enumerate() {
+        let input_idx = primary_clips.len() + sec_pos;
         if clip.kind == ClipKind::Title {
             let dur_s = clip.duration() as f64 / 1_000_000_000.0;
             let bg = title_clip_lavfi_color(
@@ -1006,6 +1168,12 @@ pub fn export_project_with_cancel(
             let (in_s, src_dur_s) = video_input_seek_and_duration(clip, frame_duration_s);
             if clip.kind == ClipKind::Image && !clip.animated_svg {
                 cmd.arg("-loop").arg("1");
+            }
+            if gpu_inputs.contains(&input_idx) {
+                cmd.arg("-hwaccel")
+                    .arg("vaapi")
+                    .arg("-hwaccel_output_format")
+                    .arg("vaapi");
             }
             cmd.arg("-ss")
                 .arg(format!("{in_s:.6}"))
@@ -1097,6 +1265,7 @@ pub fn export_project_with_cancel(
             build_tonemap_filter_prefix(&clip.source_path)
         };
         let lut_prefix = build_lut_filter_prefix(clip);
+        let gpu_prefix = gpu_decode_filter_prefix(gpu_inputs.contains(&i), out_w, out_h);
         let crop_filter =
             build_crop_filter(clip, out_w, out_h, project.width, project.height, false);
         let rotate_filter = build_rotation_filter(clip, false);
@@ -1167,7 +1336,7 @@ pub fn export_project_with_cancel(
                 )
             };
             filter.push_str(&format!(
-                "[{i}:v]{tonemap_prefix}{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}\
+                "[{i}:v]{gpu_prefix}{tonemap_prefix}{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[pv{i}fg];\
                  color=c=black:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[pv{i}bg];\
                  [pv{i}bg][pv{i}fg]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame\
@@ -1199,14 +1368,14 @@ pub fn export_project_with_cancel(
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{tonemap_prefix}{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
+                "[{i}:v]{gpu_prefix}{tonemap_prefix}{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{speed_filter}[pv{i}raw];[pv{i}raw]format=yuv420p{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         } else {
             let scale_pos_filter = build_scale_position_filter(clip, out_w, out_h, false);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                "[{i}:v]{tonemap_prefix}{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
+                "[{i}:v]{gpu_prefix}{tonemap_prefix}{lut_prefix}{anamorphic_filter}scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2{crop_filter}{scale_pos_filter}{rotate_filter},fps={}/{},format=yuv420p{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{title_filter}{subtitle_filter}{speed_filter}{motion_blur_filter}{transition_stop_pad_filter}[pv{i}];",
                 project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -1284,6 +1453,7 @@ pub fn export_project_with_cancel(
             build_tonemap_filter_prefix(&clip.source_path)
         };
         let lut_prefix = build_lut_filter_prefix(clip);
+        let gpu_prefix = gpu_decode_filter_prefix(gpu_inputs.contains(&in_idx), out_w, out_h);
         let crop_filter =
             build_crop_filter(clip, out_w, out_h, project.width, project.height, true);
         let rotate_filter = build_rotation_filter(clip, true);
@@ -1359,7 +1529,7 @@ pub fn export_project_with_cancel(
                 )
             };
             filter.push_str(&format!(
-                ";[{in_idx}:v]{tonemap_prefix}{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{rotate_filter}{speed_filter}\
+                ";[{in_idx}:v]{gpu_prefix}{tonemap_prefix}{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{rotate_filter}{speed_filter}\
                  ,scale=w='max(1,{out_w}*({scale_expr}))':h='max(1,{out_h}*({scale_expr}))':eval=frame[ov{k}fg];\
                  color=c=black@0:size={out_w}x{out_h}:r={}/{}:d={clip_duration_s:.6}[ov{k}bg];\
                  [ov{k}bg][ov{k}fg]overlay=x='{overlay_x_expr}':y='{overlay_y_expr}':eval=frame\
@@ -1382,7 +1552,7 @@ pub fn export_project_with_cancel(
             let opacity = clip.opacity.clamp(0.0, 1.0);
             let anamorphic_filter = build_anamorphic_filter(clip);
             filter.push_str(&format!(
-                ";[{in_idx}:v]{tonemap_prefix}{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
+                ";[{in_idx}:v]{gpu_prefix}{tonemap_prefix}{lut_prefix}{anamorphic_filter}format=yuva420p,scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,setsar=1,pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:color=black@0,fps={}/{}{vidstab_filter}{color_filter}{temp_tint_filter}{grading_filter}{hsl_filter}{denoise_filter}{sharpen_filter}{blur_filter}{frei0r_effects_filter}{chroma_key_filter}{title_filter}{subtitle_filter}{crop_filter}{scale_pos_filter}{rotate_filter},colorchannelmixer=aa={opacity:.4}{speed_filter}[{ov_label}raw]"
                 , project.frame_rate.numerator, project.frame_rate.denominator
             ));
         }
@@ -2375,6 +2545,27 @@ pub fn export_project_with_cancel(
         // out to the user. Mirrors the proxy_cache 3-attempt fallback
         // pattern; export only needs HW → SW since there's no decode-side
         // dimension to retry.
+        if gpu_decode && !gpu_inputs.is_empty() {
+            log::warn!(
+                "export: GPU (VA-API) input decode failed for {output_path}, retrying with software decode: {detail}"
+            );
+            let _ = std::fs::remove_file(output_path);
+            for trf in vidstab_trf.values() {
+                let _ = std::fs::remove_file(trf);
+            }
+            return export_project_impl(
+                project,
+                output_path,
+                options,
+                estimated_size_bytes,
+                bg_removal_paths,
+                frame_interp_paths,
+                render_replace_paths,
+                tx,
+                cancel_flag,
+                false,
+            );
+        }
         if export_hw_family.is_some()
             && options.hw_encoder_mode != crate::ui_state::HwEncoderMode::Off
         {
@@ -2395,7 +2586,7 @@ pub fn export_project_with_cancel(
             }
             let mut sw_options = options.clone();
             sw_options.hw_encoder_mode = crate::ui_state::HwEncoderMode::Off;
-            return export_project_with_cancel(
+            return export_project_impl(
                 project,
                 output_path,
                 sw_options,
@@ -2405,6 +2596,7 @@ pub fn export_project_with_cancel(
                 render_replace_paths,
                 tx,
                 cancel_flag,
+                gpu_decode,
             );
         }
         let msg = format!("ffmpeg export failed: {detail}");
@@ -7000,6 +7192,33 @@ fn flatten_clips(
     }
     result.sort_by_key(|c| c.timeline_start);
     result
+}
+
+#[cfg(test)]
+mod gpu_decode_tests {
+    use super::*;
+
+    #[test]
+    fn vaapi_decodable_probe_accepts_sdr_h26x_vp9_av1_and_rejects_hdr_and_exotic() {
+        assert!(export_input_vaapi_decodable_from_probe("hevc", "bt709", "yuv420p10le"));
+        assert!(export_input_vaapi_decodable_from_probe("h264", "", "yuv420p"));
+        assert!(export_input_vaapi_decodable_from_probe("hevc", "unknown", "yuv422p10le"));
+        assert!(export_input_vaapi_decodable_from_probe("av1", "bt709", "yuv420p"));
+        assert!(!export_input_vaapi_decodable_from_probe("hevc", "smpte2084", "yuv420p10le"));
+        assert!(!export_input_vaapi_decodable_from_probe("hevc", "arib-std-b67", "yuv420p10le"));
+        assert!(!export_input_vaapi_decodable_from_probe("prores", "bt709", "yuv422p10le"));
+        assert!(!export_input_vaapi_decodable_from_probe("h264", "bt709", "yuv444p"));
+        assert!(!export_input_vaapi_decodable_from_probe("qtrle", "", "argb"));
+    }
+
+    #[test]
+    fn gpu_decode_prefix_fits_to_output_box_and_downloads_nv12() {
+        assert_eq!(gpu_decode_filter_prefix(false, 1920, 1080), "");
+        assert_eq!(
+            gpu_decode_filter_prefix(true, 1920, 1080),
+            "scale_vaapi=w=1920:h=1080:force_original_aspect_ratio=decrease:force_divisible_by=2:format=nv12,hwdownload,format=nv12,"
+        );
+    }
 }
 
 #[cfg(test)]
