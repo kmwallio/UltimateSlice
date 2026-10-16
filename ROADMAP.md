@@ -298,7 +298,7 @@ Tracking docs:
 - [x] Optical flow / frame-blending for smooth slow-motion (ffmpeg `minterpolate` on export)
 
 ### Keyframe Animation
-- [ ] Property keyframes with interpolation (position, scale, opacity, volume, pan over time within a clip; `Vec<Keyframe>` per property; linear/bezier/ease interpolation)
+- [x] Property keyframes with interpolation (position, scale, opacity, volume, pan over time within a clip; `Vec<Keyframe>` per property; linear/bezier/ease interpolation)
   - [x] Phase 1 foundation: linear keyframes for position/scale/opacity/volume/pan across model, Inspector, Program Monitor preview, MCP, FCPXML round-trip, and export
   - [x] Rotation/crop keyframe lane support: model/runtime + Program Monitor preview + export + MCP set/remove/list + FCPXML vendor/native rotation round-trip
   - [x] Native FCPXML keyframe interop: parser reads FCP `<param>/<keyframeAnimation>/<keyframe>` elements; writer emits them alongside vendor attrs for bidirectional exchange with Final Cut Pro
@@ -553,7 +553,7 @@ Tracking docs:
   - **Ctrl+Scroll** on the preview also adjusts zoom
   - Scrollbars appear automatically when zoomed > 100%; panning by scrolling shows content outside the canvas boundary
   - Transform overlay handles scale correctly at all zoom levels
-- [ ] **Picture-in-Picture / layered video compositing** — when multiple video tracks have clips active at the same position and the upper track does not fully cover the canvas, the lower track should be visible in the uncovered areas:
+- [x] **Picture-in-Picture / layered video compositing** — when multiple video tracks have clips active at the same position and the upper track does not fully cover the canvas, the lower track should be visible in the uncovered areas:
   - [x] Program Monitor now composites the top active video clip over the nearest active lower track at the playhead, so uncovered regions from scale/position transforms reveal lower-track video.
   - [x] Per-clip opacity control (0.0–1.0) in Inspector and MCP (`set_clip_opacity`), persisted in FCPXML (`us:opacity`).
   - [x] Export overlays now preserve transparency for zoom-out padding and apply per-clip opacity in the ffmpeg overlay chain.
@@ -596,7 +596,7 @@ Tracking docs:
   - [x] FCPXML persistence via `us:bins`/`us:media-bins` vendor attributes on `<event>`
   - [x] MCP tools: `create_bin`, `delete_bin`, `rename_bin`, `list_bins`, `move_to_bin`; `list_library` includes `bin_id`
 - [x] Offline / missing media indicators — visual badge on clips when source_path doesn't exist
-- [ ] Subclips (Create virtual library items from specific In/Out ranges)
+- [x] Subclips (Create virtual library items from specific In/Out ranges)
 - [x] Consolidate / collect files — copy project media into a chosen folder for archival or transfer, with **Timeline-used only** and **Entire library** modes in the UI plus MCP `collect_project_files` automation
 - [ ] Consolidated Archiving with Handles (Trim source media to used regions plus configurable handles during collection)
 - [x] Metadata display & filtering — media browser cards now surface resolution, codec, frame rate, duration, and file size with search/type/resolution filters and expanded `list_library` metadata
