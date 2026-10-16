@@ -1867,6 +1867,8 @@ pub struct ProgramPlayer {
     audio_current_source: Option<AudioCurrentSource>,
     /// Indices of audio clips currently playing in the multi-clip audio mixer.
     audio_multi_active: Vec<usize>,
+    /// `audio_multi_seek_rate` per entry of `audio_multi_active` at build time.
+    audio_multi_rates: Vec<u64>,
     /// Separate pipeline for mixing multiple simultaneous audio-track clips.
     /// Built on demand when >1 audio clip is active; torn down when ≤1 remain.
     audio_multi_pipeline: Option<gst::Pipeline>,
@@ -2773,6 +2775,7 @@ impl ProgramPlayer {
                 audio_pipeline,
                 audio_current_source: None,
                 audio_multi_active: Vec::new(),
+                audio_multi_rates: Vec::new(),
                 audio_multi_pipeline: None,
                 audio_multi_pads: HashMap::new(),
                 audio_multi_pan_elems: HashMap::new(),
@@ -16387,14 +16390,56 @@ impl ProgramPlayer {
         force_reseek && active == current_active && pipeline_exists
     }
 
+    /// Source position an audio-track clip should play from at
+    /// `timeline_pos_ns`, honouring the clip's speed (constant or keyframed)
+    /// exactly like the video path's `source_pos_ns`. Reversed audio-track
+    /// clips play forward (negative-rate seeks are refused by most audio
+    /// sources), so their mapping is mirrored back to a forward offset.
     fn audio_multi_source_position_ns(clip: &ProgramClip, timeline_pos_ns: u64) -> u64 {
-        if timeline_pos_ns >= clip.timeline_start_ns {
-            clip.source_in_ns
-                + (timeline_pos_ns - clip.timeline_start_ns)
-                    .min(clip.source_out_ns.saturating_sub(clip.source_in_ns))
-        } else {
-            clip.source_in_ns
+        let hi = clip.source_out_ns.max(clip.source_in_ns);
+        if timeline_pos_ns < clip.timeline_start_ns {
+            return clip.source_in_ns;
         }
+        let pos = clip.source_pos_ns(timeline_pos_ns);
+        let pos = if clip.reverse {
+            // `source_pos_ns` counts down from source_out for reversed
+            // clips; mirror it so the forward decode covers the same span.
+            let from_end = hi.saturating_sub(1).saturating_sub(pos);
+            clip.source_in_ns.saturating_add(from_end)
+        } else {
+            pos
+        };
+        pos.clamp(clip.source_in_ns, hi)
+    }
+
+    /// Seek rate for an audio-track clip's mixer branch: the clip speed
+    /// (pitch is preserved by a `scaletempo` stage in the branch), forward
+    /// only — reversed audio-track clips keep playing forward as before.
+    fn audio_multi_seek_rate(clip: &ProgramClip) -> f64 {
+        if clip.reverse || clip.is_freeze_frame() {
+            return 1.0;
+        }
+        let rate = clip.seek_rate();
+        if rate > 0.0 {
+            rate.clamp(0.05, 16.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// Per-clip seek-rate signature of an active set; a speed edit changes
+    /// it, which must rebuild the mixer (the `scaletempo` stage is only
+    /// inserted for rate ≠ 1).
+    fn audio_multi_rate_signature(&self, active: &[usize]) -> Vec<u64> {
+        active
+            .iter()
+            .map(|&i| {
+                self.audio_clips
+                    .get(i)
+                    .map(|c| Self::audio_multi_seek_rate(c).to_bits())
+                    .unwrap_or(1.0f64.to_bits())
+            })
+            .collect()
     }
 
     fn bounded_audio_multi_wait_timeout_ms(
@@ -16440,6 +16485,10 @@ impl ProgramPlayer {
         ) {
             return false;
         }
+        if self.audio_multi_rate_signature(active) != self.audio_multi_rates {
+            // A speed edit needs the branch rebuilt (scaletempo stage).
+            return false;
+        }
         let Some(ref pipeline) = self.audio_multi_pipeline else {
             return false;
         };
@@ -16466,7 +16515,7 @@ impl ProgramPlayer {
             };
             let source_pos_ns = Self::audio_multi_source_position_ns(clip, seek_pos_ns);
             let _ = decoder.seek(
-                1.0,
+                Self::audio_multi_seek_rate(clip),
                 gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
                 gst::SeekType::Set,
                 gst::ClockTime::from_nseconds(source_pos_ns),
@@ -16489,11 +16538,13 @@ impl ProgramPlayer {
     /// This pipeline is independent from the main compositor pipeline to
     /// avoid clock interference that causes video stuttering.
     fn rebuild_audio_multi_pipeline(&mut self, active: &[usize], timeline_pos_ns: u64) {
+        let rates = self.audio_multi_rate_signature(active);
         if !Self::should_rebuild_audio_multi_pipeline(
             active,
             &self.audio_multi_active,
             self.audio_multi_pipeline.is_some(),
-        ) {
+        ) && rates == self.audio_multi_rates
+        {
             return;
         }
         self.teardown_audio_multi_pipeline();
@@ -16711,7 +16762,18 @@ impl ProgramPlayer {
                 pipeline.remove(&decoder).ok();
                 continue;
             };
+            // Pitch-preserving tempo stage for sped-up / slowed audio-track
+            // clips: the decoder is flush-seeked at the clip's rate and
+            // scaletempo turns that segment rate into a tempo change.
+            // Without it audiomixer cannot consume a rate ≠ 1 branch at
+            // all (measured: no usable output). Omitted at rate 1.
+            let tempo_elem = clip_ref
+                .filter(|c| (Self::audio_multi_seek_rate(c) - 1.0).abs() > f64::EPSILON)
+                .and_then(|_| gst::ElementFactory::make("scaletempo").build().ok());
             let mut elems: Vec<&gst::Element> = Vec::new();
+            if let Some(ref t) = tempo_elem {
+                elems.push(t);
+            }
             if let Some(ref m_eq) = match_eq_elem {
                 elems.push(m_eq);
             }
@@ -16728,6 +16790,9 @@ impl ProgramPlayer {
                 elems.push(l);
             }
             if !elems.is_empty() && pipeline.add_many(elems.iter().copied()).is_err() {
+                if let Some(ref t) = tempo_elem {
+                    pipeline.remove(t).ok();
+                }
                 if let Some(ref l) = lv {
                     pipeline.remove(l).ok();
                 }
@@ -16762,7 +16827,13 @@ impl ProgramPlayer {
                 let _ = pipeline.add(p);
             }
 
-            // Link: audioconvert → [equalizer] → [rubberband] → [audiopanorama] → [level] → audiomixer pad.
+            // Link: audioconvert → [scaletempo] → [equalizer] → [rubberband] → [audiopanorama] → [level] → audiomixer pad.
+            if let Some(ref t) = tempo_elem {
+                if let (Some(prev), Some(t_sink)) = (link_src_pad.clone(), t.static_pad("sink")) {
+                    let _ = prev.link(&t_sink);
+                    link_src_pad = t.static_pad("src");
+                }
+            }
             if let Some(ref eq) = eq_elem {
                 if let (Some(prev), Some(eq_sink)) = (link_src_pad.clone(), eq.static_pad("sink")) {
                     let _ = prev.link(&eq_sink);
@@ -16888,14 +16959,26 @@ impl ProgramPlayer {
         // wall-clock-aligned sync accounts for the time those took.
         let seek_pos_ns = self.audio_sync_target_pos_ns(timeline_pos_ns, "rebuild");
         for (decoder, branch) in &decoders {
-            // Compute the source position this clip should play from.
-            let source_pos_ns = if let Some(clip) = self.audio_clips.get(branch.audio_clip_idx) {
-                Self::audio_multi_source_position_ns(clip, seek_pos_ns)
-            } else {
-                branch.source_in_ns
-            };
+            // Compute the source position (and rate) this clip should play from.
+            let (source_pos_ns, rate) =
+                if let Some(clip) = self.audio_clips.get(branch.audio_clip_idx) {
+                    (
+                        Self::audio_multi_source_position_ns(clip, seek_pos_ns),
+                        Self::audio_multi_seek_rate(clip),
+                    )
+                } else {
+                    (branch.source_in_ns, 1.0)
+                };
+            if (rate - 1.0).abs() > f64::EPSILON {
+                log::info!(
+                    "audio_multi_pipeline: clip_idx={} rate={:.3} source_pos={:.3}s",
+                    branch.audio_clip_idx,
+                    rate,
+                    source_pos_ns as f64 / 1e9
+                );
+            }
             let _ = decoder.seek(
-                1.0,
+                rate,
                 gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
                 gst::SeekType::Set,
                 gst::ClockTime::from_nseconds(source_pos_ns),
@@ -16916,6 +16999,7 @@ impl ProgramPlayer {
         );
 
         self.audio_multi_active = active.to_vec();
+        self.audio_multi_rates = rates;
         self.audio_multi_pipeline = Some(pipeline);
     }
 
@@ -16929,6 +17013,7 @@ impl ProgramPlayer {
         }
         self.audio_multi_pipeline = None;
         self.audio_multi_active.clear();
+        self.audio_multi_rates.clear();
         self.audio_multi_pads.clear();
         self.audio_multi_pan_elems.clear();
         self.audio_multi_decoders.clear();
@@ -17117,7 +17202,9 @@ impl ProgramPlayer {
                 let _ = self.audio_pipeline.set_state(gst::State::Ready);
                 self.audio_current_source = None;
             }
-            if active != self.audio_multi_active {
+            if active != self.audio_multi_active
+                || self.audio_multi_rate_signature(&active) != self.audio_multi_rates
+            {
                 // Mid-play audio-set change (e.g. a compound's internal
                 // audio track starting, or a music clip beginning): the
                 // video keeps running, so align the fresh mixer to the wall
@@ -17435,6 +17522,39 @@ mod tests {
             &[2],
             true,
         ));
+    }
+
+    #[test]
+    fn audio_multi_source_position_follows_clip_speed() {
+        let mut clip = make_clip();
+        clip.timeline_start_ns = 10_000_000_000;
+        clip.source_in_ns = 1_000_000_000;
+        clip.source_out_ns = 21_000_000_000;
+        clip.speed = 2.0;
+        // 2 s into the clip at 2× speed = 4 s into the source span.
+        assert_eq!(
+            ProgramPlayer::audio_multi_source_position_ns(&clip, 12_000_000_000),
+            5_000_000_000
+        );
+        assert_eq!(ProgramPlayer::audio_multi_seek_rate(&clip), 2.0);
+        // Before the clip starts: source_in.
+        assert_eq!(
+            ProgramPlayer::audio_multi_source_position_ns(&clip, 9_000_000_000),
+            1_000_000_000
+        );
+        // Half speed.
+        clip.speed = 0.5;
+        assert_eq!(
+            ProgramPlayer::audio_multi_source_position_ns(&clip, 12_000_000_000),
+            2_000_000_000
+        );
+        // Reversed audio-track clips stay forward at rate 1 (negative-rate
+        // seeks are refused by audio sources) and never exceed the span.
+        clip.speed = 1.0;
+        clip.reverse = true;
+        assert_eq!(ProgramPlayer::audio_multi_seek_rate(&clip), 1.0);
+        let p = ProgramPlayer::audio_multi_source_position_ns(&clip, 12_000_000_000);
+        assert!(p >= 1_000_000_000 && p <= 21_000_000_000);
     }
 
     #[test]

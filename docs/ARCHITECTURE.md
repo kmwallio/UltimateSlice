@@ -521,6 +521,19 @@ Paused. Two rules keep audio aligned:
   (+N ms)". Do not enable this mode on paths that reset the clock afterwards
   (`play()`, full rebuild) or audio ends up *ahead* by the same amount.
 
+### Audio-track clip speed in the mixer
+
+Audio-track clips go through `audio_multi_pipeline`. Their source position
+uses the same speed-aware mapping as video (`ProgramClip::source_pos_ns`,
+via `audio_multi_source_position_ns`), each branch is flush-seeked at
+`audio_multi_seek_rate` (the clip speed, forward only), and branches with a
+rate ≠ 1 carry a `scaletempo` element right after the normaliser —
+`audiomixer` cannot consume a rate ≠ 1 segment without it. The per-clip rate
+signature (`audio_multi_rates`) is part of the rebuild decision so a speed
+edit rebuilds the branch instead of reseeking it. Negative-rate (reverse)
+seeks are refused by typical audio sources, so reversed audio-track clips
+play forward.
+
 ### Colour math and preview/export parity
 
 Module: `src/media/color_math.rs`. Pure-computation functions shared by
