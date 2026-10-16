@@ -2129,6 +2129,14 @@ pub struct ProgramPlayer {
     /// Those sources rebuild on software decode for the rest of the session
     /// (cleared when hardware acceleration is toggled back on).
     hw_decode_failed_paths: HashSet<String>,
+    /// When true, the next audio-mixer rebuild/reseek seeks its decoders to
+    /// the position implied by the *wall clock* at the moment they start,
+    /// not the position captured before the (100–300 ms) rebuild. Set only
+    /// on paths where the video keeps running and the wall clock is NOT
+    /// reset afterwards (realtime boundary updates, mid-play audio-set
+    /// changes); the play/full-rebuild paths reset the clock after the
+    /// audio sync instead.
+    audio_sync_wall_clock: bool,
     /// (sample instant, compositor frame seq) for the rolling effective-FPS
     /// estimate surfaced on the HUD / performance snapshot.
     fps_sample: Option<(Instant, u64)>,
@@ -2859,6 +2867,7 @@ impl ProgramPlayer {
                 dropped_frames_total: Arc::new(AtomicU64::new(0)),
                 dropped_frames_last_seen: HashMap::new(),
                 hw_decode_failed_paths: HashSet::new(),
+                audio_sync_wall_clock: false,
                 fps_sample: None,
                 effective_fps: 0.0,
             },
@@ -4984,6 +4993,52 @@ impl ProgramPlayer {
         }
     }
 
+    /// Timeline position the wall clock implies right now while playing
+    /// (what the next `poll` will report); `None` when not playing.
+    fn wall_clock_timeline_pos_ns(&self) -> Option<u64> {
+        if self.state != PlayerState::Playing {
+            return None;
+        }
+        let start = self.play_start?;
+        let elapsed = start.elapsed().as_nanos() as u64;
+        let speed = if self.jkl_rate != 0.0 {
+            self.jkl_rate.abs()
+        } else {
+            1.0
+        };
+        Some((self.base_timeline_ns + (elapsed as f64 * speed) as u64).min(self.timeline_dur_ns))
+    }
+
+    /// Resolve the audio seek target for a mixer rebuild/reseek: the stale
+    /// capture, or — on wall-clock-aligned syncs — the position *now*, so
+    /// audio that starts after a rebuild doesn't lag the video by the
+    /// rebuild duration (the "compound clip audio lag" symptom).
+    fn audio_sync_target_pos_ns(&self, requested_pos_ns: u64, what: &str) -> u64 {
+        if !self.audio_sync_wall_clock {
+            return requested_pos_ns;
+        }
+        let Some(now_pos) = self.wall_clock_timeline_pos_ns() else {
+            return requested_pos_ns;
+        };
+        if now_pos > requested_pos_ns {
+            log::info!(
+                "audio_multi_pipeline: {what} aligned to wall clock: requested {:.3}s, seeking {:.3}s (+{} ms)",
+                requested_pos_ns as f64 / 1e9,
+                now_pos as f64 / 1e9,
+                (now_pos - requested_pos_ns) / 1_000_000
+            );
+        }
+        now_pos.max(requested_pos_ns)
+    }
+
+    /// Run an audio sync whose decoders seek to the wall-clock position at
+    /// the moment they start (see `audio_sync_wall_clock`).
+    fn force_sync_audio_to_wall_clock_aligned(&mut self, timeline_pos_ns: u64) {
+        self.audio_sync_wall_clock = true;
+        self.force_sync_audio_to(timeline_pos_ns);
+        self.audio_sync_wall_clock = false;
+    }
+
     pub fn pause(&mut self) {
         // Capture final position before stopping the clock.
         if let Some(start) = self.play_start.take() {
@@ -5800,8 +5855,17 @@ impl ProgramPlayer {
                         let _ = self.audio_pipeline.set_state(gst::State::Paused);
                     }
                     self.rebuild_pipeline_at(new_pos);
-                    let _ = self.pipeline.set_state(gst::State::Playing);
+                    // Prepare the audio mixer *before* the video leaves
+                    // Paused: the sync blocks for the mixer build + preroll
+                    // (100–400 ms), and starting video first let it run for
+                    // that long while audio was still seeked to `new_pos` —
+                    // audio then lagged by the sync duration for the rest
+                    // of the clip (most visible entering a compound whose
+                    // internal audio track starts at the cut). Now both
+                    // resume together and the wall clock is reset at that
+                    // same instant.
                     self.force_sync_audio_to(new_pos);
+                    let _ = self.pipeline.set_state(gst::State::Playing);
                     self.resume_synced_audio_playback();
                     // Reset wall-clock base after rebuild.
                     self.base_timeline_ns = new_pos;
@@ -5815,7 +5879,11 @@ impl ProgramPlayer {
                         if let Some(ref _src) = audio_wanted {
                             let _ = self.audio_pipeline.set_state(gst::State::Paused);
                         }
-                        self.force_sync_audio_to(new_pos);
+                        // Realtime boundary: the video never stopped and the
+                        // wall clock is not reset here, so the mixer must
+                        // start at the position reached by the time it is
+                        // ready, not at `new_pos` captured before the sync.
+                        self.force_sync_audio_to_wall_clock_aligned(new_pos);
                         self.resume_synced_audio_playback();
                     }
                 }
@@ -16365,6 +16433,7 @@ impl ProgramPlayer {
         // old running-time and drop freshly reseeked external-audio buffers as
         // "late" until the next full audio boundary rebuild.
         let _ = pipeline.seek_simple(gst::SeekFlags::FLUSH, gst::ClockTime::ZERO);
+        let seek_pos_ns = self.audio_sync_target_pos_ns(timeline_pos_ns, "reseek");
         for &aidx in active {
             let Some(decoder) = self.audio_multi_decoders.get(&aidx) else {
                 return false;
@@ -16372,7 +16441,7 @@ impl ProgramPlayer {
             let Some(clip) = self.audio_clips.get(aidx) else {
                 return false;
             };
-            let source_pos_ns = Self::audio_multi_source_position_ns(clip, timeline_pos_ns);
+            let source_pos_ns = Self::audio_multi_source_position_ns(clip, seek_pos_ns);
             let _ = decoder.seek(
                 1.0,
                 gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE,
@@ -16792,10 +16861,13 @@ impl ProgramPlayer {
         );
         let _ = pipeline.state(Some(gst::ClockTime::from_mseconds(audio_preroll_ms)));
 
+        // The seek target is resolved *after* the build + preroll so a
+        // wall-clock-aligned sync accounts for the time those took.
+        let seek_pos_ns = self.audio_sync_target_pos_ns(timeline_pos_ns, "rebuild");
         for (decoder, branch) in &decoders {
             // Compute the source position this clip should play from.
             let source_pos_ns = if let Some(clip) = self.audio_clips.get(branch.audio_clip_idx) {
-                Self::audio_multi_source_position_ns(clip, timeline_pos_ns)
+                Self::audio_multi_source_position_ns(clip, seek_pos_ns)
             } else {
                 branch.source_in_ns
             };
@@ -17023,7 +17095,14 @@ impl ProgramPlayer {
                 self.audio_current_source = None;
             }
             if active != self.audio_multi_active {
+                // Mid-play audio-set change (e.g. a compound's internal
+                // audio track starting, or a music clip beginning): the
+                // video keeps running, so align the fresh mixer to the wall
+                // clock rather than to the position captured before the
+                // rebuild.
+                self.audio_sync_wall_clock = true;
                 self.rebuild_audio_multi_pipeline(&active, timeline_pos_ns);
+                self.audio_sync_wall_clock = false;
             }
             self.sync_preview_audio_levels(timeline_pos_ns);
             return;

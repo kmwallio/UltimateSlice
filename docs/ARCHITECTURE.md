@@ -501,6 +501,26 @@ prerender path uses the same FFmpeg filter chain that the export side
 uses, so once the cached file is ready, preview and export are
 byte-identical for the audio.
 
+### Audio/video resync ordering (boundaries, mid-play audio changes)
+
+The audio-track mixer (`audio_multi_pipeline`) is a separate pipeline that is
+rebuilt or reseeked whenever the active audio-clip set changes. Its sync
+blocks the main thread for the build + preroll (≤180 ms while playing) +
+decoder seeks, and the video keeps running during that time unless it is
+Paused. Two rules keep audio aligned:
+
+- **Full boundary rebuild**: sync the audio (`force_sync_audio_to`) *before*
+  setting the rebuilt video pipeline to Playing, then resume both and reset
+  the wall clock (`base_timeline_ns` / `play_start`) at that instant. Starting
+  video first made audio lag by the sync duration for the rest of the clip.
+- **Realtime boundary path and `poll_audio` set changes**: the video never
+  stops and the clock is not reset, so the mixer must seek to the position
+  the wall clock implies *when it is ready*, not the one captured before
+  the rebuild — `audio_sync_wall_clock` → `audio_sync_target_pos_ns`
+  (resolved after the preroll wait). Logged as "aligned to wall clock
+  (+N ms)". Do not enable this mode on paths that reset the clock afterwards
+  (`play()`, full rebuild) or audio ends up *ahead* by the same amount.
+
 ### Colour math and preview/export parity
 
 Module: `src/media/color_math.rs`. Pure-computation functions shared by
