@@ -224,8 +224,16 @@ fn extract_peaks(source_path: &str) -> Option<Vec<f32>> {
     let guard = super::PipelineGuard(gst::Pipeline::new());
     let pipeline = &guard.0;
 
+    // Audio only: without a caps restriction decodebin plugs a decoder for
+    // the *video* stream too and decodes every frame into an unlinked pad —
+    // for a 5.3K HEVC source that is ~60% of a core (or the GPU decoder) for
+    // the whole clip, just to read audio.  Restricting the target caps and
+    // not exposing non-matching streams skips the video decoder entirely
+    // (measured 60 s → 0.17 s for 10 s of audio).
     let src = gst::ElementFactory::make("uridecodebin")
         .property("uri", &uri)
+        .property("caps", &gst::Caps::builder("audio/x-raw").build())
+        .property("expose-all-streams", false)
         .build()
         .ok()?;
     let conv = gst::ElementFactory::make("audioconvert").build().ok()?;
