@@ -584,6 +584,16 @@ contract (all checks happen before anything is mutated):
   is skipped when every entering clip is staged. Entries whose boundary
   passes without a tick are dropped after 1 s. The departed slot is still
   torn down synchronously on the tick (~100 ms).
+- **No sinks inside slot branches.** An unused decoder stream (the audio of
+  a clip that contributes none) is swallowed by a dropping buffer probe
+  (`drain_unlinked_pad`), never a `fakesink` in the main pipeline: a sink
+  is flushed by every flushing seek of its decoder, which makes the
+  pipeline re-run PAUSED→PLAYING with a fresh base time while playing —
+  every queued frame is then "in the future" by the elapsed playback time
+  and the picture freezes while audio continues. Parked slots are built
+  against the detached `park_compositor` / `park_audiomixer`
+  (`parking_build`), so staging never requests/releases pads on the live
+  aggregators until attach time.
 - **Never flush-seek a single live branch without pinning its pad
   offsets.** The seek restarts that branch's running time at 0 while the
   compositor's output position is at playback time; the compositor then

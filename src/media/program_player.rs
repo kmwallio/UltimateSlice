@@ -1912,6 +1912,14 @@ pub struct ProgramPlayer {
     pipeline: gst::Pipeline,
     /// Compositor element that merges all video layers.
     compositor: gst::Element,
+    /// Detached aggregators (never added to a pipeline, never started) that
+    /// hand out the throw-away sink pads a *parked* slot is built against,
+    /// so staging never requests/releases pads on the live aggregators
+    /// (which stalled the running compositor; see `build_parked_slot`).
+    park_compositor: gst::Element,
+    park_audiomixer: gst::Element,
+    /// True while `build_slot_for_clip` runs for a parked slot.
+    parking_build: bool,
     /// Audio mixer element that merges all audio layers.
     audiomixer: gst::Element,
     state: PlayerState,
@@ -2835,6 +2843,13 @@ impl ProgramPlayer {
             Self {
                 pipeline,
                 compositor,
+                park_compositor: gst::ElementFactory::make("compositor")
+                    .build()
+                    .map_err(|_| anyhow!("compositor element not available"))?,
+                park_audiomixer: gst::ElementFactory::make("audiomixer")
+                    .build()
+                    .map_err(|_| anyhow!("audiomixer element not available"))?,
+                parking_build: false,
                 audiomixer,
                 state: PlayerState::Stopped,
                 clips: Vec::new(),
@@ -5118,19 +5133,42 @@ impl ProgramPlayer {
         self.slots.iter().position(|s| s.decoder == *decoder)
     }
 
-    /// Build a slot for `clip_idx` that is hidden and *parked*: its freshly
-    /// requested compositor/audiomixer pads are released again and both
-    /// branches are held at their last pad by a blocking buffer probe. The
-    /// aggregators are non-live — a sink pad without data stalls the whole
-    /// mix — so the pads are only re-requested (with a running-time offset)
-    /// once a decoded frame is waiting (`poll_pending_slot_swaps`).
+    /// Aggregators that `build_slot_for_clip` requests sink pads from: the
+    /// live ones normally, the detached park ones for a parked build.
+    fn build_compositor(&self) -> &gst::Element {
+        if self.parking_build {
+            &self.park_compositor
+        } else {
+            &self.compositor
+        }
+    }
+
+    fn build_audiomixer(&self) -> &gst::Element {
+        if self.parking_build {
+            &self.park_audiomixer
+        } else {
+            &self.audiomixer
+        }
+    }
+
+    /// Build a slot for `clip_idx` that is hidden and *parked*: it is built
+    /// against the detached park aggregators (so the live compositor and
+    /// audiomixer are not touched — requesting and releasing a pad on the
+    /// running compositor stalled its output), those throw-away pads are
+    /// unlinked and released again, and both branches are held at their
+    /// last pad by a blocking buffer probe. The live aggregator pads are
+    /// requested (with a running-time offset) only once a decoded frame is
+    /// waiting (`attach_pending_entry`).
     fn build_parked_slot(
         &mut self,
         clip_idx: usize,
         zorder_offset: usize,
         enter_offset_ns: u64,
     ) -> Option<VideoSlot> {
-        let mut slot = self.build_slot_for_clip(clip_idx, zorder_offset, true)?;
+        self.parking_build = true;
+        let built = self.build_slot_for_clip(clip_idx, zorder_offset, true);
+        self.parking_build = false;
+        let mut slot = built?;
         if let Some(comp_pad) = slot.compositor_pad.take() {
             let park = slot
                 .slot_queue
@@ -5138,13 +5176,13 @@ impl ProgramPlayer {
                 .and_then(|q| q.static_pad("src"))
                 .and_then(|src| Self::park_branch(&src));
             let _ = comp_pad.peer().map(|peer| peer.unlink(&comp_pad));
-            self.compositor.release_request_pad(&comp_pad);
+            self.park_compositor.release_request_pad(&comp_pad);
             slot.parked_video = park;
         }
         if let Some(amix_pad) = slot.audio_mixer_pad.take() {
             let park = amix_pad.peer().and_then(|peer| Self::park_branch(&peer));
             let _ = amix_pad.peer().map(|peer| peer.unlink(&amix_pad));
-            self.audiomixer.release_request_pad(&amix_pad);
+            self.park_audiomixer.release_request_pad(&amix_pad);
             slot.parked_audio = park;
         }
         if slot.parked_video.is_none() {
@@ -5226,6 +5264,11 @@ impl ProgramPlayer {
     ) -> Vec<usize> {
         const MAX_STAGED: usize = 3;
         let mut staged = Vec::new();
+        // Escape hatch: `ULTIMATESLICE_STAGE_DISABLE=1` keeps the on-tick
+        // boundary path (for bisecting playback problems).
+        if std::env::var_os("ULTIMATESLICE_STAGE_DISABLE").is_some() {
+            return staged;
+        }
         if !self.realtime_preview
             || self.state != PlayerState::Playing
             || self.slots.iter().all(|s| s.hidden)
@@ -5291,14 +5334,34 @@ impl ProgramPlayer {
                 started,
             });
             log::info!(
-                "boundary_stage: staged clip {} for boundary {:.3}s (build {} ms)",
+                "boundary_stage: staged clip {} for boundary {:.3}s (build {} ms, pipeline clock={:?} running={:?})",
                 clip_id,
                 boundary_ns as f64 / 1e9,
-                started.elapsed().as_millis()
+                started.elapsed().as_millis(),
+                self.pipeline.clock().map(|c| c.name().to_string()),
+                self.pipeline.current_running_time()
             );
             staged.push(idx);
         }
         staged
+    }
+
+    /// Swallow data on a decoder pad nobody consumes (the audio stream of a
+    /// clip that contributes no audio). A dropping probe makes the push
+    /// return OK without a peer, so the demuxer's multiqueue keeps flowing.
+    /// This replaced a per-pad `fakesink` drain: a *sink* inside the main
+    /// pipeline is flushed by every flushing seek of its decoder, loses
+    /// state, and makes the pipeline re-run PAUSED→PLAYING with its start
+    /// time reset to 0 — i.e. a fresh base time while playing, after which
+    /// every queued frame is "in the future" by the elapsed playback time
+    /// and the picture freezes while audio continues (seen on staged
+    /// boundary entries and hot swaps of such clips). The drain sinks were
+    /// also never removed on slot teardown.
+    fn drain_unlinked_pad(pad: &gst::Pad) {
+        let _ = pad.add_probe(
+            gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+            |_pad, _info| gst::PadProbeReturn::Drop,
+        );
     }
 
     /// Install a blocking probe on `pad` so the branch upstream of it
@@ -10715,11 +10778,11 @@ impl ProgramPlayer {
             }
             return;
         }
+        let current_active = self.clips_active_at(timeline_pos_ns);
+        let boundary_active = self.clips_active_at(boundary_ns);
         if self.prewarmed_boundary_ns == Some(boundary_ns) {
             return;
         }
-        let current_active = self.clips_active_at(timeline_pos_ns);
-        let boundary_active = self.clips_active_at(boundary_ns);
         self.maybe_request_background_prerender_segment(boundary_ns, &boundary_active);
 
         // Skip prewarming when continuing decoders will handle this boundary.
@@ -14523,7 +14586,6 @@ impl ProgramPlayer {
         let prerender_path_for_cb = source_path.to_string();
         let effects_sink_for_cb = effects_bin.static_pad("sink")?;
         let audio_sink_for_cb = audio_sink.clone();
-        let pipeline_for_prerender_cb: gst::Bin = self.pipeline.clone().upcast();
         decoder.connect_pad_added(move |_dec, pad| {
             let caps = pad.current_caps().or_else(|| Some(pad.query_caps(None)));
             if let Some(caps) = caps {
@@ -14563,22 +14625,10 @@ impl ProgramPlayer {
                                 linked = true;
                             }
                         }
-                        // Drain unwanted audio to a fakesink so qtdemux's
-                        // streaming loop doesn't get NOT_LINKED and stall
-                        // the video track.
+                        // Swallow unwanted audio so qtdemux's streaming loop
+                        // doesn't get NOT_LINKED and stall the video track.
                         if !linked {
-                            if let Ok(fs) = gst::ElementFactory::make("fakesink")
-                                .property("sync", false)
-                                .property("async", false)
-                                .build()
-                            {
-                                if pipeline_for_prerender_cb.add(&fs).is_ok() {
-                                    let _ = fs.sync_state_with_parent();
-                                    if let Some(fs_sink) = fs.static_pad("sink") {
-                                        let _ = pad.link(&fs_sink);
-                                    }
-                                }
-                            }
+                            Self::drain_unlinked_pad(pad);
                         }
                     } else {
                         log::info!(
@@ -15439,7 +15489,7 @@ impl ProgramPlayer {
             }
 
             // Request compositor sink pad.
-            let comp_pad = match self.compositor.request_pad_simple("sink_%u") {
+            let comp_pad = match self.build_compositor().request_pad_simple("sink_%u") {
                 Some(p) => p,
                 None => {
                     log::warn!(
@@ -15688,7 +15738,7 @@ impl ProgramPlayer {
         };
 
         // Request compositor sink pad (zorder > 0; 0 is reserved for black bg).
-        let comp_pad = match self.compositor.request_pad_simple("sink_%u") {
+        let comp_pad = match self.build_compositor().request_pad_simple("sink_%u") {
             Some(p) => p,
             None => {
                 log::warn!(
@@ -15954,7 +16004,7 @@ impl ProgramPlayer {
                                 lv = None;
                             }
                         }
-                        if let Some(mp) = self.audiomixer.request_pad_simple("sink_%u") {
+                        if let Some(mp) = self.build_audiomixer().request_pad_simple("sink_%u") {
                             mp.set_property(
                                 "volume",
                                 self.effective_main_clip_volume(clip_idx, self.timeline_pos_ns),
@@ -16008,7 +16058,6 @@ impl ProgramPlayer {
         let video_linked_for_cb = video_linked.clone();
         let audio_linked_for_cb = audio_linked.clone();
         let clip_id_for_cb = clip.id.clone();
-        let pipeline_for_cb: gst::Bin = self.pipeline.clone().upcast();
         let gpu_linked = Arc::new(AtomicBool::new(false));
         let gpu_linked_for_cb = gpu_linked.clone();
         let hw_pads_for_cb: Option<HwChainPads> = hw_chain.as_ref().and_then(|c| {
@@ -16065,22 +16114,10 @@ impl ProgramPlayer {
                                 linked = true;
                             }
                         }
-                        // Drain unwanted audio to a fakesink so qtdemux's
-                        // streaming loop doesn't get NOT_LINKED and stall the
-                        // video track.
+                        // Swallow unwanted audio so qtdemux's streaming loop
+                        // doesn't get NOT_LINKED and stall the video track.
                         if !linked {
-                            if let Ok(fs) = gst::ElementFactory::make("fakesink")
-                                .property("sync", false)
-                                .property("async", false)
-                                .build()
-                            {
-                                if pipeline_for_cb.add(&fs).is_ok() {
-                                    let _ = fs.sync_state_with_parent();
-                                    if let Some(fs_sink) = fs.static_pad("sink") {
-                                        let _ = pad.link(&fs_sink);
-                                    }
-                                }
-                            }
+                            Self::drain_unlinked_pad(pad);
                         }
                     }
                 }
