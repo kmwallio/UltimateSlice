@@ -571,6 +571,19 @@ contract (all checks happen before anything is mutated):
   `try_realtime_boundary_update` additionally treats a retained slot whose
   chain no longer satisfies its clip (`slot_satisfies_clip`) as departing +
   entering so it is rebuilt in place.
+- **Staged boundary entries** reuse the same `PendingSlotSwap` machinery
+  with `old_decoder = None` and `boundary_ns = Some(cut)`:
+  `prewarm_upcoming_boundary` calls `stage_boundary_entries` for clips
+  entering at the next cut (skipped when a prerender segment is ready, or
+  for titles/stills/blend clips), the entry is seeked to the clip's first
+  frame with the pad offset set to the boundary's running time, attached
+  once a frame is parked, and left hidden; `try_realtime_boundary_update`
+  keeps only entries whose clip really enters now (`settle_staged_entries`
+  gives a seeked-but-not-parked one ≤300 ms grace and attaches it late),
+  reveals them in step 3 instead of building, and the "full swap" fallback
+  is skipped when every entering clip is staged. Entries whose boundary
+  passes without a tick are dropped after 1 s. The departed slot is still
+  torn down synchronously on the tick (~100 ms).
 - **Never flush-seek a single live branch without pinning its pad
   offsets.** The seek restarts that branch's running time at 0 while the
   compositor's output position is at playback time; the compositor then

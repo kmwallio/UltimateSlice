@@ -1487,8 +1487,12 @@ fn software_decoder_threads(factory_name: &str, cores: usize) -> Option<i32> {
 /// `poll_pending_slot_swaps` finishes (or aborts) it.
 struct PendingSlotSwap {
     clip_id: String,
-    old_decoder: gst::Element,
+    /// Slot being replaced (hot swap), or `None` for a slot staged ahead of
+    /// a clip boundary (revealed by `try_realtime_boundary_update`).
+    old_decoder: Option<gst::Element>,
     new_decoder: gst::Element,
+    /// For staged boundary entries: the boundary this slot enters at.
+    boundary_ns: Option<u64>,
     /// Compositor z-order the old slot had (restored on the new pad).
     zorder: u32,
     /// Decoder seeked (a lead ahead of the clock, see `due_wall_pos_ns`).
@@ -4899,7 +4903,7 @@ impl ProgramPlayer {
             let has_pending_new = self
                 .pending_slot_swaps
                 .iter()
-                .any(|p| p.old_decoder == slot.decoder);
+                .any(|p| p.old_decoder.as_ref() == Some(&slot.decoder));
             let mut swap = false;
             if slot.hidden || is_pending_new || has_pending_new {
                 // Departed (hidden) slots never come back and a slot already
@@ -5114,6 +5118,48 @@ impl ProgramPlayer {
         self.slots.iter().position(|s| s.decoder == *decoder)
     }
 
+    /// Build a slot for `clip_idx` that is hidden and *parked*: its freshly
+    /// requested compositor/audiomixer pads are released again and both
+    /// branches are held at their last pad by a blocking buffer probe. The
+    /// aggregators are non-live — a sink pad without data stalls the whole
+    /// mix — so the pads are only re-requested (with a running-time offset)
+    /// once a decoded frame is waiting (`poll_pending_slot_swaps`).
+    fn build_parked_slot(
+        &mut self,
+        clip_idx: usize,
+        zorder_offset: usize,
+        enter_offset_ns: u64,
+    ) -> Option<VideoSlot> {
+        let mut slot = self.build_slot_for_clip(clip_idx, zorder_offset, true)?;
+        if let Some(comp_pad) = slot.compositor_pad.take() {
+            let park = slot
+                .slot_queue
+                .as_ref()
+                .and_then(|q| q.static_pad("src"))
+                .and_then(|src| Self::park_branch(&src));
+            let _ = comp_pad.peer().map(|peer| peer.unlink(&comp_pad));
+            self.compositor.release_request_pad(&comp_pad);
+            slot.parked_video = park;
+        }
+        if let Some(amix_pad) = slot.audio_mixer_pad.take() {
+            let park = amix_pad.peer().and_then(|peer| Self::park_branch(&peer));
+            let _ = amix_pad.peer().map(|peer| peer.unlink(&amix_pad));
+            self.audiomixer.release_request_pad(&amix_pad);
+            slot.parked_audio = park;
+        }
+        if slot.parked_video.is_none() {
+            log::warn!(
+                "slot_swap: could not park the video branch for clip {}",
+                self.clips.get(clip_idx).map(|c| c.id.as_str()).unwrap_or("?")
+            );
+            self.teardown_single_slot(slot);
+            return None;
+        }
+        slot.hidden = true;
+        slot.transition_enter_offset_ns = enter_offset_ns;
+        Some(slot)
+    }
+
     /// Build a hidden replacement slot for `self.slots[slot_idx]`'s clip
     /// (which has already been re-pointed at the new clip data) and queue
     /// it for linking/seeking from `poll()`. The old slot keeps rendering.
@@ -5137,43 +5183,16 @@ impl ProgramPlayer {
             )
         };
         let started = Instant::now();
-        let Some(mut slot) = self.build_slot_for_clip(clip_idx, zorder_offset, true) else {
+        let Some(slot) = self.build_parked_slot(clip_idx, zorder_offset, enter_offset) else {
             return false;
         };
-        // The aggregators are non-live: a sink pad without data stalls the
-        // whole mix. So take the freshly requested compositor/audiomixer
-        // pads away again and park both branches at their last pad; the
-        // pads are re-requested and linked only once a decoded frame is
-        // waiting at the block (`poll_pending_slot_swaps`).
-        if let Some(comp_pad) = slot.compositor_pad.take() {
-            let park = slot
-                .slot_queue
-                .as_ref()
-                .and_then(|q| q.static_pad("src"))
-                .and_then(|src| Self::park_branch(&src));
-            let _ = comp_pad.peer().map(|peer| peer.unlink(&comp_pad));
-            self.compositor.release_request_pad(&comp_pad);
-            slot.parked_video = park;
-        }
-        if let Some(amix_pad) = slot.audio_mixer_pad.take() {
-            let park = amix_pad.peer().and_then(|peer| Self::park_branch(&peer));
-            let _ = amix_pad.peer().map(|peer| peer.unlink(&amix_pad));
-            self.audiomixer.release_request_pad(&amix_pad);
-            slot.parked_audio = park;
-        }
-        if slot.parked_video.is_none() {
-            log::warn!("slot_swap: could not park the video branch for clip {}", clip_id);
-            self.teardown_single_slot(slot);
-            return false;
-        }
-        slot.hidden = true;
-        slot.transition_enter_offset_ns = enter_offset;
         let new_decoder = slot.decoder.clone();
         self.slots.push(slot);
         self.pending_slot_swaps.push(PendingSlotSwap {
             clip_id: clip_id.clone(),
-            old_decoder,
+            old_decoder: Some(old_decoder),
             new_decoder,
+            boundary_ns: None,
             zorder: (zorder_offset + 1) as u32,
             seeked: false,
             due_wall_pos_ns: 0,
@@ -5189,6 +5208,97 @@ impl ProgramPlayer {
             started.elapsed().as_millis()
         );
         true
+    }
+
+    /// Stage slots for clips that *enter* at `boundary_ns` while the current
+    /// clips keep playing: each is built parked + hidden now, seeked to its
+    /// first frame and attached to the aggregators with an offset equal to
+    /// the running time of the boundary (see `poll_pending_slot_swaps`), so
+    /// `try_realtime_boundary_update` only has to un-hide it at the cut
+    /// instead of building, linking and seeking on the boundary tick and
+    /// showing the first frame a few hundred ms late. Returns the staged
+    /// clip indices.
+    fn stage_boundary_entries(
+        &mut self,
+        boundary_ns: u64,
+        boundary_active: &[usize],
+        current_active: &[usize],
+    ) -> Vec<usize> {
+        const MAX_STAGED: usize = 3;
+        let mut staged = Vec::new();
+        if !self.realtime_preview
+            || self.state != PlayerState::Playing
+            || self.slots.iter().all(|s| s.hidden)
+            || self.slots.iter().any(|s| s.is_prerender_slot)
+        {
+            return staged;
+        }
+        let desired: Vec<usize> = boundary_active
+            .iter()
+            .copied()
+            .filter(|&i| self.clips.get(i).is_some_and(|c| !c.is_adjustment))
+            .collect();
+        for (zorder_offset, &idx) in desired.iter().enumerate() {
+            if current_active.contains(&idx) {
+                continue;
+            }
+            let Some(clip) = self.clips.get(idx) else {
+                continue;
+            };
+            // Generators/stills/blend-captured clips keep the on-tick path.
+            if clip.is_title
+                || clip.is_image
+                || clip.blend_mode != crate::model::clip::BlendMode::Normal
+            {
+                continue;
+            }
+            let already = self.pending_slot_swaps.iter().any(|p| {
+                p.boundary_ns == Some(boundary_ns) && p.clip_id == clip.id
+            });
+            if already {
+                staged.push(idx);
+                continue;
+            }
+            if self
+                .pending_slot_swaps
+                .iter()
+                .filter(|p| p.boundary_ns.is_some())
+                .count()
+                >= MAX_STAGED
+            {
+                break;
+            }
+            let clip_id = clip.id.clone();
+            let enter_offset = self.transition_enter_offset_for_clip(idx);
+            let started = Instant::now();
+            let Some(slot) = self.build_parked_slot(idx, zorder_offset, enter_offset) else {
+                continue;
+            };
+            let new_decoder = slot.decoder.clone();
+            self.slots.push(slot);
+            self.pending_slot_swaps.push(PendingSlotSwap {
+                clip_id: clip_id.clone(),
+                old_decoder: None,
+                new_decoder,
+                boundary_ns: Some(boundary_ns),
+                zorder: (zorder_offset + 1) as u32,
+                seeked: false,
+                due_wall_pos_ns: boundary_ns,
+                seek_issued_pos_ns: 0,
+                seek_running_ns: 0,
+                attached: false,
+                seeks: 0,
+                started,
+            });
+            log::info!(
+                "boundary_stage: staged clip {} for boundary {:.3}s (build {} ms)",
+                clip_id,
+                boundary_ns as f64 / 1e9,
+                started.elapsed().as_millis()
+            );
+            staged.push(idx);
+        }
+        staged
     }
 
     /// Install a blocking probe on `pad` so the branch upstream of it
@@ -5238,6 +5348,110 @@ impl ProgramPlayer {
         Some(pad)
     }
 
+    /// Request the aggregator pads for pending entry `pi`'s parked slot and
+    /// link them with the entry's running-time offset (alpha/volume 0; the
+    /// slot stays hidden). Returns false if the compositor pad could not be
+    /// attached.
+    fn attach_pending_entry(&mut self, pi: usize) -> bool {
+        let (new_decoder, seek_running_ns, zorder) = {
+            let p = &self.pending_slot_swaps[pi];
+            (p.new_decoder.clone(), p.seek_running_ns, p.zorder)
+        };
+        let Some(new_idx) = self.slot_index_by_decoder(&new_decoder) else {
+            return false;
+        };
+        let slot = &mut self.slots[new_idx];
+        let Some(park) = slot.parked_video.take() else {
+            return false;
+        };
+        let comp_pad = Self::attach_parked_branch(
+            &self.compositor,
+            park,
+            seek_running_ns,
+            |pad| {
+                pad.set_property("zorder", zorder);
+                pad.set_property("alpha", 0.0_f64);
+            },
+        );
+        let Some(comp_pad) = comp_pad else {
+            return false;
+        };
+        slot.applied.pad_alpha.set(Some(0.0));
+        slot.compositor_pad = Some(comp_pad);
+        // Audio joins now too (decoded audio is normally parked well
+        // before the first video frame; if not, the mixer briefly
+        // waits for it — after the picture is already right).
+        if let Some(park) = slot.parked_audio.take() {
+            slot.audio_mixer_pad = Self::attach_parked_branch(
+                &self.audiomixer,
+                park,
+                seek_running_ns,
+                |pad| pad.set_property("volume", 0.0_f64),
+            );
+        }
+        self.pending_slot_swaps[pi].attached = true;
+        true
+    }
+
+    /// At a boundary tick: give staged entries for `entering` clips that
+    /// have been seeked but whose first frame is not parked yet a short
+    /// grace period, then attach them *now* (offset = current running
+    /// time, i.e. a slightly late first frame that the compositor catches
+    /// up on) — still far cheaper than building on the tick. Entries that
+    /// never produce a frame are aborted.
+    fn settle_staged_entries(&mut self, entering_ids: &[String]) {
+        let grace = Duration::from_millis(self.adaptive_arrival_wait_ms(300));
+        let mut pi = 0usize;
+        while pi < self.pending_slot_swaps.len() {
+            let (is_entry, attached, seeked, clip_id, new_decoder) = {
+                let p = &self.pending_slot_swaps[pi];
+                (
+                    p.old_decoder.is_none() && entering_ids.contains(&p.clip_id),
+                    p.attached,
+                    p.seeked,
+                    p.clip_id.clone(),
+                    p.new_decoder.clone(),
+                )
+            };
+            if !is_entry || attached {
+                pi += 1;
+                continue;
+            }
+            let parked = |me: &Self| {
+                me.slot_index_by_decoder(&new_decoder).is_some_and(|si| {
+                    me.slots[si]
+                        .parked_video
+                        .as_ref()
+                        .is_some_and(|p| p.parked.load(Ordering::Acquire))
+                })
+            };
+            let t0 = Instant::now();
+            while seeked && !parked(self) && t0.elapsed() < grace {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if !seeked || !parked(self) {
+                self.abort_slot_swap(pi, "not ready at the boundary");
+                continue;
+            }
+            let running_ns: i64 = self
+                .pipeline
+                .current_running_time()
+                .map(|t| t.nseconds() as i64)
+                .unwrap_or(0);
+            self.pending_slot_swaps[pi].seek_running_ns = running_ns;
+            if self.attach_pending_entry(pi) {
+                log::info!(
+                    "boundary_stage: late-attached staged clip {} after {} ms grace",
+                    clip_id,
+                    t0.elapsed().as_millis()
+                );
+                pi += 1;
+            } else {
+                self.abort_slot_swap(pi, "attach failed at the boundary");
+            }
+        }
+    }
+
     /// Drop pending swap `pi`, tearing down its hidden new slot. The old
     /// slot stays as it is.
     fn abort_slot_swap(&mut self, pi: usize, why: &str) {
@@ -5257,13 +5471,20 @@ impl ProgramPlayer {
         );
     }
 
+    /// Abort every pending entry; returns how many were *hot swaps* (whose
+    /// old slot is now stale and needs a rebuild), as opposed to staged
+    /// boundary entries (whose removal changes nothing visible).
     fn abort_all_slot_swaps(&mut self, why: &str) -> usize {
-        let n = self.pending_slot_swaps.len();
+        let hot = self
+            .pending_slot_swaps
+            .iter()
+            .filter(|p| p.old_decoder.is_some())
+            .count();
         while !self.pending_slot_swaps.is_empty() {
             let last = self.pending_slot_swaps.len() - 1;
             self.abort_slot_swap(last, why);
         }
-        n
+        hot
     }
 
     /// Advance in-flight hot swaps: seek the new slot once its decoder has
@@ -5279,8 +5500,8 @@ impl ProgramPlayer {
             // Paused/stopped mid-swap: the old (stale) slot is what the
             // paused frame would show. Drop the swaps and let the normal
             // paused rebuild produce the right chain.
-            let n = self.abort_all_slot_swaps("playback stopped");
-            if n > 0 && self.state == PlayerState::Paused && !self.clips.is_empty() {
+            let hot = self.abort_all_slot_swaps("playback stopped");
+            if hot > 0 && self.state == PlayerState::Paused && !self.clips.is_empty() {
                 self.rebuild_pipeline_at(self.timeline_pos_ns);
             }
             return;
@@ -5288,19 +5509,42 @@ impl ProgramPlayer {
         let mut pi = 0usize;
         let mut finished_any = false;
         while pi < self.pending_slot_swaps.len() {
-            let (new_decoder, old_decoder, seeked, started) = {
+            let (new_decoder, old_decoder, seeked, started, boundary_ns) = {
                 let p = &self.pending_slot_swaps[pi];
-                (p.new_decoder.clone(), p.old_decoder.clone(), p.seeked, p.started)
+                (
+                    p.new_decoder.clone(),
+                    p.old_decoder.clone(),
+                    p.seeked,
+                    p.started,
+                    p.boundary_ns,
+                )
             };
-            let (Some(new_idx), Some(old_idx)) = (
-                self.slot_index_by_decoder(&new_decoder),
-                self.slot_index_by_decoder(&old_decoder),
-            ) else {
+            let Some(new_idx) = self.slot_index_by_decoder(&new_decoder) else {
                 // A rebuild replaced the slots underneath us.
                 self.abort_slot_swap(pi, "slots rebuilt");
                 continue;
             };
-            if started.elapsed().as_millis() as u64 > SLOT_SWAP_TIMEOUT_MS {
+            let old_idx = match old_decoder {
+                Some(ref d) => match self.slot_index_by_decoder(d) {
+                    Some(i) => Some(i),
+                    None => {
+                        self.abort_slot_swap(pi, "slots rebuilt");
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            if let Some(b) = boundary_ns {
+                // A staged boundary entry is consumed by the boundary tick;
+                // if that never happened (edit moved the cut) drop it.
+                let wall = self
+                    .wall_clock_timeline_pos_ns()
+                    .unwrap_or(self.timeline_pos_ns);
+                if wall > b.saturating_add(1_000_000_000) {
+                    self.abort_slot_swap(pi, "boundary passed");
+                    continue;
+                }
+            } else if started.elapsed().as_millis() as u64 > SLOT_SWAP_TIMEOUT_MS {
                 self.abort_slot_swap(pi, "timeout");
                 log::warn!("slot_swap: timed out, taking the boundary rebuild path");
                 self.rebuild_pipeline_at(self.timeline_pos_ns);
@@ -5323,8 +5567,18 @@ impl ProgramPlayer {
                 let pos = self
                     .wall_clock_timeline_pos_ns()
                     .unwrap_or(self.timeline_pos_ns);
-                let lead_ns = (self.slot_swap_lead_ms * 1e6) as u64;
-                let target = pos.saturating_add(lead_ns);
+                // Hot swap: seek a lead ahead so the first frame lands on
+                // time. Staged boundary entry: seek to the clip's first
+                // frame, due exactly at the boundary (or a lead from now if
+                // we are already late).
+                let lead_ns = match boundary_ns {
+                    Some(b) if b > pos => b - pos,
+                    _ => (self.slot_swap_lead_ms * 1e6) as u64,
+                };
+                let target = match boundary_ns {
+                    Some(b) if b > pos => b,
+                    _ => pos.saturating_add(lead_ns),
+                };
                 let running_ns: i64 = self
                     .pipeline
                     .current_running_time()
@@ -5353,7 +5607,7 @@ impl ProgramPlayer {
                     }
                     let p = &mut self.pending_slot_swaps[pi];
                     p.seeked = true;
-                    p.due_wall_pos_ns = pos.saturating_add(lead_ns);
+                    p.due_wall_pos_ns = target;
                     p.seek_issued_pos_ns = pos;
                     p.seek_running_ns = running_ns;
                     p.seeks += 1;
@@ -5393,13 +5647,15 @@ impl ProgramPlayer {
                     .unwrap_or(self.timeline_pos_ns);
                 // Calibrate the lead from the measured seek → frame latency.
                 let measured_ms = wall.saturating_sub(seek_issued_pos_ns) as f64 / 1e6;
-                self.slot_swap_lead_ms = (0.6 * self.slot_swap_lead_ms + 0.4 * measured_ms)
-                    .clamp(SLOT_SWAP_LEAD_MIN_MS, SLOT_SWAP_LEAD_MAX_MS);
+                if boundary_ns.is_none() {
+                    self.slot_swap_lead_ms = (0.6 * self.slot_swap_lead_ms + 0.4 * measured_ms)
+                        .clamp(SLOT_SWAP_LEAD_MIN_MS, SLOT_SWAP_LEAD_MAX_MS);
+                }
                 // Badly late (the lead was far too short): one more seek with
                 // the recalibrated lead rather than revealing a stale frame
                 // and letting the compositor drop its way back to real time.
                 let late_ns = wall.saturating_sub(due_wall_pos_ns);
-                if late_ns > 6 * self.frame_duration_ns && seeks < 2 {
+                if boundary_ns.is_none() && late_ns > 6 * self.frame_duration_ns && seeks < 2 {
                     log::debug!(
                         "slot_swap: first frame {} ms late (lead {:.0} ms), reseeking with lead {:.0} ms",
                         late_ns / 1_000_000,
@@ -5414,39 +5670,11 @@ impl ProgramPlayer {
                     pi += 1;
                     continue;
                 }
-                let slot = &mut self.slots[new_idx];
-                let Some(park) = slot.parked_video.take() else {
-                    pi += 1;
-                    continue;
-                };
-                let comp_pad = Self::attach_parked_branch(
-                    &self.compositor,
-                    park,
-                    seek_running_ns,
-                    |pad| {
-                        pad.set_property("zorder", zorder);
-                        pad.set_property("alpha", 0.0_f64);
-                    },
-                );
-                let Some(comp_pad) = comp_pad else {
+                if !self.attach_pending_entry(pi) {
                     self.abort_slot_swap(pi, "compositor attach failed");
                     self.rebuild_pipeline_at(self.timeline_pos_ns);
                     return;
-                };
-                slot.applied.pad_alpha.set(Some(0.0));
-                slot.compositor_pad = Some(comp_pad);
-                // Audio joins now too (decoded audio is normally parked well
-                // before the first video frame; if not, the mixer briefly
-                // waits for it — after the picture is already right).
-                if let Some(park) = slot.parked_audio.take() {
-                    slot.audio_mixer_pad = Self::attach_parked_branch(
-                        &self.audiomixer,
-                        park,
-                        seek_running_ns,
-                        |pad| pad.set_property("volume", 0.0_f64),
-                    );
                 }
-                self.pending_slot_swaps[pi].attached = true;
                 log::debug!(
                     "slot_swap: attached new slot (frame due at {:.3}s, now {:.3}s, measured lead {:.0} ms → ema {:.0} ms)",
                     due_wall_pos_ns as f64 / 1e9,
@@ -5454,9 +5682,16 @@ impl ProgramPlayer {
                     measured_ms,
                     self.slot_swap_lead_ms
                 );
+                let _ = (seek_running_ns, zorder);
                 pi += 1;
                 continue;
             }
+            // Staged boundary entries stay attached + hidden until the
+            // boundary tick reveals them.
+            let Some(old_idx) = old_idx else {
+                pi += 1;
+                continue;
+            };
             // Reveal when the clock reaches the frame the new branch was
             // seeked to (an early frame simply waits in the compositor).
             let wall = self
@@ -10392,6 +10627,7 @@ impl ProgramPlayer {
 
     fn prewarm_upcoming_boundary(&mut self, timeline_pos_ns: u64) {
         const PREWARM_WINDOW_NS: u64 = 900_000_000;
+        const STAGED_PREWARM_WINDOW_NS: u64 = 2_200_000_000;
         const BACKGROUND_PREWARM_WINDOW_NS: u64 = 3_000_000_000;
         const BACKGROUND_PLAYING_LOOKAHEAD_NS: u64 = 12_000_000_000;
         const BACKGROUND_PLAYING_LOOKAHEAD_SMOOTH_NS: u64 = 16_000_000_000;
@@ -10457,6 +10693,11 @@ impl ProgramPlayer {
         let prewarm_window_ns = if self.background_prerender {
             let scale = self.rebuild_wait_scale().max(1.0).min(1.4);
             (BACKGROUND_PREWARM_WINDOW_NS as f64 * scale) as u64
+        } else if self.realtime_preview {
+            // Staged boundary entries need time for an accurate seek deep
+            // into a long-GOP source (≈1.2 s measured for 5.3K HEVC on the
+            // GPU) plus link; stage earlier than the sidecar prewarm did.
+            STAGED_PREWARM_WINDOW_NS
         } else {
             PREWARM_WINDOW_NS
         };
@@ -10506,6 +10747,19 @@ impl ProgramPlayer {
             }
         }
 
+        // Stage entering clips in the main pipeline (parked + hidden) so the
+        // boundary tick only reveals them. Skipped when a prerender segment
+        // is ready for this boundary (the tick takes the prerender path).
+        let staged: Vec<usize> = if !prerender_playback_active
+            && !(self.background_prerender && {
+                let signature = self.prerender_signature_for_active(&boundary_active);
+                self.find_prerender_segment_for(boundary_ns, &boundary_active, signature)
+                    .is_some()
+            }) {
+            self.stage_boundary_entries(boundary_ns, &boundary_active, &current_active)
+        } else {
+            Vec::new()
+        };
         for idx in boundary_active {
             let clip = self.clips[idx].clone();
             let incoming = if prerender_playback_active {
@@ -10517,7 +10771,7 @@ impl ProgramPlayer {
                 let effective_path = self.effective_source_path_for_clip(&clip);
                 let _ = self.probe_has_audio_stream_cached(&effective_path);
             }
-            if incoming {
+            if incoming && !staged.contains(&idx) {
                 self.prewarm_incoming_clip_resources(&clip, boundary_ns);
             }
         }
@@ -12119,9 +12373,28 @@ impl ProgramPlayer {
             return false;
         }
 
-        // A boundary ends any per-slot hot swap; its hidden new slot is
-        // garbage-collected below and the stale old slot is rebuilt here.
-        self.abort_all_slot_swaps("boundary");
+        // A boundary ends any per-slot hot swap (its hidden new slot is
+        // garbage-collected below and the stale old slot is rebuilt here).
+        // Staged boundary entries are kept only if they are attached and
+        // their clip really enters now; they are consumed in step 3.
+        {
+            let entering_ids: Vec<String> = desired
+                .iter()
+                .filter(|i| !current_visible.contains(i))
+                .filter_map(|&i| self.clips.get(i).map(|c| c.id.clone()))
+                .collect();
+            let mut pi = 0usize;
+            while pi < self.pending_slot_swaps.len() {
+                let p = &self.pending_slot_swaps[pi];
+                let keep = p.old_decoder.is_none() && entering_ids.contains(&p.clip_id);
+                if keep {
+                    pi += 1;
+                } else {
+                    self.abort_slot_swap(pi, "boundary");
+                }
+            }
+            self.settle_staged_entries(&entering_ids);
+        }
         // A retained slot whose element chain no longer fits its clip (an
         // edit landed while playing and its hot swap did not complete) is
         // treated as departing + entering so it gets rebuilt in place.
@@ -12179,12 +12452,21 @@ impl ProgramPlayer {
         // outgoing clip.  Fall back to the full rebuild, which tears down,
         // prerolls, and waits for the entering clip's first frame before
         // resuming (a brief hitch instead of an indefinite freeze).
-        if retained.is_empty() && !added.is_empty() {
+        let staged_for = |me: &Self, clip_idx: usize| -> Option<usize> {
+            let id = me.clips.get(clip_idx)?.id.as_str();
+            me.pending_slot_swaps
+                .iter()
+                .find(|p| p.old_decoder.is_none() && p.attached && p.clip_id == id)
+                .and_then(|p| me.slot_index_by_decoder(&p.new_decoder))
+        };
+        let all_added_staged = added.iter().all(|&i| staged_for(self, i).is_some());
+        if retained.is_empty() && !added.is_empty() && !all_added_staged {
             log::info!(
                 "try_realtime_boundary: full swap (retained empty, added={:?}) — \
                  deferring to full rebuild to avoid a frozen compositor",
                 added
             );
+            self.abort_all_slot_swaps("boundary full swap");
             return false;
         }
 
@@ -12198,10 +12480,15 @@ impl ProgramPlayer {
             retained
         );
 
-        // 1. Garbage-collect previously-hidden slots to bound resource use.
+        // 1. Garbage-collect previously-hidden slots to bound resource use
+        //    (staged entries for this boundary are hidden too — keep them).
         let mut i = 0usize;
         while i < self.slots.len() {
-            if self.slots[i].hidden {
+            let is_staged = self
+                .pending_slot_swaps
+                .iter()
+                .any(|p| p.new_decoder == self.slots[i].decoder);
+            if self.slots[i].hidden && !is_staged {
                 let slot = self.slots.remove(i);
                 self.teardown_single_slot(slot);
             } else {
@@ -12236,9 +12523,25 @@ impl ProgramPlayer {
 
             let mut added_ok = true;
             let mut added_clip_idxs: Vec<usize> = Vec::new();
+            let mut staged_used = 0usize;
             for clip_idx in &added {
                 // Adjustment layers have no compositor slot — skip without error.
                 if *clip_idx < self.clips.len() && self.clips[*clip_idx].is_adjustment {
+                    continue;
+                }
+                // Staged ahead of the cut: already linked, seeked and
+                // attached with the boundary's running time — just reveal.
+                if let Some(si) = staged_for(self, *clip_idx) {
+                    let decoder = self.slots[si].decoder.clone();
+                    self.pending_slot_swaps
+                        .retain(|p| p.new_decoder != decoder);
+                    let enter_offset = self.transition_enter_offset_for_clip(*clip_idx);
+                    let slot = &mut self.slots[si];
+                    slot.hidden = false;
+                    slot.clip_idx = *clip_idx;
+                    slot.applied.invalidate();
+                    slot.transition_enter_offset_ns = enter_offset;
+                    staged_used += 1;
                     continue;
                 }
                 // Use zorder 0 temporarily; corrected in step 4.
@@ -12343,7 +12646,16 @@ impl ProgramPlayer {
             }
 
             // Brief preroll wait for new decoders only.
-            self.wait_for_paused_preroll();
+            if !added_clip_idxs.is_empty() {
+                self.wait_for_paused_preroll();
+            }
+            if staged_used > 0 {
+                log::info!(
+                    "try_realtime_boundary: revealed {} staged slot(s), built {} on the tick",
+                    staged_used,
+                    added_clip_idxs.len()
+                );
+            }
         }
 
         // 4. Update zorder on all visible slots to match desired order.
