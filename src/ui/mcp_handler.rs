@@ -6456,6 +6456,23 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
             }
         }
 
+        McpCommand::ExportLiveFrame { path, reply } => {
+            if path.is_empty() {
+                reply
+                    .send(json!({"ok": false, "error": "path is required"}))
+                    .ok();
+            } else {
+                match prog_player.borrow_mut().export_live_frame_ppm(&path) {
+                    Ok(pos) => reply
+                        .send(json!({"ok": true, "path": path, "format": "ppm", "timeline_pos_ns": pos}))
+                        .ok(),
+                    Err(e) => reply
+                        .send(json!({"ok": false, "error": e.to_string()}))
+                        .ok(),
+                };
+            }
+        }
+
         McpCommand::ExportDisplayedFrame { path, reply } => {
             if path.is_empty() {
                 reply

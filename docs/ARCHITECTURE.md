@@ -546,16 +546,62 @@ contract (all checks happen before anything is mutated):
   list via the `live_reload_scratch` swap) must be exactly the clip ids of
   the slots currently playing. A removed/added *visible* clip is a rebuild;
   a clip added or moved elsewhere is not.
-- **Declines**: not Playing, no slots, transform-live/prerender/blend slots
-  in use, a slot's clip gone, or a shape change — each is debug-logged as
-  `live_reload: declined (...)` so a regression is visible in the log.
+- **Shape or mapping change on a visible slot → per-slot hot swap**
+  (`begin_slot_swap`, advanced by `poll_pending_slot_swaps` from `poll()`):
+  1. `build_slot_for_clip` for the (already re-pointed) clip; the slot is
+     `hidden`, its compositor/audiomixer pads are *released again* and both
+     branches are parked with a `BLOCK | BUFFER` probe on their last pad
+     (`park_branch`). Aggregators are non-live: a sink pad with no data
+     stalls the whole mix, so no pad may exist before data is waiting.
+  2. Once the decoder has linked, flush-seek it to `pos + lead`
+     (`slot_swap_lead_ms`, an EMA of measured seek→first-frame latency
+     clamped to 150–1500 ms) and remember the running time at which that
+     frame is due. Park flags are cleared after the seek (anything parked
+     before it was pre-seek content).
+  3. When a decoded buffer is parked, request the aggregator pads, set
+     `pad.set_offset(due running time)`, link, lift the block
+     (`attach_parked_branch`). A first frame more than 6 frames late earns
+     one reseek with the recalibrated lead instead of revealing stale video.
+  4. When the wall clock reaches the due position: hide + mute the old
+     slot, un-hide the new one, re-run the appliers, tear the old slot down.
+  Declines (full path): not realtime preview, adjustment layer, more than
+  two swaps per edit, a departed/hidden slot. A boundary, pause/stop, a
+  further edit to the same clip, slots rebuilt underneath, or the 2.5 s
+  timeout abort the swap (`abort_slot_swap`) and the normal rebuild runs;
+  `try_realtime_boundary_update` additionally treats a retained slot whose
+  chain no longer satisfies its clip (`slot_satisfies_clip`) as departing +
+  entering so it is rebuilt in place.
+- **Never flush-seek a single live branch without pinning its pad
+  offsets.** The seek restarts that branch's running time at 0 while the
+  compositor's output position is at playback time; the compositor then
+  drops the branch's frames as late, the decoder races ahead at full speed
+  and starves the other slots (seen as `slot_align` drifting by seconds).
+  Either flush the aggregators too (`continue_decoders_at`,
+  `seek_slots_in_place`, `play()`) or use the swap. Every compositor flush
+  must be followed by `reset_slot_pad_offsets()`, or a slot that carried an
+  offset (boundary path, swap) parks its buffers in the future.
+- **`play()` resets a stale running time.** The paused-seek path's Playing
+  pulse leaves the pipeline paused at a running time of a few hundred ms
+  (its `start_time`). Resuming without resetting it made the compositor drop
+  that much input, so the picture ran ahead of the playhead and the audio
+  by ~0.5 s after every play. `play()` now sets `start_time` to zero and
+  flushes the aggregators (skipping still-image slots, as the in-place seek
+  does) when it finds a stale start time.
 - **Commit**: swap `clips`/`audio_clips`, remap `slot.clip_idx` by id,
   invalidate `SlotAppliedProps`, clear boundary prewarm/debounce state,
-  reseek only mapping-changed slots (FLUSH|ACCURATE), re-run the keyframed
-  property + transition appliers at the current position, and resync the
-  audio mixer only if the active audio set or any active audio clip changed
-  (wall-clock aligned, see the resync rules above). The caller must *not*
-  touch `timeline_pos_ns` or call `seek`/`play` afterwards.
+  re-run the keyframed property + transition appliers at the current
+  position, resync the audio mixer only if the active audio set or any
+  active audio clip changed (wall-clock aligned, see the resync rules
+  above), then start the swaps. The caller must *not* touch
+  `timeline_pos_ns` or call `seek`/`play` afterwards.
+- **Verification.** `slot_align` (debug, once per second) prints each
+  visible slot's last compositor-input PTS minus the source time implied by
+  the wall clock (≈ +0…+100 ms when healthy); `slot_swap: align` prints the
+  same for old/new at the swap. MCP `export_live_frame` captures the next
+  composited frame without pausing and returns the playhead position, so a
+  frame scan against ffmpeg-decoded source frames gives the true display
+  offset (the pausing `export_displayed_frame` reseeks and cannot see live
+  misalignment).
 
 ### Automatic proxies (Proxy mode Off)
 
@@ -1057,6 +1103,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_crossfade_settings` | Set automatic audio crossfade preferences (`enabled`, `curve`, `duration_ns`) with strict validation |
 | `set_proxy_mode` | Set proxy preview mode (`off` / `p1080` / `p720` / `p640` / `p540`; legacy `half_res` / `quarter_res`) |
 | `set_auto_proxy_threshold` | Automatic proxies while proxy mode is off (`off` / `above_1080p` / `above_1440p` / `above_2160p`) |
+| `export_live_frame` | Capture the next composited frame without pausing (PPM) and return the playhead position at capture |
 | `set_gsk_renderer` | Set GTK renderer backend (`auto` / `cairo` / `opengl` / `vulkan`); requires restart |
 | `set_preview_quality` | Set compositor preview quality (`auto` / `full` / `half` / `quarter`); takes effect immediately |
 | `set_realtime_preview` | Toggle real-time preview decoder prebuilds (`true` / `false`) |

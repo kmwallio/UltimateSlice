@@ -1982,6 +1982,17 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "export_live_frame",
+            "description": "Capture the next composited program-monitor frame WITHOUT pausing or reseeking (binary PPM/P6). Returns timeline_pos_ns, the playhead position at the moment of capture, so the frame can be checked against the source for live playback alignment. Unlike export_displayed_frame this never disturbs playback.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "Absolute output file path (recommended .ppm extension)." }
+                },
+                "required": ["path"]
+            }
+        },
+        {
             "name": "export_timeline_snapshot",
             "description": "Render the timeline panel to a PNG image file. Useful for verifying timeline overlays like keyframe markers in headless environments.",
             "inputSchema": {
@@ -4117,6 +4128,10 @@ fn dispatch_tool_payload(
             reply: tx,
         },
         "export_displayed_frame" => McpCommand::ExportDisplayedFrame {
+            path: arg_str!(args, "path"),
+            reply: tx,
+        },
+        "export_live_frame" => McpCommand::ExportLiveFrame {
             path: arg_str!(args, "path"),
             reply: tx,
         },

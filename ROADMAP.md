@@ -330,6 +330,7 @@ Tracking docs:
   - [x] Persist monitor window geometry and last docked/popped state across sessions
 - [ ] Preview rendering performance pass
   - [x] Apply edits made during playback in place (live reload: id-based slot remap, reseek only on source-mapping change, audio resync only on audio change) instead of stop/rebuild/seek/play, so value tweaks while playing no longer stall the preview
+  - [x] Per-slot hot swap for mid-play edits that change a clip's element chain or source mapping (parked replacement branch, lead-time seek, pad-offset attach, reveal when due) — no black frames, no full rebuild; plus fix for the picture running ~0.5 s ahead of the playhead/audio after play from pause
   - [x] Build a compositor-based preview pipeline (`compositor` + layered video tracks) so B-roll/overlays render in preview without clip switching — see Picture-in-Picture section under Video Transform
   - [x] Run decode + waveform/thumbnail extraction on background workers with bounded queues and cancellation to keep GTK main thread responsive
   - [x] Move media import probing (duration + audio-only detection) to background threads via `MediaProbeCache`

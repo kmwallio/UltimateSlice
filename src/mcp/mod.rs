@@ -790,6 +790,10 @@ pub enum McpCommand {
         path: String,
         reply: SyncSender<Value>,
     },
+    ExportLiveFrame {
+        path: String,
+        reply: SyncSender<Value>,
+    },
     ExportTimelineSnapshot {
         path: String,
         width: u32,
