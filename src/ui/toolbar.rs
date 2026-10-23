@@ -1158,7 +1158,8 @@ pub fn build_toolbar(
     on_show_project_health: impl Fn(Option<gtk::Window>) + 'static + Clone,
     on_record_voiceover: impl Fn() + 'static + Clone,
     on_replay_onboarding: impl Fn() + 'static + Clone,
-) -> (HeaderBar, Button, Button) {
+    keymap: Rc<RefCell<crate::keybindings::Keymap>>,
+) -> ToolbarHandles {
     let header = HeaderBar::new();
 
     let title = Label::new(Some("UltimateSlice"));
@@ -1492,12 +1493,13 @@ pub fn build_toolbar(
         btn_shortcuts.set_hexpand(true);
         {
             let pop_weak = pop.downgrade();
+            let keymap = keymap.clone();
             btn_shortcuts.connect_clicked(move |btn| {
                 if let Some(pop) = pop_weak.upgrade() {
                     pop.popdown();
                 }
                 if let Some(window) = btn.root().and_then(|r| r.downcast::<gtk::Window>().ok()) {
-                    crate::ui::timeline::widget::show_shortcuts_dialog(&window);
+                    crate::ui::timeline::widget::show_shortcuts_dialog(&window, &keymap.borrow());
                 }
             });
         }
@@ -3508,7 +3510,25 @@ pub fn build_toolbar(
         }));
     }
 
-    (header, btn_record, btn_draw_tools)
+    ToolbarHandles {
+        header,
+        btn_record,
+        btn_draw_tools,
+        btn_new,
+        btn_open,
+        btn_save,
+    }
+}
+
+/// Widgets `build_toolbar` hands back to the window: the header bar plus the
+/// buttons other code drives (`emit_clicked` from shortcuts / the palette).
+pub struct ToolbarHandles {
+    pub header: HeaderBar,
+    pub btn_record: Button,
+    pub btn_draw_tools: Button,
+    pub btn_new: Button,
+    pub btn_open: Button,
+    pub btn_save: Button,
 }
 
 #[cfg(test)]

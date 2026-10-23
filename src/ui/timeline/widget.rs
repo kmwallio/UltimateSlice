@@ -15,7 +15,7 @@ use crate::undo::{
 use glib;
 use gtk4::prelude::*;
 use gtk4::{
-    self as gtk, DrawingArea, EventControllerKey, EventControllerScroll, GestureClick, GestureDrag,
+    self as gtk, DrawingArea, EventControllerScroll, GestureClick, GestureDrag,
 };
 use crate::ui::timeline::area::TimelineArea;
 use gtk::graphene;
@@ -6772,9 +6772,64 @@ fn apply_clip_context_menu_actionability(
 }
 
 /// Build and return the scrollable track-stack `DrawingArea`.
+/// What a timeline shortcut handler asks the wrapper to do after the state
+/// borrow is released (mirrors the old key handler's post-processing).
+#[derive(Default)]
+struct TlOutcome {
+    project: bool,
+    selection: bool,
+    tool: Option<ActiveTool>,
+}
+
+/// Wrap a timeline shortcut body so it runs with `state` mutably borrowed,
+/// then — borrow released — redraws, fires `on_project_changed`,
+/// `on_clip_selected` and `on_tool_changed` exactly as the previous single
+/// key handler did. Returns the handler for `ActionMap::bind`.
+fn timeline_action(
+    state: Rc<RefCell<TimelineState>>,
+    area_weak: glib::WeakRef<TimelineArea>,
+    f: Box<dyn Fn(&mut TimelineState, &mut TlOutcome) -> bool>,
+) -> Rc<dyn Fn() -> bool> {
+    Rc::new(move || {
+        let mut out = TlOutcome::default();
+        let (handled, sel_cb, tool_cb, new_sel) = {
+            let mut st = state.borrow_mut();
+            let handled = f(&mut st, &mut out);
+            let sel_cb = if out.selection {
+                st.on_clip_selected.clone()
+            } else {
+                None
+            };
+            let tool_cb = if out.tool.is_some() {
+                st.on_tool_changed.clone()
+            } else {
+                None
+            };
+            (handled, sel_cb, tool_cb, st.selected_clip_id.clone())
+        };
+        if handled {
+            if let Some(a) = area_weak.upgrade() {
+                a.queue_draw();
+            }
+        }
+        if out.project {
+            TimelineState::notify_project_changed(&state);
+        }
+        if let Some(cb) = sel_cb {
+            cb(new_sel);
+        }
+        if let (Some(cb), Some(tool)) = (tool_cb, out.tool) {
+            cb(tool);
+        }
+        handled
+    })
+}
+
 pub fn build_timeline(
     state: Rc<RefCell<TimelineState>>,
     ruler_area: Rc<RefCell<Option<DrawingArea>>>,
+    keymap: Rc<RefCell<crate::keybindings::Keymap>>,
+    actions: Rc<RefCell<crate::keybindings::ActionMap>>,
 ) -> TimelineArea {
     let area = TimelineArea::new();
     area.set_vexpand(true);
@@ -9823,514 +9878,394 @@ pub fn build_timeline(
     drag.group_with(&click_ref);
 
     // ── Keyboard shortcuts ──────────────────────────────────────────────────
-    let key_ctrl = EventControllerKey::new();
+    // ── Keyboard shortcuts (Timeline context) ───────────────────────────
+    // Every arm of the old `match key` is now a handler registered under
+    // its ActionId; the keys come from the user's keymap. The Precision Trim
+    // sub-mode and multicam angle keys 5–9 stay fixed (pre-hook below).
     {
-        let state = state.clone();
-        let area_weak = area.downgrade();
-        key_ctrl.connect_key_pressed(move |ctrl_ev, key, _, modifiers| {
-            use gtk::gdk::Key;
-            let ctrl = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
-            let shift = modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK);
-            let alt = modifiers.contains(gtk::gdk::ModifierType::ALT_MASK);
-
-            // Don't intercept when a text entry has focus — prevents Space
-            // from triggering play/pause while editing title text, and
-            // single-letter shortcuts (B, T, R, S, …) from firing while
-            // the user is typing in an Entry or SearchEntry.
-            if !ctrl {
-                if let Some(widget) = ctrl_ev.widget() {
-                    if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                        if focused.is::<gtk4::Text>()
-                            || focused.is::<gtk4::Entry>()
-                            || focused.is::<gtk4::SearchEntry>()
-                            || focused.is::<gtk4::TextView>()
-                            || focused.is::<gtk4::SpinButton>()
-                        {
-                            return glib::Propagation::Proceed;
-                        }
-                    }
-                }
+        use crate::keybindings::ActionId;
+        let mut acts = actions.borrow_mut();
+        let tl = |f: Box<dyn Fn(&mut TimelineState, &mut TlOutcome) -> bool>| {
+            timeline_action(state.clone(), area.downgrade(), f)
+        };
+        acts.bind(ActionId::Undo, tl(Box::new(|st, out| {
+            out.project = st.undo();
+            true
+        })));
+        acts.bind(ActionId::Redo, tl(Box::new(|st, out| {
+            out.project = st.redo();
+            true
+        })));
+        acts.bind(ActionId::SelectAll, tl(Box::new(|st, out| {
+            let changed = st.select_all_clips();
+            if changed {
+                out.selection = true;
             }
-
-            let mut st = state.borrow_mut();
-
-            // Track whether we need to fire on_project_changed after releasing the borrow
-            let mut notify_project = false;
-            let mut notify_selection = false;
-            let mut notify_tool: Option<ActiveTool> = None;
-
-            if st.precision_trim_session.is_some() {
-                let preview = match key {
-                    Key::Left => st.nudge_precision_trim_session(if shift {
-                        -PRECISION_TRIM_LARGE_STEP_FRAMES
-                    } else {
-                        -1
-                    }),
-                    Key::Right => st.nudge_precision_trim_session(if shift {
-                        PRECISION_TRIM_LARGE_STEP_FRAMES
-                    } else {
-                        1
-                    }),
-                    Key::Return | Key::KP_Enter => {
-                        notify_project = st.commit_precision_trim_session();
-                        drop(st);
-                        TimelineState::notify_trim_preview(&state, None);
-                        if let Some(a) = area_weak.upgrade() {
-                            a.queue_draw();
-                        }
-                        if notify_project {
-                            TimelineState::notify_project_changed(&state);
-                        }
-                        return glib::Propagation::Stop;
-                    }
-                    Key::Escape => {
-                        let _ = st.cancel_precision_trim_session();
-                        drop(st);
-                        TimelineState::notify_trim_preview(&state, None);
-                        if let Some(a) = area_weak.upgrade() {
-                            a.queue_draw();
-                        }
-                        return glib::Propagation::Stop;
-                    }
-                    _ => return glib::Propagation::Stop,
-                };
-                drop(st);
-                if let Some(preview) = preview {
-                    TimelineState::notify_trim_preview(&state, Some(preview));
+            changed
+        })));
+        acts.bind(ActionId::CopyColorGrade, tl(Box::new(|st, _| st.copy_color_grade())));
+        acts.bind(ActionId::PasteColorGradeAll, tl(Box::new(|st, out| {
+            let changed = st.paste_color_grade_to_all_selected();
+            if changed {
+                out.project = true;
+            }
+            changed
+        })));
+        acts.bind(ActionId::PasteColorGrade, tl(Box::new(|st, out| {
+            let changed = st.paste_color_grade();
+            if changed {
+                out.project = true;
+            }
+            changed
+        })));
+        acts.bind(ActionId::Copy, tl(Box::new(|st, _| st.copy_selected_to_clipboard())));
+        acts.bind(ActionId::PasteAttributes, tl(Box::new(|st, out| {
+            let changed = st.paste_attributes_from_clipboard();
+            if changed {
+                out.project = true;
+            }
+            changed
+        })));
+        acts.bind(ActionId::PasteInsert, tl(Box::new(|st, out| {
+            let changed = st.paste_insert_from_clipboard();
+            if changed {
+                out.project = true;
+            }
+            changed
+        })));
+        acts.bind(ActionId::Ungroup, tl(Box::new(|st, out| {
+            let changed = st.ungroup_selected_clips();
+            if changed {
+                out.project = true;
+            }
+            changed
+        })));
+        acts.bind(ActionId::Group, tl(Box::new(|st, out| {
+            let changed = st.group_selected_clips();
+            if changed {
+                out.project = true;
+            }
+            changed
+        })));
+        acts.bind(ActionId::Unlink, tl(Box::new(|st, out| {
+            let changed = st.unlink_selected_clips();
+            if changed {
+                out.project = true;
+            }
+            changed
+        })));
+        acts.bind(ActionId::Link, tl(Box::new(|st, out| {
+            let changed = st.link_selected_clips();
+            if changed {
+                out.project = true;
+            }
+            changed
+        })));
+        acts.bind(ActionId::CreateCompound, tl(Box::new(|st, out| {
+            let changed = st.create_compound_from_selection();
+            if changed {
+                out.project = true;
+            }
+            changed
+        })));
+        acts.bind(ActionId::CreateMulticam, tl(Box::new(|st, _| {
+            let _ = st.request_create_multicam();
+            false // async — project change fires when sync completes
+        })));
+        acts.bind(ActionId::RippleDelete, tl(Box::new(|st, out| {
+            st.ripple_delete_selected();
+            out.project = true;
+            true
+        })));
+        acts.bind(ActionId::Delete, tl(Box::new(|st, out| {
+            if st.has_selected_keyframes() {
+                let changed = st.delete_selected_keyframes();
+                if changed {
+                    st.clear_keyframe_selection();
+                    out.project = true;
+                }
+                changed
+            } else {
+                st.delete_selected();
+                out.project = true;
+                true
+            }
+        })));
+        for (id, angle, interp) in [
+            (ActionId::KeyframeInterpLinear, 0, KeyframeInterpolation::Linear),
+            (ActionId::KeyframeInterpEaseIn, 1, KeyframeInterpolation::EaseIn),
+            (ActionId::KeyframeInterpEaseOut, 2, KeyframeInterpolation::EaseOut),
+            (ActionId::KeyframeInterpEaseInOut, 3, KeyframeInterpolation::EaseInOut),
+        ] {
+            acts.bind(id, tl(Box::new(move |st, out| {
+                // 1–4 double as multicam angle switches while a multicam
+                // clip is selected.
+                let changed = if st.selected_multicam_context().is_some() {
+                    st.insert_multicam_angle_switch(angle)
                 } else {
-                    TimelineState::notify_trim_preview(&state, None);
+                    st.set_selected_keyframe_interpolation(interp)
+                };
+                if changed {
+                    out.project = true;
+                }
+                changed
+            })));
+        }
+        acts.bind(ActionId::SelectForward, tl(Box::new(|st, out| {
+            let changed = st.select_clips_forward_from_playhead();
+            if changed {
+                out.selection = true;
+            }
+            changed
+        })));
+        acts.bind(ActionId::SelectBackward, tl(Box::new(|st, out| {
+            let changed = st.select_clips_backward_from_playhead();
+            if changed {
+                out.selection = true;
+            }
+            changed
+        })));
+        acts.bind(ActionId::ToggleTrackSolo, tl(Box::new(|st, out| {
+            let changed = st.toggle_selected_track_solo();
+            if changed {
+                out.project = true;
+            }
+            changed
+        })));
+        acts.bind(ActionId::ToggleTrackMute, tl(Box::new(|st, out| {
+            let changed = st.toggle_selected_track_mute();
+            if changed {
+                out.project = true;
+            }
+            changed
+        })));
+        acts.bind(ActionId::ToggleTrackLock, tl(Box::new(|st, out| {
+            let changed = st.toggle_selected_track_lock();
+            if changed {
+                out.project = true;
+            }
+            changed
+        })));
+        acts.bind(ActionId::JoinThroughEdit, tl(Box::new(|st, out| {
+            let changed = st.join_selected_through_edit();
+            if changed {
+                out.project = true;
+                out.selection = true;
+            }
+            changed
+        })));
+        for (id, tool) in [
+            (ActionId::ToolRazor, ActiveTool::Razor),
+            (ActionId::ToolRipple, ActiveTool::Ripple),
+            (ActionId::ToolRoll, ActiveTool::Roll),
+            (ActionId::ToolSlip, ActiveTool::Slip),
+            (ActionId::ToolSlide, ActiveTool::Slide),
+            (ActionId::ToolDraw, ActiveTool::Draw),
+        ] {
+            acts.bind(id, tl(Box::new(move |st, out| {
+                // Pressing a tool key again returns to Select.
+                st.active_tool = if st.active_tool == tool {
+                    ActiveTool::Select
+                } else {
+                    tool.clone()
+                };
+                out.tool = Some(st.active_tool.clone());
+                true
+            })));
+        }
+        acts.bind(ActionId::EscapeCancel, tl(Box::new(|st, out| {
+            if st.cancel_music_generation_region() {
+                true
+            } else if st.is_editing_compound() {
+                st.exit_compound();
+                out.project = true;
+                true
+            } else {
+                st.active_tool = ActiveTool::Select;
+                out.tool = Some(ActiveTool::Select);
+                true
+            }
+        })));
+        // Handlers that release the state borrow before calling out.
+        {
+            let state = state.clone();
+            let area_weak = area.downgrade();
+            acts.bind(ActionId::PlayPause, Rc::new(move || {
+                let pp_cb = state.borrow().on_play_pause.clone();
+                if let Some(cb) = pp_cb {
+                    cb();
                 }
                 if let Some(a) = area_weak.upgrade() {
                     a.queue_draw();
                 }
-                return glib::Propagation::Stop;
-            }
-
-            let handled = match key {
-                Key::z if ctrl && !shift => {
-                    notify_project = st.undo();
-                    true
+                true
+            }));
+        }
+        {
+            let state = state.clone();
+            let area_weak = area.downgrade();
+            acts.bind(ActionId::FreezeFrame, Rc::new(move || {
+                if let Some(a) = area_weak.upgrade() {
+                    open_freeze_frame_dialog(state.clone(), a.upcast::<gtk::Widget>());
                 }
-                Key::z if ctrl && shift => {
-                    notify_project = st.redo();
-                    true
+                true
+            }));
+        }
+        {
+            let state = state.clone();
+            acts.bind(ActionId::MatchFrame, Rc::new(move || {
+                let cb = state.borrow().on_match_frame.clone();
+                if let Some(cb) = cb {
+                    cb();
                 }
-                Key::y if ctrl => {
-                    notify_project = st.redo();
-                    true
-                }
-                Key::a | Key::A if ctrl => {
-                    let changed = st.select_all_clips();
-                    if changed {
-                        notify_selection = true;
-                    }
-                    changed
-                }
-                Key::c | Key::C if ctrl && alt => st.copy_color_grade(),
-                Key::m | Key::M if ctrl && alt => {
+                true
+            }));
+        }
+        {
+            let state = state.clone();
+            acts.bind(ActionId::MatchColor, Rc::new(move || {
+                let cb = {
+                    let st = state.borrow();
                     if st.selected_clip_id.is_some() {
-                        let cb = st.on_match_color.clone();
-                        drop(st);
+                        Some(st.on_match_color.clone())
+                    } else {
+                        None
+                    }
+                };
+                match cb {
+                    Some(cb) => {
                         if let Some(cb) = cb {
                             cb();
                         }
-                        return glib::Propagation::Stop;
-                    }
-                    false
-                }
-                Key::v | Key::V if ctrl && alt && shift => {
-                    let changed = st.paste_color_grade_to_all_selected();
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::v | Key::V if ctrl && alt => {
-                    let changed = st.paste_color_grade();
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::c | Key::C if ctrl => st.copy_selected_to_clipboard(),
-                Key::v | Key::V if ctrl && shift => {
-                    let changed = st.paste_attributes_from_clipboard();
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::v | Key::V if ctrl => {
-                    let changed = st.paste_insert_from_clipboard();
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::g | Key::G if ctrl && shift => {
-                    let changed = st.ungroup_selected_clips();
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::g | Key::G if ctrl => {
-                    let changed = st.group_selected_clips();
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::l | Key::L if ctrl && shift => {
-                    let changed = st.unlink_selected_clips();
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::g | Key::G if alt => {
-                    let changed = st.create_compound_from_selection();
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::m | Key::M if alt && !ctrl => {
-                    let _ = st.request_create_multicam();
-                    false // async — project change fires when sync completes
-                }
-                Key::l | Key::L if ctrl => {
-                    let changed = st.link_selected_clips();
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::Delete | Key::BackSpace if shift => {
-                    st.ripple_delete_selected();
-                    notify_project = true;
-                    true
-                }
-                Key::Delete | Key::BackSpace => {
-                    if st.has_selected_keyframes() {
-                        let changed = st.delete_selected_keyframes();
-                        if changed {
-                            st.clear_keyframe_selection();
-                            notify_project = true;
-                        }
-                        changed
-                    } else {
-                        st.delete_selected();
-                        notify_project = true;
                         true
                     }
+                    None => false,
                 }
-                Key::_1 | Key::KP_1 if !ctrl => {
-                    if st.selected_multicam_context().is_some() {
-                        let changed = st.insert_multicam_angle_switch(0);
-                        if changed {
-                            notify_project = true;
+            }));
+        }
+        {
+            let state = state.clone();
+            let area_weak = area.downgrade();
+            acts.bind(ActionId::PrecisionTrim, Rc::new(move || {
+                let (preview, started) = {
+                    let mut st = state.borrow_mut();
+                    let preview = st.begin_precision_trim_session();
+                    (preview, st.precision_trim_session.is_some())
+                };
+                if !started {
+                    return false;
+                }
+                if let Some(preview) = preview {
+                    TimelineState::notify_trim_preview(&state, Some(preview));
+                }
+                if let Some(a) = area_weak.upgrade() {
+                    a.queue_draw();
+                }
+                true
+            }));
+        }
+        {
+            let area_weak = area.downgrade();
+            let keymap = keymap.clone();
+            acts.bind(ActionId::ShowShortcuts, Rc::new(move || {
+                if let Some(a) = area_weak.upgrade() {
+                    if let Some(win) = a.root().and_then(|r| r.downcast::<gtk::Window>().ok()) {
+                        show_shortcuts_dialog(&win, &keymap.borrow());
+                    }
+                }
+                true
+            }));
+        }
+        drop(acts);
+
+        // Fixed pre-resolver keys: Precision Trim sub-mode and multicam 5–9.
+        let pre: crate::ui::key_dispatch::PreHook = {
+            let state = state.clone();
+            let area_weak = area.downgrade();
+            Rc::new(move |key, modifiers| {
+                use gtk::gdk::Key;
+                let ctrl = modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK);
+                let shift = modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK);
+                let mut st = state.borrow_mut();
+                if st.precision_trim_session.is_some() {
+                    let preview = match key {
+                        Key::Left => st.nudge_precision_trim_session(if shift {
+                            -PRECISION_TRIM_LARGE_STEP_FRAMES
+                        } else {
+                            -1
+                        }),
+                        Key::Right => st.nudge_precision_trim_session(if shift {
+                            PRECISION_TRIM_LARGE_STEP_FRAMES
+                        } else {
+                            1
+                        }),
+                        Key::Return | Key::KP_Enter => {
+                            let notify_project = st.commit_precision_trim_session();
+                            drop(st);
+                            TimelineState::notify_trim_preview(&state, None);
+                            if let Some(a) = area_weak.upgrade() {
+                                a.queue_draw();
+                            }
+                            if notify_project {
+                                TimelineState::notify_project_changed(&state);
+                            }
+                            return Some(glib::Propagation::Stop);
                         }
-                        changed
-                    } else {
-                        let changed =
-                            st.set_selected_keyframe_interpolation(KeyframeInterpolation::Linear);
-                        if changed {
-                            notify_project = true;
+                        Key::Escape => {
+                            let _ = st.cancel_precision_trim_session();
+                            drop(st);
+                            TimelineState::notify_trim_preview(&state, None);
+                            if let Some(a) = area_weak.upgrade() {
+                                a.queue_draw();
+                            }
+                            return Some(glib::Propagation::Stop);
                         }
-                        changed
-                    }
-                }
-                Key::_2 | Key::KP_2 if !ctrl => {
-                    if st.selected_multicam_context().is_some() {
-                        let changed = st.insert_multicam_angle_switch(1);
-                        if changed {
-                            notify_project = true;
-                        }
-                        changed
-                    } else {
-                        let changed =
-                            st.set_selected_keyframe_interpolation(KeyframeInterpolation::EaseIn);
-                        if changed {
-                            notify_project = true;
-                        }
-                        changed
-                    }
-                }
-                Key::_3 | Key::KP_3 if !ctrl => {
-                    if st.selected_multicam_context().is_some() {
-                        let changed = st.insert_multicam_angle_switch(2);
-                        if changed {
-                            notify_project = true;
-                        }
-                        changed
-                    } else {
-                        let changed =
-                            st.set_selected_keyframe_interpolation(KeyframeInterpolation::EaseOut);
-                        if changed {
-                            notify_project = true;
-                        }
-                        changed
-                    }
-                }
-                Key::_4 | Key::KP_4 if !ctrl => {
-                    if st.selected_multicam_context().is_some() {
-                        let changed = st.insert_multicam_angle_switch(3);
-                        if changed {
-                            notify_project = true;
-                        }
-                        changed
-                    } else {
-                        let changed = st
-                            .set_selected_keyframe_interpolation(KeyframeInterpolation::EaseInOut);
-                        if changed {
-                            notify_project = true;
-                        }
-                        changed
-                    }
-                }
-                Key::_5 | Key::KP_5 if !ctrl && st.selected_multicam_context().is_some() => {
-                    let changed = st.insert_multicam_angle_switch(4);
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::_6 | Key::KP_6 if !ctrl && st.selected_multicam_context().is_some() => {
-                    let changed = st.insert_multicam_angle_switch(5);
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::_7 | Key::KP_7 if !ctrl && st.selected_multicam_context().is_some() => {
-                    let changed = st.insert_multicam_angle_switch(6);
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::_8 | Key::KP_8 if !ctrl && st.selected_multicam_context().is_some() => {
-                    let changed = st.insert_multicam_angle_switch(7);
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::_9 | Key::KP_9 if !ctrl && st.selected_multicam_context().is_some() => {
-                    let changed = st.insert_multicam_angle_switch(8);
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::Right if ctrl && shift => {
-                    let changed = st.select_clips_forward_from_playhead();
-                    if changed {
-                        notify_selection = true;
-                    }
-                    changed
-                }
-                Key::Left if ctrl && shift => {
-                    let changed = st.select_clips_backward_from_playhead();
-                    if changed {
-                        notify_selection = true;
-                    }
-                    changed
-                }
-                Key::s | Key::S if !ctrl => {
-                    let changed = st.toggle_selected_track_solo();
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::space => {
-                    let pp_cb = st.on_play_pause.clone();
+                        _ => return Some(glib::Propagation::Stop),
+                    };
                     drop(st);
-                    if let Some(cb) = pp_cb {
-                        cb();
+                    if let Some(preview) = preview {
+                        TimelineState::notify_trim_preview(&state, Some(preview));
+                    } else {
+                        TimelineState::notify_trim_preview(&state, None);
                     }
                     if let Some(a) = area_weak.upgrade() {
                         a.queue_draw();
                     }
-                    return glib::Propagation::Stop;
+                    return Some(glib::Propagation::Stop);
                 }
-                Key::f | Key::F if shift && !ctrl => {
-                    drop(st);
-                    if let Some(a) = area_weak.upgrade() {
-                        open_freeze_frame_dialog(state.clone(), a.upcast::<gtk::Widget>());
-                    }
-                    return glib::Propagation::Stop;
-                }
-                Key::f | Key::F if !ctrl && !shift && !alt => {
-                    let cb = st.on_match_frame.clone();
-                    drop(st);
-                    if let Some(cb) = cb {
-                        cb();
-                    }
-                    return glib::Propagation::Stop;
-                }
-                Key::Return | Key::KP_Enter => {
-                    let preview = st.begin_precision_trim_session();
-                    let started = st.precision_trim_session.is_some();
-                    drop(st);
-                    if started {
-                        if let Some(preview) = preview {
-                            TimelineState::notify_trim_preview(&state, Some(preview));
-                        }
-                        if let Some(a) = area_weak.upgrade() {
-                            a.queue_draw();
-                        }
-                        return glib::Propagation::Stop;
-                    }
-                    return glib::Propagation::Proceed;
-                }
-                Key::b | Key::B if ctrl && shift => {
-                    let changed = st.join_selected_through_edit();
-                    if changed {
-                        notify_project = true;
-                        notify_selection = true;
-                    }
-                    changed
-                }
-                Key::m | Key::M if !ctrl && !alt => {
-                    // M = toggle mute on selected track
-                    let changed = st.toggle_selected_track_mute();
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::l | Key::L if shift && !ctrl && !alt => {
-                    // Shift+L = toggle lock on selected track
-                    let changed = st.toggle_selected_track_lock();
-                    if changed {
-                        notify_project = true;
-                    }
-                    changed
-                }
-                Key::b | Key::B => {
-                    // B = Blade/Razor
-                    st.active_tool = if st.active_tool == ActiveTool::Razor {
-                        ActiveTool::Select
-                    } else {
-                        ActiveTool::Razor
-                    };
-                    notify_tool = Some(st.active_tool.clone());
-                    true
-                }
-                Key::r | Key::R => {
-                    // R = Ripple Edit
-                    st.active_tool = if st.active_tool == ActiveTool::Ripple {
-                        ActiveTool::Select
-                    } else {
-                        ActiveTool::Ripple
-                    };
-                    notify_tool = Some(st.active_tool.clone());
-                    true
-                }
-                Key::e | Key::E => {
-                    // E = Roll Edit
-                    st.active_tool = if st.active_tool == ActiveTool::Roll {
-                        ActiveTool::Select
-                    } else {
-                        ActiveTool::Roll
-                    };
-                    notify_tool = Some(st.active_tool.clone());
-                    true
-                }
-                Key::y | Key::Y if !ctrl => {
-                    // Y = Slip Edit
-                    st.active_tool = if st.active_tool == ActiveTool::Slip {
-                        ActiveTool::Select
-                    } else {
-                        ActiveTool::Slip
-                    };
-                    notify_tool = Some(st.active_tool.clone());
-                    true
-                }
-                Key::u | Key::U if !ctrl => {
-                    // U = Slide Edit
-                    st.active_tool = if st.active_tool == ActiveTool::Slide {
-                        ActiveTool::Select
-                    } else {
-                        ActiveTool::Slide
-                    };
-                    notify_tool = Some(st.active_tool.clone());
-                    true
-                }
-                Key::d | Key::D if !ctrl => {
-                    // D = Draw
-                    st.active_tool = if st.active_tool == ActiveTool::Draw {
-                        ActiveTool::Select
-                    } else {
-                        ActiveTool::Draw
-                    };
-                    notify_tool = Some(st.active_tool.clone());
-                    true
-                }
-                Key::Escape => {
-                    if st.cancel_music_generation_region() {
-                        true
-                    } else if st.is_editing_compound() {
-                        st.exit_compound();
-                        notify_project = true;
-                        true
-                    } else {
-                        st.active_tool = ActiveTool::Select;
-                        notify_tool = Some(ActiveTool::Select);
-                        true
-                    }
-                }
-                Key::question | Key::slash => {
-                    // Show keyboard shortcut reference
-                    drop(st);
-                    if let Some(a) = area_weak.upgrade() {
-                        if let Some(win) = a.root().and_then(|r| r.downcast::<gtk::Window>().ok()) {
-                            show_shortcuts_dialog(&win);
+                let angle = match key {
+                    Key::_5 | Key::KP_5 => Some(4),
+                    Key::_6 | Key::KP_6 => Some(5),
+                    Key::_7 | Key::KP_7 => Some(6),
+                    Key::_8 | Key::KP_8 => Some(7),
+                    Key::_9 | Key::KP_9 => Some(8),
+                    _ => None,
+                };
+                if let Some(angle) = angle {
+                    if !ctrl && st.selected_multicam_context().is_some() {
+                        let changed = st.insert_multicam_angle_switch(angle);
+                        drop(st);
+                        if changed {
+                            if let Some(a) = area_weak.upgrade() {
+                                a.queue_draw();
+                            }
+                            TimelineState::notify_project_changed(&state);
+                            return Some(glib::Propagation::Stop);
                         }
                     }
-                    return glib::Propagation::Stop;
                 }
-                _ => false,
-            };
-
-            let sel_cb = if notify_selection {
-                st.on_clip_selected.clone()
-            } else {
                 None
-            };
-            let tool_cb = if notify_tool.is_some() {
-                st.on_tool_changed.clone()
-            } else {
-                None
-            };
-            let new_sel = st.selected_clip_id.clone();
-            if handled {
-                if let Some(a) = area_weak.upgrade() {
-                    a.queue_draw();
-                }
-            }
-            drop(st);
-            if notify_project {
-                TimelineState::notify_project_changed(&state);
-            }
-            if let Some(cb) = sel_cb {
-                cb(new_sel);
-            }
-            if let (Some(cb), Some(tool)) = (tool_cb, notify_tool) {
-                cb(tool);
-            }
-
-            if handled {
-                glib::Propagation::Stop
-            } else {
-                glib::Propagation::Proceed
-            }
-        });
+            })
+        };
+        crate::ui::key_dispatch::install_key_resolver(
+            &area,
+            crate::keybindings::ActionContext::Timeline,
+            gtk::PropagationPhase::Bubble,
+            keymap.clone(),
+            actions.clone(),
+            Some(pre),
+        );
     }
-    area.add_controller(key_ctrl);
 
     // ── Scroll wheel: zoom ──────────────────────────────────────────────────
     let scroll = EventControllerScroll::new(gtk::EventControllerScrollFlags::BOTH_AXES);
@@ -14063,142 +13998,75 @@ fn format_timecode(secs: f64, label_interval: f64) -> String {
 }
 
 #[allow(deprecated)]
-pub fn show_shortcuts_dialog(parent: &gtk::Window) {
+pub fn show_shortcuts_dialog(parent: &gtk::Window, keymap: &crate::keybindings::Keymap) {
     use gtk4::{Dialog, Label, Orientation, ResponseType, ScrolledWindow};
     let dialog = Dialog::builder()
         .title("Keyboard Shortcuts")
         .transient_for(parent)
         .modal(true)
-        .default_width(480)
-        .default_height(500)
+        .default_width(560)
+        .default_height(560)
         .build();
     dialog.add_button("Close", ResponseType::Close);
 
-    let shortcuts: &[(&str, &str)] = &[
-        ("Space", "Play / Pause"),
-        ("I", "Set In-point"),
-        ("O", "Set Out-point"),
-        ("J", "Shuttle reverse (1×/2×/4×)"),
-        ("K", "Stop shuttle / Pause"),
-        ("L", "Shuttle forward (1×/2×/4×)"),
-        ("← / →", "Step one frame back / forward"),
-        (
-            "Arrow keys (Transform Overlay)",
-            "Nudge selected clip position (0.01)",
-        ),
-        (
-            "Shift+Arrow (Transform Overlay)",
-            "Nudge selected clip position (0.1)",
-        ),
-        (
-            "+ / - (Transform Overlay)",
-            "Increase / decrease selected clip scale",
-        ),
-        ("B", "Toggle Razor (Blade) tool"),
-        ("R", "Toggle Ripple edit tool"),
-        ("E", "Toggle Roll edit tool"),
-        ("Y", "Toggle Slip edit tool"),
-        ("U", "Toggle Slide edit tool"),
-        (
-            "Enter",
-            "Open or commit Precision Trim for the active Ripple/Roll/Slip/Slide tool",
-        ),
-        (
-            "← / → (Precision Trim)",
-            "Nudge the active Precision Trim session by 1 frame",
-        ),
-        (
-            "Shift+← / Shift+→ (Precision Trim)",
-            "Nudge the active Precision Trim session by 5 frames",
-        ),
-        ("S", "Toggle solo for selected track"),
-        ("F", "Match Frame (load source in Source Monitor)"),
-        ("Shift+F", "Create freeze-frame clip from selected clip"),
-        (
-            "Ctrl+Shift+B",
-            "Join selected through-edit boundary into one clip",
-        ),
-        (
-            "Escape",
-            "Cancel Precision Trim or armed MusicGen region draw, exit compound edit, or switch to Select tool",
-        ),
-        (
-            "Delete / Bksp",
-            "Delete selected clip(s), or selected keyframe column(s)",
-        ),
-        (
-            "Shift+Delete / Shift+Bksp",
-            "Ripple delete selected clip(s)",
-        ),
-        (
-            "Drag keyframe marker",
-            "Move selected keyframe column(s) on the clip",
-        ),
-        (
-            "Alt+Drag clip body",
-            "Box-select keyframe columns within that clip",
-        ),
-        (
-            "1 / 2 / 3 / 4",
-            "Set selected keyframe interpolation (L/In/Out/InOut)",
-        ),
-        (
-            "Shift+Click (Timeline)",
-            "Range-select clips (same-track span or cross-track time range)",
-        ),
-        (
-            "Ctrl/Cmd+Click (Timeline)",
-            "Toggle clip in current selection",
-        ),
-        ("Ctrl+A", "Select all timeline clips"),
-        (
-            "Drag empty timeline body",
-            "Marquee-select intersecting clips",
-        ),
-        ("M", "Add marker at playhead"),
-        ("Right-click ruler", "Remove nearest marker"),
-        ("Right-click transition", "Remove transition at boundary"),
-        ("Click track 'S' badge", "Toggle solo on that track"),
-        ("Ctrl+,", "Open Preferences"),
-        ("Ctrl+Z", "Undo"),
-        ("Ctrl+Y / Ctrl+Shift+Z", "Redo"),
-        ("Ctrl+C", "Copy selected timeline clip"),
-        ("Ctrl+V", "Paste insert clip at playhead"),
-        ("Ctrl+Shift+V", "Paste copied clip attributes"),
-        ("Ctrl+G", "Group selected clips"),
-        ("Ctrl+Shift+G", "Ungroup selected clips"),
-        ("Ctrl+L", "Link selected clips"),
-        ("Ctrl+Shift+L", "Unlink selected clips"),
-        ("Ctrl+Shift+→", "Select clips forward from playhead"),
-        ("Ctrl+Shift+←", "Select clips backward from playhead"),
-        ("Ctrl+J", "Go to timecode (jump playhead)"),
-        ("Scroll", "Zoom timeline (vertical scroll)"),
-        ("Scroll (H)", "Pan timeline (horizontal scroll)"),
-        ("? / /", "Show this help"),
-    ];
-
+    // Rows come from the shortcut registry (current bindings), followed by
+    // the fixed keys / mouse gestures shared with docs/user/shortcuts.md.
+    let mut sections: Vec<(String, Vec<(String, String)>)> = keymap
+        .rows_grouped()
+        .into_iter()
+        .map(|(ctx, rows)| {
+            (
+                ctx.label().to_string(),
+                rows.into_iter()
+                    .map(|(id, label)| (label, id.title().to_string()))
+                    .collect(),
+            )
+        })
+        .collect();
+    for (title, _intro, rows) in crate::keybindings::STATIC_SECTIONS {
+        sections.push((
+            title.to_string(),
+            rows.iter()
+                .map(|(k, a)| (k.to_string(), a.replace("**", "")))
+                .collect(),
+        ));
+    }
     let vbox = gtk4::Box::new(Orientation::Vertical, 12);
     vbox.set_margin_start(20);
     vbox.set_margin_end(20);
     vbox.set_margin_top(16);
     vbox.set_margin_bottom(16);
 
-    for (key, desc) in shortcuts {
-        let row = gtk4::Box::new(Orientation::Horizontal, 0);
-        row.set_spacing(12);
+    for (section, rows) in &sections {
+        let heading = Label::new(Some(section));
+        heading.set_xalign(0.0);
+        heading.add_css_class("title-4");
+        heading.set_margin_top(8);
+        vbox.append(&heading);
+        for (key, desc) in rows {
+            let row = gtk4::Box::new(Orientation::Horizontal, 0);
+            row.set_spacing(12);
 
-        let key_lbl = Label::new(Some(key));
-        key_lbl.set_width_chars(28);
-        key_lbl.set_xalign(1.0);
-        key_lbl.add_css_class("shortcut-key");
+            let key_lbl = Label::new(Some(key));
+            key_lbl.set_width_chars(28);
+            key_lbl.set_xalign(1.0);
+            key_lbl.set_wrap(true);
+            key_lbl.add_css_class("shortcut-key");
 
-        let desc_lbl = Label::new(Some(desc));
-        desc_lbl.set_xalign(0.0);
+            let desc_lbl = Label::new(Some(desc));
+            desc_lbl.set_xalign(0.0);
+            desc_lbl.set_wrap(true);
+            desc_lbl.set_hexpand(true);
 
-        row.append(&key_lbl);
-        row.append(&desc_lbl);
-        vbox.append(&row);
+            row.append(&key_lbl);
+            row.append(&desc_lbl);
+            vbox.append(&row);
+        }
     }
+    let hint = Label::new(Some("Change any of these in Preferences → Shortcuts."));
+    hint.add_css_class("dim-label");
+    hint.set_margin_top(8);
+    vbox.append(&hint);
 
     let scroll = ScrolledWindow::new();
     scroll.set_child(Some(&vbox));

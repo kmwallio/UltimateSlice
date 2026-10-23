@@ -11,6 +11,8 @@ pub use widget::{
 pub fn build_timeline_panel(
     state: std::rc::Rc<std::cell::RefCell<TimelineState>>,
     on_project_changed: std::rc::Rc<dyn Fn()>,
+    keymap: std::rc::Rc<std::cell::RefCell<crate::keybindings::Keymap>>,
+    actions: std::rc::Rc<std::cell::RefCell<crate::keybindings::ActionMap>>,
 ) -> (gtk4::Box, gtk4::DrawingArea, TimelineArea) {
     use gtk4::prelude::*;
     use gtk4::{Box as GBox, Button, Orientation};
@@ -18,7 +20,7 @@ pub fn build_timeline_panel(
     let vbox = GBox::new(Orientation::Vertical, 0);
 
     let ruler_redraw = std::rc::Rc::new(std::cell::RefCell::new(None));
-    let area = build_timeline(state.clone(), ruler_redraw.clone());
+    let area = build_timeline(state.clone(), ruler_redraw.clone(), keymap, actions);
     let ruler = build_timeline_ruler(state.clone(), area.clone().upcast::<gtk4::Widget>());
     *ruler_redraw.borrow_mut() = Some(ruler.clone());
     vbox.append(&ruler);

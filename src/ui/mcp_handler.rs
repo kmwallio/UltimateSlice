@@ -110,6 +110,8 @@ pub(crate) struct McpCtx<'a> {
     pub workspace_layout_pending_name: &'a Rc<RefCell<Option<String>>>,
     pub suppress_resume_on_next_reload: &'a Rc<Cell<bool>>,
     pub clear_media_browser_on_next_reload: &'a Rc<Cell<bool>>,
+    pub keymap: &'a Rc<RefCell<crate::keybindings::Keymap>>,
+    pub action_map: &'a Rc<RefCell<crate::keybindings::ActionMap>>,
     pub callbacks: McpCallbacks<'a>,
 }
 
@@ -148,6 +150,8 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
         workspace_layout_pending_name,
         suppress_resume_on_next_reload,
         clear_media_browser_on_next_reload,
+        keymap,
+        action_map,
         callbacks:
             McpCallbacks {
                 on_close_preview,
@@ -1179,6 +1183,137 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
                     "auto_proxy_threshold": new_state.auto_proxy_threshold.as_str(),
                     "proxy_mode": new_state.proxy_mode.as_str(),
                     "last_non_off_proxy_mode": new_state.remembered_proxy_mode().as_str()
+                }))
+                .ok();
+        }
+
+        McpCommand::ListActions { reply } => {
+            let km = keymap.borrow();
+            let actions: Vec<Value> = crate::keybindings::ACTIONS
+                .iter()
+                .map(|info| {
+                    let chords = km.chords_for(info.id);
+                    json!({
+                        "id": info.key,
+                        "title": info.title,
+                        "context": info.context.id(),
+                        "category": info.category,
+                        "shortcuts": chords.iter().map(|c| c.accel_name()).collect::<Vec<_>>(),
+                        "labels": chords.iter().map(|c| c.label()).collect::<Vec<_>>(),
+                        "defaults": info.defaults,
+                        "is_default": km.is_default(info.id),
+                        "bound": action_map.borrow().is_bound(info.id),
+                    })
+                })
+                .collect();
+            reply
+                .send(json!({
+                    "actions": actions,
+                    "count": actions.len(),
+                    "config_path": crate::keybindings::config_path().map(|p| p.display().to_string()),
+                }))
+                .ok();
+        }
+
+        McpCommand::TriggerAction { action_id, reply } => {
+            match crate::keybindings::ActionId::from_key(&action_id) {
+                None => {
+                    reply
+                        .send(json!({"success": false, "error": format!("unknown action id '{action_id}' (see list_actions)")}))
+                        .ok();
+                }
+                Some(id) => {
+                    // Clone the handler out so no borrow of the map is held
+                    // while it runs (handlers may open dialogs / re-dispatch).
+                    let handler = action_map.borrow().handler(id);
+                    match handler {
+                        Some(h) => {
+                            let handled = h();
+                            reply
+                                .send(json!({"success": true, "action_id": action_id, "handled": handled}))
+                                .ok();
+                        }
+                        None => {
+                            reply
+                                .send(json!({"success": false, "error": format!("action '{action_id}' has no handler registered")}))
+                                .ok();
+                        }
+                    }
+                }
+            }
+        }
+
+        McpCommand::SetShortcut { action_id, accelerators, reply } => {
+            use crate::keybindings::Chord;
+            let Some(id) = crate::keybindings::ActionId::from_key(&action_id) else {
+                reply
+                    .send(json!({"success": false, "error": format!("unknown action id '{action_id}' (see list_actions)")}))
+                    .ok();
+                return;
+            };
+            let mut chords = Vec::new();
+            let mut invalid = Vec::new();
+            for a in &accelerators {
+                match Chord::parse(a) {
+                    Some(c) => chords.push(c),
+                    None => invalid.push(a.clone()),
+                }
+            }
+            if !invalid.is_empty() {
+                reply
+                    .send(json!({"success": false, "error": "unparsable accelerator(s)", "invalid": invalid}))
+                    .ok();
+                return;
+            }
+            let (conflicts, shadows) = {
+                let mut km = keymap.borrow_mut();
+                let conflicts: Vec<Value> = chords
+                    .iter()
+                    .filter_map(|c| km.conflict(id, c).map(|other| json!({"accelerator": c.accel_name(), "action_id": other.key()})))
+                    .collect();
+                let shadows: Vec<Value> = chords
+                    .iter()
+                    .filter_map(|c| km.shadows(id, c).map(|other| json!({"accelerator": c.accel_name(), "action_id": other.key()})))
+                    .collect();
+                km.set(id, chords);
+                (conflicts, shadows)
+            };
+            let saved = crate::keybindings::save_overrides(&keymap.borrow().to_overrides());
+            let km = keymap.borrow();
+            reply
+                .send(json!({
+                    "success": true,
+                    "action_id": action_id,
+                    "shortcuts": km.chords_for(id).iter().map(|c| c.accel_name()).collect::<Vec<_>>(),
+                    "labels": km.chords_for(id).iter().map(|c| c.label()).collect::<Vec<_>>(),
+                    "conflicts": conflicts,
+                    "shadows": shadows,
+                    "saved": saved.is_ok(),
+                    "save_error": saved.err().map(|e| e.to_string()),
+                }))
+                .ok();
+        }
+
+        McpCommand::ResetShortcuts { action_id, reply } => {
+            match action_id {
+                Some(key) => {
+                    let Some(id) = crate::keybindings::ActionId::from_key(&key) else {
+                        reply
+                            .send(json!({"success": false, "error": format!("unknown action id '{key}' (see list_actions)")}))
+                            .ok();
+                        return;
+                    };
+                    keymap.borrow_mut().reset(id);
+                }
+                None => keymap.borrow_mut().reset_all(),
+            }
+            let saved = crate::keybindings::save_overrides(&keymap.borrow().to_overrides());
+            reply
+                .send(json!({
+                    "success": true,
+                    "overrides": keymap.borrow().to_overrides().bindings.len(),
+                    "saved": saved.is_ok(),
+                    "save_error": saved.err().map(|e| e.to_string()),
                 }))
                 .ok();
         }
@@ -6552,9 +6687,20 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
                 .join(&filename);
 
             // Snapshot the window widget using GTK snapshot + GSK CairoRenderer.
-            let w = window.width().max(1);
-            let h = window.height().max(1);
-            let paintable = gtk::WidgetPaintable::new(Some(window));
+            // An open modal dialog (Preferences, …) is captured instead of
+            // the main window so headless checks can see it.
+            let target: gtk::Window = gtk::Window::list_toplevels()
+                .into_iter()
+                .filter_map(|w| w.downcast::<gtk::Window>().ok())
+                .find(|w| {
+                    w.is_visible()
+                        && w.is_modal()
+                        && w.transient_for().as_ref().map(|t| t.as_ptr()) == Some(window.upcast_ref::<gtk::Window>().as_ptr())
+                })
+                .unwrap_or_else(|| window.clone().upcast());
+            let w = target.width().max(1);
+            let h = target.height().max(1);
+            let paintable = gtk::WidgetPaintable::new(Some(&target));
             let snapshot = gtk::Snapshot::new();
             paintable.snapshot(&snapshot, w as f64, h as f64);
 

@@ -51,6 +51,19 @@ impl CommandRegistry {
         self.commands.len()
     }
 
+    /// True when a command with this title (case-insensitive) is registered.
+    pub fn has_title(&self, title: &str) -> bool {
+        self.commands
+            .iter()
+            .any(|c| c.title.eq_ignore_ascii_case(title))
+    }
+
+    /// Drop every command in one of `categories` (used to re-register the
+    /// shortcut registry's actions with fresh key labels).
+    pub fn remove_categories(&mut self, categories: &[&str]) {
+        self.commands.retain(|c| !categories.contains(&c.category));
+    }
+
     /// Returns indices of commands matching `query`, ranked best-first.
     /// Empty query → every index, sorted by `(category, title)`.
     pub fn fuzzy_match(&self, query: &str) -> Vec<usize> {

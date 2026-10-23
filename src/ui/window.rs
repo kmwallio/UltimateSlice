@@ -372,18 +372,6 @@ fn refresh_window_title(window: &gtk::ApplicationWindow, project: &Rc<RefCell<Pr
 }
 
 /// Check whether the focused widget is a text-input widget.
-/// In GTK4, `Entry` delegates keyboard focus to an internal `gtk4::Text`
-/// child, so `focused.is::<Entry>()` returns false when the user is typing
-/// in an Entry.  We check for `Text`, `Entry`, `SearchEntry`, `TextView`,
-/// and `SpinButton` (which also contains a Text internally).
-fn is_text_input_focused(focused: &gtk4::Widget) -> bool {
-    focused.is::<gtk4::Text>()
-        || focused.is::<gtk4::Entry>()
-        || focused.is::<gtk4::SearchEntry>()
-        || focused.is::<gtk4::TextView>()
-        || focused.is::<gtk4::SpinButton>()
-}
-
 fn workspace_paned_extent(paned: &Paned) -> i32 {
     match paned.orientation() {
         Orientation::Horizontal => paned.width(),
@@ -6601,6 +6589,12 @@ pub fn build_window(
     // Shared media library (items visible in the browser, not yet on timeline)
     let library: Rc<RefCell<MediaLibrary>> = Rc::new(RefCell::new(MediaLibrary::new()));
     let preferences_state = Rc::new(RefCell::new(crate::ui_state::load_preferences_state()));
+    // Keyboard shortcuts: user keymap (defaults + ~/.config/ultimateslice/
+    // keybindings.json) and the handler table the panels register into.
+    let keymap: Rc<RefCell<crate::keybindings::Keymap>> =
+        Rc::new(RefCell::new(crate::keybindings::load_keymap()));
+    let actions: Rc<RefCell<crate::keybindings::ActionMap>> =
+        Rc::new(RefCell::new(crate::keybindings::ActionMap::default()));
     let workspace_layouts_state =
         Rc::new(RefCell::new(crate::ui_state::load_workspace_layouts_state()));
 
@@ -7137,6 +7131,7 @@ pub fn build_window(
         let preferences_state = preferences_state.clone();
         let bg_removal_cache = bg_removal_cache.clone();
         let apply_preferences_state = apply_preferences_state.clone();
+        let keymap = keymap.clone();
         Rc::new(move || {
             if let Some(win) = window_weak.upgrade() {
                 let current = preferences_state.borrow().clone();
@@ -7145,6 +7140,7 @@ pub fn build_window(
                     current,
                     apply_preferences_state.clone(),
                     bg_removal_cache.clone(),
+                    keymap.clone(),
                 );
             }
         })
@@ -10471,7 +10467,7 @@ pub fn build_window(
         })
     };
 
-    let (header, btn_record, btn_draw_tools) = toolbar::build_toolbar(
+    let toolbar_handles = toolbar::build_toolbar(
         project.clone(),
         library.clone(),
         timeline_state.clone(),
@@ -10851,7 +10847,11 @@ pub fn build_window(
             let cb = on_replay_onboarding_gui.clone();
             move || cb()
         },
+        keymap.clone(),
     );
+    let header = toolbar_handles.header.clone();
+    let btn_record = toolbar_handles.btn_record.clone();
+    let btn_draw_tools = toolbar_handles.btn_draw_tools.clone();
     // ── Script to Timeline button ─────────────────────────────────────
     {
         let btn_script = gtk4::Button::with_label("Script");
@@ -11119,6 +11119,8 @@ pub fn build_window(
             on_insert.clone(),
             on_overwrite.clone(),
             on_close_preview.clone(),
+            keymap.clone(),
+            actions.clone(),
         );
     let source_monitor_panel = gtk::Box::new(Orientation::Vertical, 4);
     source_monitor_panel.append(&preview_widget);
@@ -15753,6 +15755,8 @@ pub fn build_window(
         let scopes_rev = scopes_revealer.clone();
         let workspace_layouts_applying = workspace_layouts_applying.clone();
         let sync_workspace_layout_state = sync_workspace_layout_state.clone();
+        let keymap = keymap.clone();
+        let actions = actions.clone();
         Rc::new(move || {
             if !popped.get() {
                 let state = monitor_state.borrow().clone();
@@ -15762,6 +15766,16 @@ pub fn build_window(
                     .default_width(state.width.max(320))
                     .default_height(state.height.max(180))
                     .build();
+                // Global shortcuts (J/K/L, M, Shift+H, …) work while the
+                // popped-out monitor has focus.
+                crate::ui::key_dispatch::install_key_resolver(
+                    &pop_win,
+                    crate::keybindings::ActionContext::Global,
+                    gtk4::PropagationPhase::Capture,
+                    keymap.clone(),
+                    actions.clone(),
+                    None,
+                );
 
                 docked_paned.set_start_child(Option::<&gtk::Widget>::None);
                 pop_win.set_child(Some(&monitor));
@@ -17740,7 +17754,12 @@ pub fn build_window(
 
     // ── Timeline ──────────────────────────────────────────────────────────
     let (timeline_panel, timeline_ruler, timeline_area) =
-        build_timeline_panel(timeline_state.clone(), on_project_changed.clone());
+        build_timeline_panel(
+            timeline_state.clone(),
+            on_project_changed.clone(),
+            keymap.clone(),
+            actions.clone(),
+        );
 
     // Extract the track-management bar from timeline_panel so we can place
     // the keyframe dopesheet between the timeline and the bar.
@@ -21701,6 +21720,8 @@ pub fn build_window(
             apply_program_monitor_timecode_burnin.clone();
         let refresh_reference_stills_mcp = refresh_reference_stills.clone();
         let render_replace_cache_for_mcp = render_replace_cache.clone();
+        let keymap_for_mcp = keymap.clone();
+        let actions_for_mcp = actions.clone();
         MCP_MAIN_DISPATCH.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move |cmd| {
                 if let Some(win) = window_weak.upgrade() {
@@ -21734,6 +21755,8 @@ pub fn build_window(
                             workspace_layout_pending_name: &workspace_layout_pending_name_for_mcp,
                             suppress_resume_on_next_reload: &suppress_resume_on_next_reload,
                             clear_media_browser_on_next_reload: &clear_media_browser_on_next_reload,
+                            keymap: &keymap_for_mcp,
+                            action_map: &actions_for_mcp,
                             callbacks: crate::ui::mcp_handler::McpCallbacks {
                                 on_close_preview: &on_close_preview,
                                 on_source_selected: &on_source_selected,
@@ -21846,292 +21869,165 @@ pub fn build_window(
     // L — play forward, each press cycles speed: 1×→2×→4×→8×
     // K — pause / reset shuttle speed
     // J — play backward, each press cycles speed: −1×→−2×→−4×→−8×
+    // ── Keyboard shortcuts (Global context) ─────────────────────────────
+    // Handler bodies register into the shortcut registry under their
+    // ActionId; one Capture-phase resolver on the window (and on the
+    // popped-out Program Monitor) maps key events through the user's keymap.
+    // See src/keybindings.rs / docs/ARCHITECTURE.md "Keyboard shortcuts".
+    let palette_registry: Rc<RefCell<crate::ui::command_palette::CommandRegistry>> =
+        Rc::new(RefCell::new(crate::ui::command_palette::CommandRegistry::new()));
     {
+        use crate::keybindings::ActionId;
         use std::cell::Cell;
-        let prog_player = prog_player.clone();
+        let mut acts = actions.borrow_mut();
+
+        // J/K/L shuttle for the Program Monitor.
         let jkl_rate_cell: Rc<Cell<f64>> = Rc::new(Cell::new(0.0));
-        let key_ctrl = gtk4::EventControllerKey::new();
-        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        key_ctrl.connect_key_pressed(move |ctrl, key, _, _mods| {
-            use gtk4::gdk::Key;
-            if key != Key::j
-                && key != Key::J
-                && key != Key::k
-                && key != Key::K
-                && key != Key::l
-                && key != Key::L
-            {
-                return glib::Propagation::Proceed;
-            }
-            // Don't intercept when a text entry has focus.
-            if let Some(widget) = ctrl.widget() {
-                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                    if is_text_input_focused(&focused) {
-                        return glib::Propagation::Proceed;
-                    }
-                }
-            }
-            let current = jkl_rate_cell.get();
-            let new_rate = if key == Key::k || key == Key::K {
-                0.0
-            } else if key == Key::l || key == Key::L {
+        {
+            let prog_player = prog_player.clone();
+            let cell = jkl_rate_cell.clone();
+            acts.bind(ActionId::ShuttleStop, Rc::new(move || {
+                cell.set(0.0);
+                prog_player.borrow_mut().set_jkl_rate(0.0);
+                true
+            }));
+        }
+        {
+            let prog_player = prog_player.clone();
+            let cell = jkl_rate_cell.clone();
+            acts.bind(ActionId::ShuttleForward, Rc::new(move || {
                 // Cycle: stopped/reverse → 1×, then double up to 8×.
-                match current as i64 {
+                let new_rate = match cell.get() as i64 {
                     r if r <= 0 => 1.0,
                     1 => 2.0,
                     2 => 4.0,
                     _ => 8.0,
-                }
-            } else {
-                // J: cycle: stopped/forward → −1×, then double up to −8×.
-                match current as i64 {
+                };
+                cell.set(new_rate);
+                prog_player.borrow_mut().set_jkl_rate(new_rate);
+                true
+            }));
+        }
+        {
+            let prog_player = prog_player.clone();
+            let cell = jkl_rate_cell.clone();
+            acts.bind(ActionId::ShuttleReverse, Rc::new(move || {
+                // Cycle: stopped/forward → −1×, then double up to −8×.
+                let new_rate = match cell.get() as i64 {
                     r if r >= 0 => -1.0,
                     -1 => -2.0,
                     -2 => -4.0,
                     _ => -8.0,
+                };
+                cell.set(new_rate);
+                prog_player.borrow_mut().set_jkl_rate(new_rate);
+                true
+            }));
+        }
+        // Add marker at the current playhead (works regardless of focus).
+        {
+            let project = project.clone();
+            let prog_player = prog_player.clone();
+            let timeline_state = timeline_state.clone();
+            let on_project_changed = on_project_changed.clone();
+            acts.bind(ActionId::AddMarker, Rc::new(move || {
+                let pos = prog_player.borrow().timeline_pos_ns;
+                let marker = crate::model::project::Marker::new(pos, "Marker");
+                {
+                    let mut st = timeline_state.borrow_mut();
+                    let mut proj = project.borrow_mut();
+                    st.history.execute(
+                        Box::new(crate::undo::AddMarkerCommand { marker }),
+                        &mut proj,
+                    );
                 }
-            };
-            jkl_rate_cell.set(new_rate);
-            prog_player.borrow_mut().set_jkl_rate(new_rate);
-            glib::Propagation::Stop
-        });
-        window.add_controller(key_ctrl);
-    }
-    // ── Window-level M key: add marker at current playhead (works regardless of focus) ──
-    {
-        let project = project.clone();
-        let prog_player = prog_player.clone();
-        let timeline_state = timeline_state.clone();
-        let on_project_changed = on_project_changed.clone();
-        let key_ctrl = gtk4::EventControllerKey::new();
-        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
-            use gtk4::gdk::Key;
-            if key != Key::m && key != Key::M {
-                return glib::Propagation::Proceed;
-            }
-            // Let Shift+M fall through to the mini-map toggle handler
-            if mods.contains(gtk4::gdk::ModifierType::SHIFT_MASK) {
-                return glib::Propagation::Proceed;
-            }
-            // Don't intercept M when a text entry or similar has focus
-            if let Some(widget) = ctrl.widget() {
-                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                    if is_text_input_focused(&focused) {
-                        return glib::Propagation::Proceed;
+                on_project_changed();
+                true
+            }));
+        }
+        // Toggle timeline mini-map.
+        {
+            let minimap_area = minimap_area.clone();
+            let minimap_toggle = minimap_toggle.clone();
+            let preferences_state = preferences_state.clone();
+            acts.bind(ActionId::ToggleMinimap, Rc::new(move || {
+                let show = !minimap_area.is_visible();
+                minimap_area.set_visible(show);
+                minimap_toggle.set_label(if show {
+                    "Hide Mini-Map"
+                } else {
+                    "Show Mini-Map"
+                });
+                preferences_state.borrow_mut().show_timeline_minimap = show;
+                if show {
+                    minimap_area.queue_draw();
+                }
+                true
+            }));
+        }
+        // Toggle Program Monitor HUD overlay.
+        {
+            let monitor_state = monitor_state.clone();
+            let hud_setter = prog_hud_setter.clone();
+            acts.bind(ActionId::ToggleHud, Rc::new(move || {
+                let show = !monitor_state.borrow().show_hud;
+                hud_setter(show);
+                {
+                    let mut state = monitor_state.borrow_mut();
+                    if state.show_hud != show {
+                        state.show_hud = show;
+                        crate::ui_state::save_program_monitor_state(&state);
                     }
                 }
-            }
-            let pos = prog_player.borrow().timeline_pos_ns;
-            let marker = crate::model::project::Marker::new(pos, "Marker");
-            {
-                let mut st = timeline_state.borrow_mut();
-                let mut proj = project.borrow_mut();
-                st.history.execute(
-                    Box::new(crate::undo::AddMarkerCommand { marker }),
-                    &mut proj,
-                );
-            }
-            on_project_changed();
-            glib::Propagation::Stop
-        });
-        window.add_controller(key_ctrl);
-    }
-    // ── Window-level Shift+M: toggle timeline mini-map ───────────────────
-    {
-        let minimap_area = minimap_area.clone();
-        let minimap_toggle = minimap_toggle.clone();
-        let preferences_state = preferences_state.clone();
-        let key_ctrl = gtk4::EventControllerKey::new();
-        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
-            use gtk4::gdk::{Key, ModifierType};
-            if !mods.contains(ModifierType::SHIFT_MASK) {
-                return glib::Propagation::Proceed;
-            }
-            if key != Key::M && key != Key::m {
-                return glib::Propagation::Proceed;
-            }
-            if let Some(widget) = ctrl.widget() {
-                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                    if is_text_input_focused(&focused) {
-                        return glib::Propagation::Proceed;
-                    }
-                }
-            }
-            let show = !minimap_area.is_visible();
-            minimap_area.set_visible(show);
-            minimap_toggle.set_label(if show {
-                "Hide Mini-Map"
-            } else {
-                "Show Mini-Map"
-            });
-            preferences_state.borrow_mut().show_timeline_minimap = show;
-            if show {
-                minimap_area.queue_draw();
-            }
-            glib::Propagation::Stop
-        });
-        window.add_controller(key_ctrl);
-    }
-    // ── Window-level Shift+H: toggle Program Monitor HUD overlay ─────────
-    {
-        let monitor_state = monitor_state.clone();
-        let hud_setter = prog_hud_setter.clone();
-        let key_ctrl = gtk4::EventControllerKey::new();
-        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
-            use gtk4::gdk::{Key, ModifierType};
-            if !mods.contains(ModifierType::SHIFT_MASK) {
-                return glib::Propagation::Proceed;
-            }
-            if mods.contains(ModifierType::CONTROL_MASK) || mods.contains(ModifierType::ALT_MASK) {
-                return glib::Propagation::Proceed;
-            }
-            if key != Key::H && key != Key::h {
-                return glib::Propagation::Proceed;
-            }
-            if let Some(widget) = ctrl.widget() {
-                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                    if is_text_input_focused(&focused) {
-                        return glib::Propagation::Proceed;
-                    }
-                }
-            }
-            let show = !monitor_state.borrow().show_hud;
-            hud_setter(show);
-            {
-                let mut state = monitor_state.borrow_mut();
-                if state.show_hud != show {
-                    state.show_hud = show;
-                    crate::ui_state::save_program_monitor_state(&state);
-                }
-            }
-            glib::Propagation::Stop
-        });
-        window.add_controller(key_ctrl);
-    }
-    // ── Window-level , and . keys: Insert / Overwrite at playhead ─────────
-    {
-        let on_insert = on_insert.clone();
-        let on_overwrite = on_overwrite.clone();
-        let key_ctrl = gtk4::EventControllerKey::new();
-        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
-            use gtk4::gdk::{Key, ModifierType};
-            // Skip if Ctrl is held (Ctrl+, = Preferences)
-            if mods.contains(ModifierType::CONTROL_MASK) {
-                return glib::Propagation::Proceed;
-            }
-            if key != Key::comma && key != Key::period {
-                return glib::Propagation::Proceed;
-            }
-            // Don't intercept when a text entry has focus
-            if let Some(widget) = ctrl.widget() {
-                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                    if is_text_input_focused(&focused) {
-                        return glib::Propagation::Proceed;
-                    }
-                }
-            }
-            if key == Key::comma {
+                true
+            }));
+        }
+        // Insert / Overwrite at playhead.
+        {
+            let on_insert = on_insert.clone();
+            acts.bind(ActionId::InsertAtPlayhead, Rc::new(move || {
                 on_insert();
-            } else {
+                true
+            }));
+            let on_overwrite = on_overwrite.clone();
+            acts.bind(ActionId::OverwriteAtPlayhead, Rc::new(move || {
                 on_overwrite();
-            }
-            glib::Propagation::Stop
-        });
-        window.add_controller(key_ctrl);
-    }
-    // ── Window-level Ctrl+J: Go to timecode ────────────────────────────────
-    {
-        let on_go_to_timecode = on_go_to_timecode.clone();
-        let key_ctrl = gtk4::EventControllerKey::new();
-        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
-            use gtk4::gdk::{Key, ModifierType};
-            if !mods.contains(ModifierType::CONTROL_MASK) || (key != Key::j && key != Key::J) {
-                return glib::Propagation::Proceed;
-            }
-            if let Some(widget) = ctrl.widget() {
-                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                    if is_text_input_focused(&focused) {
-                        return glib::Propagation::Proceed;
-                    }
-                }
-            }
-            on_go_to_timecode();
-            glib::Propagation::Stop
-        });
-        window.add_controller(key_ctrl);
-    }
-    // ── Window-level Ctrl+, key: open Preferences ───────────────────────────
-    {
-        let open_preferences = open_preferences.clone();
-        let key_ctrl = gtk4::EventControllerKey::new();
-        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        key_ctrl.connect_key_pressed(move |_, key, _, mods| {
-            use gtk4::gdk::{Key, ModifierType};
-            if mods.contains(ModifierType::CONTROL_MASK) && key == Key::comma {
+                true
+            }));
+        }
+        {
+            let on_go_to_timecode = on_go_to_timecode.clone();
+            acts.bind(ActionId::GoToTimecode, Rc::new(move || {
+                on_go_to_timecode();
+                true
+            }));
+        }
+        {
+            let open_preferences = open_preferences.clone();
+            acts.bind(ActionId::OpenPreferences, Rc::new(move || {
                 open_preferences();
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
-        });
-        window.add_controller(key_ctrl);
-    }
-    // ── Window-level Shift+P: toggle proxy playback ─────────────────────────
-    {
-        let toggle_proxy_quick = toggle_proxy_quick.clone();
-        let preferences_state = preferences_state.clone();
-        let key_ctrl = gtk4::EventControllerKey::new();
-        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
-            use gtk4::gdk::{Key, ModifierType};
-            if !mods.contains(ModifierType::SHIFT_MASK)
-                || mods.contains(ModifierType::CONTROL_MASK)
-                || mods.contains(ModifierType::ALT_MASK)
-                || (key != Key::P && key != Key::p)
-            {
-                return glib::Propagation::Proceed;
-            }
-            if let Some(widget) = ctrl.widget() {
-                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                    if is_text_input_focused(&focused) {
-                        return glib::Propagation::Proceed;
-                    }
-                }
-            }
-            let enabled = !preferences_state.borrow().proxy_mode.is_enabled();
-            toggle_proxy_quick(enabled);
-            glib::Propagation::Stop
-        });
-        window.add_controller(key_ctrl);
-    }
-    // ── Window-level Ctrl+Shift+T: generate subtitles for selected clip ──
-    {
-        let stt_cache = stt_cache.clone();
-        let project = project.clone();
-        let timeline_state = timeline_state.clone();
-        let inspector_view = inspector_view.clone();
-        let key_ctrl = gtk4::EventControllerKey::new();
-        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
-            use gtk4::gdk::{Key, ModifierType};
-            if mods.contains(ModifierType::CONTROL_MASK)
-                && mods.contains(ModifierType::SHIFT_MASK)
-                && key == Key::T
-            {
-                // Skip if a text input is focused.
-                if let Some(widget) = ctrl.widget() {
-                    if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                        if is_text_input_focused(&focused) {
-                            return glib::Propagation::Proceed;
-                        }
-                    }
-                }
+                true
+            }));
+        }
+        // Toggle proxy playback.
+        {
+            let toggle_proxy_quick = toggle_proxy_quick.clone();
+            let preferences_state = preferences_state.clone();
+            acts.bind(ActionId::ToggleProxyPlayback, Rc::new(move || {
+                let enabled = !preferences_state.borrow().proxy_mode.is_enabled();
+                toggle_proxy_quick(enabled);
+                true
+            }));
+        }
+        // Generate subtitles for the selected clip.
+        {
+            let stt_cache = stt_cache.clone();
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let inspector_view = inspector_view.clone();
+            acts.bind(ActionId::GenerateSubtitles, Rc::new(move || {
                 if !stt_cache.borrow().is_available() {
-                    return glib::Propagation::Proceed;
+                    return false;
                 }
                 let selected = timeline_state.borrow().selected_clip_id.clone();
                 if let Some(ref clip_id) = selected {
@@ -22148,129 +22044,101 @@ pub fn build_window(
                         }
                     }
                 }
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
-        });
-        window.add_controller(key_ctrl);
-    }
-    // ── Window-level Ctrl+Shift+P: command palette ─────────────────────────
-    {
-        use crate::ui::command_palette::{show_palette, CommandRegistry};
-        let registry: Rc<RefCell<CommandRegistry>> = Rc::new(RefCell::new(CommandRegistry::new()));
-        collect_header_commands(&header, &registry);
-
-        let key_ctrl = gtk4::EventControllerKey::new();
-        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        let registry_for_key = registry.clone();
-        let window_for_key = window.clone();
-        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
-            use gtk4::gdk::{Key, ModifierType};
-            if !(mods.contains(ModifierType::CONTROL_MASK)
-                && mods.contains(ModifierType::SHIFT_MASK)
-                && (key == Key::P || key == Key::p))
-            {
-                return glib::Propagation::Proceed;
-            }
-            if let Some(widget) = ctrl.widget() {
-                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                    if is_text_input_focused(&focused) {
-                        return glib::Propagation::Proceed;
-                    }
-                }
-            }
-            show_palette(
-                window_for_key.upcast_ref::<gtk::Window>(),
-                registry_for_key.clone(),
-            );
-            glib::Propagation::Stop
-        });
-        window.add_controller(key_ctrl);
-    }
-    // ── Window-level Alt+Left/Right: keyframe navigation ───────────────────
-    {
-        let project = project.clone();
-        let timeline_state = timeline_state.clone();
-        let inspector_view = inspector_view.clone();
-        let prog_player = prog_player.clone();
-        let timeline_panel_cell = timeline_panel_cell.clone();
-        let key_ctrl = gtk4::EventControllerKey::new();
-        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
-            use gtk4::gdk::{Key, ModifierType};
-            if !mods.contains(ModifierType::ALT_MASK) {
-                return glib::Propagation::Proceed;
-            }
-            if key != Key::Left && key != Key::Right {
-                return glib::Propagation::Proceed;
-            }
-            if let Some(widget) = ctrl.widget() {
-                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                    if is_text_input_focused(&focused) {
-                        return glib::Propagation::Proceed;
-                    }
-                }
-            }
-            let (clip_id, playhead) = {
-                let st = timeline_state.borrow();
-                (st.selected_clip_id.clone(), st.editing_playhead_ns())
-            };
-            let Some(clip_id) = clip_id else {
-                return glib::Propagation::Proceed;
-            };
-            let proj = project.borrow();
-            let target = proj.clip_ref(&clip_id).and_then(|clip| {
-                let local = clip.local_timeline_position_ns(playhead);
-                let local_target = if key == Key::Left {
-                    clip.prev_keyframe_local_ns(local)
-                } else {
-                    clip.next_keyframe_local_ns(local)
+                true
+            }));
+        }
+        // Command palette (re-registers the shortcut actions each time so
+        // the key labels reflect the current keymap).
+        {
+            use crate::ui::command_palette::show_palette;
+            let registry = palette_registry.clone();
+            let window_for_key = window.clone();
+            let actions_for_palette = actions.clone();
+            let keymap_for_palette = keymap.clone();
+            acts.bind(ActionId::CommandPalette, Rc::new(move || {
+                register_action_commands(&registry, &actions_for_palette, &keymap_for_palette);
+                show_palette(window_for_key.upcast_ref::<gtk::Window>(), registry.clone());
+                true
+            }));
+        }
+        // Keyframe navigation on the selected clip.
+        for (id, forward) in [(ActionId::PrevKeyframe, false), (ActionId::NextKeyframe, true)] {
+            let project = project.clone();
+            let timeline_state = timeline_state.clone();
+            let inspector_view = inspector_view.clone();
+            let prog_player = prog_player.clone();
+            let timeline_panel_cell = timeline_panel_cell.clone();
+            acts.bind(id, Rc::new(move || {
+                let (clip_id, playhead) = {
+                    let st = timeline_state.borrow();
+                    (st.selected_clip_id.clone(), st.editing_playhead_ns())
                 };
-                local_target.map(|lt| clip.timeline_start.saturating_add(lt))
-            });
-            drop(proj);
-            if let Some(ns) = target {
-                let visual_ns = {
-                    let mut st = timeline_state.borrow_mut();
-                    st.set_playhead_visual(ns)
+                let Some(clip_id) = clip_id else {
+                    return false;
                 };
-                prog_player.borrow_mut().seek(visual_ns);
                 let proj = project.borrow();
-                inspector_view.update_keyframe_indicator(&proj, visual_ns);
-                if let Some(ref w) = *timeline_panel_cell.borrow() {
-                    w.queue_draw();
-                }
-            }
-            glib::Propagation::Stop
-        });
-        window.add_controller(key_ctrl);
-    }
-    // ── Window-level Shift+K: toggle animation mode ────────────────────────
-    {
-        let inspector_view = inspector_view.clone();
-        let key_ctrl = gtk4::EventControllerKey::new();
-        key_ctrl.set_propagation_phase(gtk4::PropagationPhase::Capture);
-        key_ctrl.connect_key_pressed(move |ctrl, key, _, mods| {
-            use gtk4::gdk::{Key, ModifierType};
-            if !mods.contains(ModifierType::SHIFT_MASK) {
-                return glib::Propagation::Proceed;
-            }
-            if key != Key::K && key != Key::k {
-                return glib::Propagation::Proceed;
-            }
-            if let Some(widget) = ctrl.widget() {
-                if let Some(focused) = widget.root().and_then(|r| r.focus()) {
-                    if is_text_input_focused(&focused) {
-                        return glib::Propagation::Proceed;
+                let target = proj.clip_ref(&clip_id).and_then(|clip| {
+                    let local = clip.local_timeline_position_ns(playhead);
+                    let local_target = if forward {
+                        clip.next_keyframe_local_ns(local)
+                    } else {
+                        clip.prev_keyframe_local_ns(local)
+                    };
+                    local_target.map(|lt| clip.timeline_start.saturating_add(lt))
+                });
+                drop(proj);
+                if let Some(ns) = target {
+                    let visual_ns = {
+                        let mut st = timeline_state.borrow_mut();
+                        st.set_playhead_visual(ns)
+                    };
+                    prog_player.borrow_mut().seek(visual_ns);
+                    let proj = project.borrow();
+                    inspector_view.update_keyframe_indicator(&proj, visual_ns);
+                    if let Some(ref w) = *timeline_panel_cell.borrow() {
+                        w.queue_draw();
                     }
                 }
-            }
-            let new_state = !inspector_view.animation_mode.get();
-            inspector_view.animation_mode.set(new_state);
-            inspector_view.animation_mode_btn.set_active(new_state);
-            glib::Propagation::Stop
-        });
-        window.add_controller(key_ctrl);
+                true
+            }));
+        }
+        // Toggle Inspector animation mode (Record Keyframes).
+        {
+            let inspector_view = inspector_view.clone();
+            acts.bind(ActionId::ToggleAnimationMode, Rc::new(move || {
+                let new_state = !inspector_view.animation_mode.get();
+                inspector_view.animation_mode.set(new_state);
+                inspector_view.animation_mode_btn.set_active(new_state);
+                true
+            }));
+        }
+        // New / Open / Save drive the toolbar buttons (same flows, same
+        // unsaved-changes confirmation).
+        for (id, btn) in [
+            (ActionId::NewProject, toolbar_handles.btn_new.clone()),
+            (ActionId::OpenProject, toolbar_handles.btn_open.clone()),
+            (ActionId::SaveProject, toolbar_handles.btn_save.clone()),
+        ] {
+            acts.bind(id, Rc::new(move || {
+                btn.emit_clicked();
+                true
+            }));
+        }
+        drop(acts);
+
+        // Palette: registry actions first (live labels), then toolbar
+        // buttons that are not already covered by an action.
+        register_action_commands(&palette_registry, &actions, &keymap);
+        collect_header_commands(&header, &palette_registry);
+
+        crate::ui::key_dispatch::install_key_resolver(
+            &window,
+            crate::keybindings::ActionContext::Global,
+            gtk4::PropagationPhase::Capture,
+            keymap.clone(),
+            actions.clone(),
+            None,
+        );
     }
 
     let startup_workspace_arrangement = {
@@ -22422,6 +22290,37 @@ pub fn build_window(
 /// `(Ctrl+X)` / `(Alt+…)` etc. in the tooltip text; category defaults to
 /// "Toolbar" since the header mixes concerns and we do not yet have a
 /// per-button category tag.
+/// (Re)register every shortcut-registry action in the command palette with
+/// its current key label; the palette invokes the same handlers as the keys.
+fn register_action_commands(
+    registry: &Rc<RefCell<crate::ui::command_palette::CommandRegistry>>,
+    actions: &Rc<RefCell<crate::keybindings::ActionMap>>,
+    keymap: &Rc<RefCell<crate::keybindings::Keymap>>,
+) {
+    use crate::keybindings::{chords_label, ActionContext, ACTIONS};
+    let categories: Vec<&str> = ActionContext::ALL.iter().map(|c| c.label()).collect();
+    let mut reg = registry.borrow_mut();
+    reg.remove_categories(&categories);
+    let km = keymap.borrow();
+    for info in ACTIONS {
+        let chords = km.chords_for(info.id);
+        let shortcut = if chords.is_empty() {
+            None
+        } else {
+            Some(chords_label(chords))
+        };
+        let actions = actions.clone();
+        let id = info.id;
+        let handler: Rc<dyn Fn()> = Rc::new(move || {
+            let h = actions.borrow().handler(id);
+            if let Some(h) = h {
+                h();
+            }
+        });
+        reg.push(info.title, info.context.label(), shortcut.as_deref(), handler);
+    }
+}
+
 fn collect_header_commands(
     header: &gtk::HeaderBar,
     registry: &Rc<RefCell<crate::ui::command_palette::CommandRegistry>>,
@@ -22474,6 +22373,11 @@ fn collect_header_commands(
             .skip_while(|c| !c.is_ascii_alphanumeric())
             .collect();
         let display = if clean.is_empty() { title } else { clean };
+        // Shortcut-registry actions (New/Open/Save, …) are already listed
+        // with live key labels; skip the toolbar duplicate.
+        if reg.has_title(display.trim_end_matches('…').trim()) || reg.has_title(&display) {
+            continue;
+        }
         let w = widget.clone();
         let handler: Rc<dyn Fn()> = Rc::new(move || {
             if let Some(b) = w.downcast_ref::<gtk::Button>() {

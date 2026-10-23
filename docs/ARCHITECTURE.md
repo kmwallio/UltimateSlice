@@ -13,7 +13,7 @@ When making changes, update these files as part of the same work:
 2. `ROADMAP.md` — keep implemented/planned checklists accurate for any affected feature area.
 3. **`docs/user/`** — update (or create) the relevant feature markdown file(s) in `docs/user/`:
    - Each feature has its own file (e.g. `timeline.md`, `inspector.md`, `export.md`).
-   - Add or update keyboard shortcuts in both the feature file **and** `docs/user/shortcuts.md`.
+   - Add or update keyboard shortcuts in the registry (`src/keybindings.rs`) and regenerate `docs/user/shortcuts.md` with `UPDATE_SHORTCUTS_DOC=1 cargo test keybindings` — see "Adding a keyboard shortcut".
    - Keep `docs/user/README.md` table of contents accurate.
 4. MCP coverage — when adding a new user-facing feature, also add/update an MCP tool for it if one does not already exist and the feature is automatable via MCP. Test each feature using the MCP server.
 5. Dependency/license coverage — when adding a new crate to `Cargo.toml`:
@@ -64,12 +64,15 @@ src/
 
   ui/
     window.rs               Root window builder — wires all panels together, owns shared state
+    key_dispatch.rs         Key event → shortcut registry resolver (one controller per context)
+    shortcuts_page.rs       Preferences → Shortcuts table (key capture, conflicts, import/export)
     mcp_handler.rs          MCP command dispatcher — extracted from window.rs to reduce file size
     toolbar.rs              HeaderBar — New/Open/Save/Export + Undo/Redo + Select/Razor toggles
     media_browser.rs        Media Library panel — import, list, select, Append to Timeline
     preview.rs              Source Monitor — video display, scrubber, in/out marks, transport
     inspector.rs            Right-side clip inspector — shows/edits selected clip properties
     preferences.rs          Preferences dialog — categorized app-level settings UI
+  keybindings.rs            Shortcut registry: ActionId/ACTIONS, Chord, Keymap, keybindings.json overrides, docs generator
     transcript_panel.rs     Transcript-Based Editing panel — flat-word TextView, click-to-seek,
                             range-select + Delete to ripple-cut the underlying clip in one undo
     markers_panel.rs        Marker List panel — scrollable list of project markers with inline
@@ -914,6 +917,52 @@ of the main thread during playback):
 3. Add a `ToggleButton` to the toolbar in `toolbar.rs`.
 4. Wire the button to set `timeline_state.borrow_mut().active_tool`.
 
+### Adding a keyboard shortcut
+
+Shortcuts in the three editing contexts (Global = main window + popped-out
+Program Monitor, Timeline, Source Monitor) are **never** a raw
+`connect_key_pressed` `match key`. The registry in `src/keybindings.rs` is
+the single source of truth:
+
+1. Add an `ActionId` variant and an `action!(...)` entry in `ACTIONS` with
+   its stable snake_case key (used in `keybindings.json` and MCP), title,
+   context, category and default chords in GTK accelerator syntax
+   (`"<Control><Shift>z"`, `"space"`, `"question"`). The
+   `defaults_have_no_conflicts` test rejects a default that collides with
+   another action in the same context (Global ↔ panel overlap is allowed:
+   the focused panel wins, e.g. Source Monitor J/K/L shadow the Program
+   Monitor J/K/L).
+2. Register the handler where the old key arm lived:
+   `actions.borrow_mut().bind(ActionId::X, Rc::new(move || { …; true }))`.
+   Return `true` when handled (propagation stops), `false` to let GTK's
+   default handling proceed. Timeline handlers go through
+   `timeline_action(state, area_weak, |st, out| …)` so the state borrow is
+   released before `on_project_changed` / selection / tool callbacks fire.
+   Never call another action from inside a handler while holding a
+   `RefCell` borrow (C trampolines cannot unwind).
+3. Regenerate the docs page: `UPDATE_SHORTCUTS_DOC=1 cargo test keybindings`.
+   The `?` dialog and the command palette pick the action up automatically.
+
+Dispatch (`src/ui/key_dispatch.rs::install_key_resolver`): modifier-only
+keys are ignored → `Chord::from_event` normalises (Lock/Num masked, letters
+lowercased with Shift kept, keypad folded, Shift dropped on shifted
+punctuation so `?` is `question`) → a focused text field wins unless the
+chord has Ctrl/Alt → the context's optional pre-hook (timeline Precision
+Trim sub-mode, multicam 5–9) → `Keymap::resolve(ctx, chord)` (context first,
+then Global) → handler cloned out of the `ActionMap` and invoked with no
+borrows held. Global runs on the window in the Capture phase and returns
+`Proceed` for unmatched chords, so panel (Bubble) bindings still see them.
+
+Chord parsing/formatting is our own (`gtk::accelerator_parse` asserts an
+initialised main thread and cannot run in `cargo test`; `gdk::Key` helpers
+can). User overrides live in `~/.config/ultimateslice/keybindings.json`
+(`KeymapOverrides`, only actions that differ from the defaults; unknown ids
+and unparsable accelerators are skipped with a warning). The Preferences
+page edits a working copy and commits to the live `Rc<RefCell<Keymap>>` on
+Save; the MCP `set_shortcut` / `reset_shortcuts` tools mutate it directly.
+`ULTIMATESLICE_PREFS_PAGE=shortcuts` opens Preferences on that page for
+headless screenshots.
+
 ### Adding a new undo-able edit command
 
 1. Define a struct implementing `EditCommand` in `undo.rs`:
@@ -1127,6 +1176,10 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_proxy_mode` | Set proxy preview mode (`off` / `p1080` / `p720` / `p640` / `p540`; legacy `half_res` / `quarter_res`) |
 | `set_auto_proxy_threshold` | Automatic proxies while proxy mode is off (`off` / `above_1080p` / `above_1440p` / `above_2160p`) |
 | `export_live_frame` | Capture the next composited frame without pausing (PPM) and return the playhead position at capture |
+| `list_actions` | List rebindable shortcut actions (id, title, context, current/default accelerators, labels) |
+| `trigger_action` | Invoke a shortcut action by id through the registry (as pressing its key would) |
+| `set_shortcut` | Rebind an action (`action_id`, `accelerators[]` in GTK syntax; empty = unbound); reports conflicts/shadows; persists |
+| `reset_shortcuts` | Reset one action (`action_id`) or all shortcuts to defaults; persists |
 | `set_gsk_renderer` | Set GTK renderer backend (`auto` / `cairo` / `opengl` / `vulkan`); requires restart |
 | `set_preview_quality` | Set compositor preview quality (`auto` / `full` / `half` / `quarter`); takes effect immediately |
 | `set_realtime_preview` | Toggle real-time preview decoder prebuilds (`true` / `false`) |

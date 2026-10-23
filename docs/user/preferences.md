@@ -15,6 +15,7 @@ Preferences are grouped by category in a sidebar:
 - **Playback** — performance-related settings.
 - **Proxies** — proxy generation, preview LUTs, background prerender, and cache persistence.
 - **Timeline** — timeline display and analysis overlays.
+- **Shortcuts** — view and rebind every keyboard shortcut.
 - **Integration** — MCP socket-server connectivity.
 - **Models** — downloadable AI model assets when the build includes AI inference support.
 
@@ -201,6 +202,20 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 - MCP automation:
   - `get_preferences` returns `persist_prerenders_next_to_project_file`.
   - `set_prerender_project_persistence` toggles the setting.
+
+## Shortcuts
+
+The **Shortcuts** page lists every rebindable action grouped by context (**Global**, **Timeline**, **Source Monitor**) with its category and current keys. The full default list is in [shortcuts.md](shortcuts.md).
+
+- **Change a key**: click the key chip, then press the new combination. `Esc` cancels. Modifier-only presses are ignored.
+- **Several keys per action**: click **+** to add another key (e.g. Redo has both `Ctrl+Shift+Z` and `Ctrl+Y`); click **×** on a chip to remove it. An action with no keys shows *unbound*.
+- **Conflicts**: if the key is already used by another action in the same context, both rows show a ⚠ note with a one-click **Remove from "…"** fix — only one of them could ever fire. A Global key that a panel also binds (for example `J` in the Source Monitor) is shown as an informational "takes precedence while that panel has focus" note, not an error.
+- **Reset**: ↶ on a row restores that action's default; **Reset All** restores everything.
+- **Import… / Export…**: exchange a `keybindings.json` file (only the actions that differ from the defaults are stored).
+- **Search** filters by action name, category, context or key.
+- Changes apply when you press **Save** — immediately, no restart. They are stored in `~/.config/ultimateslice/keybindings.json`; delete that file to return to the defaults.
+- While a text field has focus, shortcuts with **Ctrl** or **Alt** still work; plain keys go to the field.
+- MCP automation: `list_actions`, `trigger_action`, `set_shortcut`, `reset_shortcuts`.
 
 ## Saving
 

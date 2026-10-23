@@ -723,7 +723,7 @@ FCPXML persistence).
 - [x] Welcome window for choosing recent project or new one (Stack-based overlay with New/Open/Recent, crossfade transition to editor)
 - [ ] Help documentation and tutorials
 - [x] Application icon and desktop integration (`.desktop` file, MIME type, AppStream metadata, installer wiring)
-- [ ] Customizable keyboard shortcuts (shortcut config file + preferences UI)
+- [x] Customizable keyboard shortcuts (shortcut config file `~/.config/ultimateslice/keybindings.json` + Preferences → Shortcuts table with key capture, conflict detection, reset, import/export; registry-generated `?` dialog, palette entries and docs; MCP `list_actions` / `trigger_action` / `set_shortcut` / `reset_shortcuts`)
 - [x] Timecode entry / go-to timecode (HH:MM:SS:FF to jump playhead)
 - [x] Drag-and-drop from file manager (import by dragging files into media browser or timeline)
 - [x] Customizable workspace layouts (save/restore panel arrangements for different tasks)

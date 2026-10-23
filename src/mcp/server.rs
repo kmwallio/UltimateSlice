@@ -1338,6 +1338,44 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "list_actions",
+            "description": "List every rebindable keyboard-shortcut action: id, title, context ('global' | 'timeline' | 'source_monitor'), category, current shortcuts (GTK accelerator syntax, e.g. '<Control><Shift>z'), human labels, and whether the binding is the default. Shortcuts are stored in ~/.config/ultimateslice/keybindings.json.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "trigger_action",
+            "description": "Invoke a shortcut action by id exactly as pressing its key would (bypasses focus / text-field guards). Returns handled=true when the action did something (e.g. 'undo' with an empty history reports handled=false). Use list_actions for ids.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action_id": { "type": "string", "description": "Action id from list_actions, e.g. 'play_pause', 'add_marker', 'tool_razor'." }
+                },
+                "required": ["action_id"]
+            }
+        },
+        {
+            "name": "set_shortcut",
+            "description": "Rebind a shortcut action. 'accelerators' is the full list of key combinations for the action in GTK accelerator syntax ('<Control>z', '<Shift>Delete', 'space', 'question'); an empty list unbinds it. Reports same-context conflicts (the other action keeps its binding — both would resolve to the first registered) and Global↔panel shadowing. Persists to keybindings.json and applies immediately.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action_id": { "type": "string", "description": "Action id from list_actions." },
+                    "accelerators": { "type": "array", "items": { "type": "string" }, "description": "Key combinations in GTK accelerator syntax; empty = unbound." }
+                },
+                "required": ["action_id", "accelerators"]
+            }
+        },
+        {
+            "name": "reset_shortcuts",
+            "description": "Reset one action's shortcut (action_id given) or every shortcut (no action_id) to the defaults. Persists to keybindings.json and applies immediately.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action_id": { "type": "string", "description": "Optional action id; omit to reset all." }
+                }
+            }
+        },
+        {
             "name": "set_auto_proxy_threshold",
             "description": "Set the automatic-proxy threshold used while proxy mode is 'off': sources whose video height exceeds the threshold still get a proxy at the remembered proxy size (last_non_off_proxy_mode, 1080p by default). 'off' disables automatic proxies (strict Off). Default is 'above_2160p'.",
             "inputSchema": {
@@ -2022,7 +2060,7 @@ fn tools_list() -> Value {
         },
         {
             "name": "take_screenshot",
-            "description": "Capture a PNG screenshot of the full application window using the GTK snapshot and renderer. The PNG is written to the current working directory with a timestamped filename and the path is returned.",
+            "description": "Capture a PNG screenshot of the full application window (or of an open modal dialog such as Preferences, if one is in front) using the GTK snapshot and renderer. The PNG is written to the current working directory with a timestamped filename and the path is returned.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -3758,6 +3796,27 @@ fn dispatch_tool_payload(
         },
         "set_proxy_mode" => McpCommand::SetProxyMode {
             mode: arg_str!(args, "mode", "off"),
+            reply: tx,
+        },
+        "list_actions" => McpCommand::ListActions { reply: tx },
+        "trigger_action" => McpCommand::TriggerAction {
+            action_id: arg_str!(args, "action_id"),
+            reply: tx,
+        },
+        "set_shortcut" => McpCommand::SetShortcut {
+            action_id: arg_str!(args, "action_id"),
+            accelerators: args["accelerators"]
+                .as_array()
+                .map(|v| {
+                    v.iter()
+                        .filter_map(|a| a.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            reply: tx,
+        },
+        "reset_shortcuts" => McpCommand::ResetShortcuts {
+            action_id: args["action_id"].as_str().map(|s| s.to_string()),
             reply: tx,
         },
         "set_auto_proxy_threshold" => McpCommand::SetAutoProxyThreshold {

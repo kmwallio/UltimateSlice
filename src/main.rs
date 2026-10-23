@@ -3,6 +3,7 @@ mod aaf;
 mod app;
 mod edl;
 mod fcpxml;
+mod keybindings;
 mod mcp;
 mod media;
 mod model;

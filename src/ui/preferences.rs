@@ -137,13 +137,14 @@ pub fn show_preferences_dialog(
     current: PreferencesState,
     on_save: Rc<dyn Fn(PreferencesState)>,
     _bg_removal_cache: Rc<std::cell::RefCell<crate::media::bg_removal_cache::BgRemovalCache>>,
+    keymap: Rc<RefCell<crate::keybindings::Keymap>>,
 ) {
     let dialog = gtk::Dialog::builder()
         .title("Preferences")
         .transient_for(parent)
         .modal(true)
-        .default_width(640)
-        .default_height(420)
+        .default_width(720)
+        .default_height(600)
         .build();
     dialog.add_button("Cancel", ResponseType::Cancel);
     dialog.add_button("Save", ResponseType::Accept);
@@ -771,6 +772,14 @@ pub fn show_preferences_dialog(
     timeline_box.append(&voice_enhance_cap_hint);
 
     stack.add_titled(&wrap_scroll(&timeline_box), Some("timeline"), "Timeline");
+
+    // ── Shortcuts ────────────────────────────────────────────────────────
+    // Manages its own scrolling (search bar stays put), so no wrap_scroll.
+    let (shortcuts_box, commit_shortcuts) = crate::ui::shortcuts_page::build_shortcuts_page(
+        dialog.upcast_ref::<gtk::Window>(),
+        keymap.clone(),
+    );
+    stack.add_titled(&shortcuts_box, Some("shortcuts"), "Shortcuts");
 
     // ── Integration section ───────────────────────────────────────────────
     let integration_box = GBox::new(Orientation::Vertical, 10);
@@ -1641,6 +1650,12 @@ pub fn show_preferences_dialog(
     body.append(&stack);
     dialog.content_area().append(&body);
 
+    // Verification hook: `ULTIMATESLICE_PREFS_PAGE=<id>` opens the dialog on
+    // that page (e.g. `shortcuts`) so headless screenshots can check it.
+    if let Ok(page) = std::env::var("ULTIMATESLICE_PREFS_PAGE") {
+        stack.set_visible_child_name(&page);
+    }
+
     dialog.connect_response(move |d, resp| {
         if resp == ResponseType::Accept {
             let mut new_state = PreferencesState {
@@ -1757,6 +1772,7 @@ pub fn show_preferences_dialog(
                         as u32,
                 ),
             );
+            commit_shortcuts();
             on_save(new_state);
         }
         d.close();

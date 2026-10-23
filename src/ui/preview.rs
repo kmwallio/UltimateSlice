@@ -3,7 +3,7 @@ use crate::model::media_library::SourceMarks;
 use glib;
 use gtk4::prelude::*;
 use gtk4::{
-    self as gtk, Box as GBox, Button, DrawingArea, EventControllerKey, GestureDrag, Label,
+    self as gtk, Box as GBox, Button, DrawingArea, GestureDrag, Label,
     Orientation, Picture, Popover, Separator, Stack,
 };
 use std::cell::{Cell, RefCell};
@@ -99,6 +99,8 @@ pub fn build_preview(
     on_insert: Rc<dyn Fn()>,
     on_overwrite: Rc<dyn Fn()>,
     on_close_preview: Rc<dyn Fn()>,
+    keymap: Rc<RefCell<crate::keybindings::Keymap>>,
+    actions: Rc<RefCell<crate::keybindings::ActionMap>>,
 ) -> (
     GBox,
     Rc<RefCell<SourceMarks>>,
@@ -914,21 +916,19 @@ pub fn build_preview(
         });
     }
 
-    // ── Keyboard shortcuts (I/O, Space, J/K/L, ←/→) ─────────────────────
+    // ── Keyboard shortcuts (Source Monitor context) ──────────────────────
+    // Bodies register into the shortcut registry; the keys come from the
+    // user's keymap (defaults: I/O, Space, J/K/L, ←/→).
     {
-        let key_ctrl = EventControllerKey::new();
-        let player = player.clone();
-        let source_marks = source_marks.clone();
-        let update_marks_bar = update_marks_bar.clone();
-        let scrubber_weak = scrubber.downgrade();
-        let btn_play_pause = btn_play_pause.clone();
-        let shuttle_speed = shuttle_speed.clone();
-        let frame_ns = frame_ns.clone();
-
-        key_ctrl.connect_key_pressed(move |_, key, _, _| {
-            use gtk::gdk::Key;
-            match key {
-                Key::i | Key::I => {
+        use crate::keybindings::ActionId;
+        let mut acts = actions.borrow_mut();
+        {
+            let source_marks = source_marks.clone();
+            let update_marks_bar = update_marks_bar.clone();
+            let scrubber_weak = scrubber.downgrade();
+            acts.bind(
+                ActionId::SourceMarkIn,
+                Rc::new(move || {
                     let mut m = source_marks.borrow_mut();
                     let pos = m.display_pos_ns;
                     m.in_ns = pos.min(m.out_ns.saturating_sub(1_000_000));
@@ -937,9 +937,17 @@ pub fn build_preview(
                     if let Some(a) = scrubber_weak.upgrade() {
                         a.queue_draw();
                     }
-                    glib::Propagation::Stop
-                }
-                Key::o | Key::O => {
+                    true
+                }),
+            );
+        }
+        {
+            let source_marks = source_marks.clone();
+            let update_marks_bar = update_marks_bar.clone();
+            let scrubber_weak = scrubber.downgrade();
+            acts.bind(
+                ActionId::SourceMarkOut,
+                Rc::new(move || {
                     let mut m = source_marks.borrow_mut();
                     let pos = m.display_pos_ns;
                     m.out_ns = pos.max(m.in_ns + 1_000_000);
@@ -948,9 +956,17 @@ pub fn build_preview(
                     if let Some(a) = scrubber_weak.upgrade() {
                         a.queue_draw();
                     }
-                    glib::Propagation::Stop
-                }
-                Key::space => {
+                    true
+                }),
+            );
+        }
+        {
+            let player = player.clone();
+            let btn_play_pause = btn_play_pause.clone();
+            let shuttle_speed = shuttle_speed.clone();
+            acts.bind(
+                ActionId::SourcePlayPause,
+                Rc::new(move || {
                     shuttle_speed.set(0);
                     let p = player.borrow();
                     match p.state() {
@@ -963,27 +979,51 @@ pub fn build_preview(
                             btn_play_pause.set_label("⏸");
                         }
                     }
-                    glib::Propagation::Stop
-                }
-                // J — shuttle reverse (increasing speed: -1x, -2x, -4x)
-                Key::j | Key::J => {
+                    true
+                }),
+            );
+        }
+        {
+            // J — shuttle reverse (increasing speed: -1x, -2x, -4x)
+            let player = player.clone();
+            let btn_play_pause = btn_play_pause.clone();
+            let shuttle_speed = shuttle_speed.clone();
+            acts.bind(
+                ActionId::SourceShuttleReverse,
+                Rc::new(move || {
                     let cur = shuttle_speed.get();
                     let new_speed = if cur > 0 { -1 } else { (cur - 1).max(-3) };
                     shuttle_speed.set(new_speed);
                     // Shuttle is implemented as frame stepping in the 100ms timer
                     let _ = player.borrow().pause();
                     btn_play_pause.set_label("◀◀");
-                    glib::Propagation::Stop
-                }
-                // K — stop shuttle / pause
-                Key::k | Key::K => {
+                    true
+                }),
+            );
+        }
+        {
+            // K — stop shuttle / pause
+            let player = player.clone();
+            let btn_play_pause = btn_play_pause.clone();
+            let shuttle_speed = shuttle_speed.clone();
+            acts.bind(
+                ActionId::SourceShuttleStop,
+                Rc::new(move || {
                     shuttle_speed.set(0);
                     let _ = player.borrow().pause();
                     btn_play_pause.set_label("▶");
-                    glib::Propagation::Stop
-                }
-                // L — shuttle forward (increasing speed: 1x, 2x, 4x)
-                Key::l | Key::L => {
+                    true
+                }),
+            );
+        }
+        {
+            // L — shuttle forward (increasing speed: 1x, 2x, 4x)
+            let player = player.clone();
+            let btn_play_pause = btn_play_pause.clone();
+            let shuttle_speed = shuttle_speed.clone();
+            acts.bind(
+                ActionId::SourceShuttleForward,
+                Rc::new(move || {
                     let cur = shuttle_speed.get();
                     let new_speed = if cur < 0 { 1 } else { (cur + 1).min(3) };
                     shuttle_speed.set(new_speed);
@@ -995,14 +1035,29 @@ pub fn build_preview(
                         let _ = player.borrow().pause();
                         btn_play_pause.set_label("▶▶");
                     }
-                    glib::Propagation::Stop
-                }
-                // ← — step backward one frame
-                Key::Left => {
+                    true
+                }),
+            );
+        }
+        for (id, forward) in [(ActionId::SourceStepBack, false), (ActionId::SourceStepForward, true)] {
+            let player = player.clone();
+            let btn_play_pause = btn_play_pause.clone();
+            let shuttle_speed = shuttle_speed.clone();
+            let source_marks = source_marks.clone();
+            let scrubber_weak = scrubber.downgrade();
+            let frame_ns = frame_ns.clone();
+            acts.bind(
+                id,
+                Rc::new(move || {
                     shuttle_speed.set(0);
                     let p = player.borrow();
                     let _ = p.pause();
-                    if let Ok(new_pos) = p.step_backward(frame_ns.get()) {
+                    let stepped = if forward {
+                        p.step_forward(frame_ns.get())
+                    } else {
+                        p.step_backward(frame_ns.get())
+                    };
+                    if let Ok(new_pos) = stepped {
                         source_marks.borrow_mut().display_pos_ns = new_pos;
                     }
                     drop(p);
@@ -1010,27 +1065,19 @@ pub fn build_preview(
                     if let Some(a) = scrubber_weak.upgrade() {
                         a.queue_draw();
                     }
-                    glib::Propagation::Stop
-                }
-                // → — step forward one frame
-                Key::Right => {
-                    shuttle_speed.set(0);
-                    let p = player.borrow();
-                    let _ = p.pause();
-                    if let Ok(new_pos) = p.step_forward(frame_ns.get()) {
-                        source_marks.borrow_mut().display_pos_ns = new_pos;
-                    }
-                    drop(p);
-                    btn_play_pause.set_label("▶");
-                    if let Some(a) = scrubber_weak.upgrade() {
-                        a.queue_draw();
-                    }
-                    glib::Propagation::Stop
-                }
-                _ => glib::Propagation::Proceed,
-            }
-        });
-        vbox.add_controller(key_ctrl);
+                    true
+                }),
+            );
+        }
+        drop(acts);
+        crate::ui::key_dispatch::install_key_resolver(
+            &vbox,
+            crate::keybindings::ActionContext::SourceMonitor,
+            gtk::PropagationPhase::Bubble,
+            keymap.clone(),
+            actions.clone(),
+            None,
+        );
     }
 
     // ── Update scrubber + timecode every 100ms; handle shuttle stepping ──

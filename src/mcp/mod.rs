@@ -158,6 +158,22 @@ pub enum McpCommand {
         threshold: String,
         reply: SyncSender<Value>,
     },
+    ListActions {
+        reply: SyncSender<Value>,
+    },
+    TriggerAction {
+        action_id: String,
+        reply: SyncSender<Value>,
+    },
+    SetShortcut {
+        action_id: String,
+        accelerators: Vec<String>,
+        reply: SyncSender<Value>,
+    },
+    ResetShortcuts {
+        action_id: Option<String>,
+        reply: SyncSender<Value>,
+    },
     SetProxySidecarPersistence {
         enabled: bool,
         reply: SyncSender<Value>,
