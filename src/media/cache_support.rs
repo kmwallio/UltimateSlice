@@ -10,6 +10,23 @@ pub(crate) fn cache_root_dir(cache_name: &str) -> PathBuf {
     base.join("ultimateslice").join(cache_name)
 }
 
+/// True when a `.partial` cache file looks like it is still being written:
+/// its modification time is within the last two minutes. ffmpeg keeps the
+/// file's mtime fresh while encoding, and the `+faststart` pass at the end
+/// re-opens the output *by path* to shift the moov atom — so a cleanup that
+/// unlinks an in-flight `.partial` makes that re-open fail and throws the
+/// whole transcode away ("Unable to re-open … output file for shifting
+/// data"). Cleanups skip files this reports as in flight.
+pub(crate) fn partial_file_is_in_flight(path: &std::path::Path) -> bool {
+    const IN_FLIGHT_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|modified| std::time::SystemTime::now().duration_since(modified).ok())
+        .map(|age| age < IN_FLIGHT_WINDOW)
+        .unwrap_or(false)
+}
+
 pub(crate) fn file_has_content(path: &str) -> bool {
     std::fs::metadata(path)
         .map(|m| m.len() > 0)
@@ -26,6 +43,24 @@ mod tests {
         assert!(!file_has_content(
             "/definitely/missing/ultimateslice-cache-support"
         ));
+    }
+
+    #[test]
+    fn fresh_partial_is_in_flight_and_old_partial_is_not() {
+        let temp = NamedTempFile::new().expect("temp file");
+        std::fs::write(temp.path(), b"encoding...").expect("write");
+        assert!(partial_file_is_in_flight(temp.path()));
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(10 * 60);
+        std::fs::File::options()
+            .append(true)
+            .open(temp.path())
+            .expect("open")
+            .set_modified(old)
+            .expect("set mtime");
+        assert!(!partial_file_is_in_flight(temp.path()));
+        assert!(!partial_file_is_in_flight(std::path::Path::new(
+            "/definitely/missing/ultimateslice.partial"
+        )));
     }
 
     #[test]

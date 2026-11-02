@@ -1300,6 +1300,13 @@ fn cleanup_proxy_dir_variants(
         }
         let path_str = path.to_string_lossy().to_string();
         if file_name.ends_with(".partial") {
+            // A transcode that is still running keeps its `.partial` fresh;
+            // unlinking it under ffmpeg breaks the final `+faststart` re-open
+            // and wastes the whole job (seen as "Unable to re-open … for
+            // shifting data" after a two-minute 6K transcode).
+            if crate::media::cache_support::partial_file_is_in_flight(&path) {
+                continue;
+            }
             let _ = std::fs::remove_file(&path);
             removed.insert(path_str);
             continue;

@@ -228,6 +228,51 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
             reply.send(json!(tracks)).ok();
         }
 
+        McpCommand::AddTrack { kind, reply } => {
+            let is_video = match kind.trim().to_ascii_lowercase().as_str() {
+                "" | "video" | "v" => true,
+                "audio" | "a" => false,
+                other => {
+                    reply
+                        .send(json!({
+                            "success": false,
+                            "error": format!("unknown track kind '{other}' (expected 'video' or 'audio')"),
+                        }))
+                        .ok();
+                    return;
+                }
+            };
+            let (index, track_id, label) = {
+                let mut proj = project.borrow_mut();
+                let index = proj.tracks.len();
+                let label = if is_video {
+                    format!("Video {}", proj.video_tracks().count() + 1)
+                } else {
+                    format!("Audio {}", proj.audio_tracks().count() + 1)
+                };
+                let track = if is_video {
+                    crate::model::track::Track::new_video(label.clone())
+                } else {
+                    crate::model::track::Track::new_audio(label.clone())
+                };
+                let track_id = track.id.clone();
+                let cmd: Box<dyn crate::undo::EditCommand> =
+                    Box::new(crate::undo::AddTrackCommand { track, index });
+                timeline_state.borrow_mut().history.execute(cmd, &mut proj);
+                (index, track_id, label)
+            };
+            reply
+                .send(json!({
+                    "success": true,
+                    "index": index,
+                    "track_id": track_id,
+                    "label": label,
+                    "kind": if is_video { "Video" } else { "Audio" },
+                }))
+                .ok();
+            on_project_changed();
+        }
+
         McpCommand::ListClips { compact, reply } => {
             let proj = project.borrow();
             let clips: Vec<_> = proj

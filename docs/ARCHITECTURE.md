@@ -1311,6 +1311,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `get_project` | Full project JSON (title, tracks, clips) |
 | `batch_call_tools` | Execute multiple MCP tool calls in-order in one request; supports optional `stop_on_error` and `include_timing`, returning per-call success/error records (plus optional elapsed timing) |
 | `list_tracks` | Track list; accepts optional `compact` flag for automation-focused output (`index/id/kind/clip_count` only) |
+| `add_track` | Append an empty `video` (default) or `audio` track (undoable); returns `index` / `track_id` / `label` for use with `add_clip`'s `track_index` |
 | `list_clips` | Clip list; accepts optional `compact` flag for automation-focused timing/source output (`id/source path/track/timing`) |
 | `get_timeline_settings` | Timeline settings JSON (includes `magnetic_mode`) |
 | `get_playhead_position` | Current program playhead position (`timeline_pos_ns`) |

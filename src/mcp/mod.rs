@@ -16,6 +16,10 @@ pub enum McpCommand {
         compact: bool,
         reply: SyncSender<Value>,
     },
+    AddTrack {
+        kind: String,
+        reply: SyncSender<Value>,
+    },
     ListClips {
         compact: bool,
         reply: SyncSender<Value>,

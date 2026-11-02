@@ -251,7 +251,12 @@ fn is_managed_prerender_segment_path(path: &Path) -> bool {
 fn remove_prerender_segment_files(output_path: &Path) {
     let _ = std::fs::remove_file(output_path);
     let _ = std::fs::remove_file(prerender_manifest_path(output_path));
-    let _ = std::fs::remove_file(prerender_partial_output_path(output_path));
+    let partial = prerender_partial_output_path(output_path);
+    // A render still writing this segment must keep its `.partial` (see
+    // `partial_file_is_in_flight`); it renames into place when it finishes.
+    if !crate::media::cache_support::partial_file_is_in_flight(&partial) {
+        let _ = std::fs::remove_file(partial);
+    }
 }
 
 /// Normalize mixer-bound clip audio so camera AAC (e.g. 16 kHz mono Ring MP4s)
@@ -3558,9 +3563,12 @@ impl ProgramPlayer {
             for entry in entries.flatten() {
                 let path = entry.path();
                 let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                if path.extension().and_then(|s| s.to_str()) == Some("mp4")
+                if name.ends_with(".partial") {
+                    if !crate::media::cache_support::partial_file_is_in_flight(&path) {
+                        let _ = std::fs::remove_file(path);
+                    }
+                } else if path.extension().and_then(|s| s.to_str()) == Some("mp4")
                     || name.ends_with(".manifest.json")
-                    || name.ends_with(".partial")
                 {
                     let _ = std::fs::remove_file(path);
                 }
@@ -3576,7 +3584,11 @@ impl ProgramPlayer {
                 let path = entry.path();
                 let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
                 if name.ends_with(".partial") {
-                    let _ = std::fs::remove_file(&path);
+                    // Leave renders that are still writing alone; only
+                    // abandoned partials (crashed/killed ffmpeg) are swept.
+                    if !crate::media::cache_support::partial_file_is_in_flight(&path) {
+                        let _ = std::fs::remove_file(&path);
+                    }
                     continue;
                 }
                 if name.ends_with(".manifest.json") {

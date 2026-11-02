@@ -45,6 +45,14 @@ printf '%s\n' \
 | python3 tools/mcp_socket_client.py
 ```
 
+Build a multi-layer timeline: new projects start with one video track, so
+append tracks first and use the returned index with `add_clip`:
+
+```bash
+python3 tools/mcp_call.py add_track '{"kind":"video"}'      # → {"index": 2, "track_id": "…", "label": "Video 2"}
+python3 tools/mcp_call.py add_clip '{"source_path":"/path/b-roll.mp4","track_index":2,"timeline_start_ns":0,"source_in_ns":0,"source_out_ns":5000000000}'
+```
+
 ## Helper scripts for perf/FPS checks
 
 - `python3 tools/mcp_call.py <tool_name> '<json-args>'`

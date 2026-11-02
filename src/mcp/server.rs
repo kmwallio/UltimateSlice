@@ -192,6 +192,16 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "add_track",
+            "description": "Append a new empty track to the timeline (undoable). Returns the new track's index, id and label; use the index with add_clip's track_index to build multi-layer timelines.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "kind": { "type": "string", "enum": ["video", "audio"], "description": "Track kind. Default 'video'." }
+                }
+            }
+        },
+        {
             "name": "list_clips",
             "description": "List every clip on the timeline across all tracks, including color label and timing/effect metadata.",
             "inputSchema": {
@@ -2967,6 +2977,14 @@ fn dispatch_tool_payload(
         "get_project" => McpCommand::GetProject { reply: tx },
         "list_tracks" => McpCommand::ListTracks {
             compact: arg_bool!(args, "compact"),
+            reply: tx,
+        },
+        "add_track" => McpCommand::AddTrack {
+            kind: args
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("video")
+                .to_string(),
             reply: tx,
         },
         "list_clips" => McpCommand::ListClips {
