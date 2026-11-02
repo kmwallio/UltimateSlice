@@ -4149,86 +4149,79 @@ pub(crate) fn build_blur_filter(clip: &crate::model::clip::Clip) -> String {
     }
 }
 
-/// Build an inline HSL Qualifier filter fragment (secondary color correction).
+/// HSL qualifier stage for the export / bake filter chain.
 ///
-/// Emits a single `geq` filter wrapped in `format=gbrp` / `format=yuva420p`
-/// bridges so the surrounding YUV chain stays intact while the per-pixel HSL
-/// math runs on RGB data.
+/// The qualifier is a static per-pixel colour map, so it is compiled once into
+/// a 3D LUT (`hsl_qualifier::ensure_hsl_qualifier_lut_file_in`, cached by
+/// parameter hash under `$XDG_CACHE_HOME/ultimateslice/hsl_luts/`) and applied
+/// with ffmpeg's native `lut3d` filter. That runs at full encode speed, where
+/// the previous inline `geq` expression evaluated ~150 arithmetic terms per
+/// pixel in ffmpeg's interpreter (a 6 s 5.3K bake took ~12 minutes) — and,
+/// on current ffmpeg, produced a solid red frame: it stored the graded g/b
+/// values in `st()` registers from the `r` expression and read them back from
+/// the `g`/`b` expressions, but `geq` evaluates planes separately so those
+/// registers never carried across. The `geq` form has been removed.
 ///
-/// The `r` channel expression does all the shared setup (RGB→HSL conversion,
-/// range membership, secondary grade, alpha blend) and stores the final
-/// r/g/b output in registers 25/26/27. The `g` and `b` expressions just read
-/// those registers — FFmpeg's `geq` shares stored-variable state across the
-/// channel expressions evaluated for the same pixel.
-///
-/// Returns an empty string when the qualifier is neutral so primary-only
-/// clips stay byte-identical to before.
+/// If the cache directory is not writable the LUT goes to the system temp
+/// directory instead; if that fails too the stage is skipped with a warning
+/// rather than emitting a filter that cannot run.
 pub(crate) fn build_hsl_qualifier_filter(clip: &crate::model::clip::Clip) -> String {
+    build_hsl_qualifier_filter_in(
+        clip,
+        &crate::media::hsl_qualifier::hsl_qualifier_lut_cache_dir(),
+        Some(&std::env::temp_dir().join("ultimateslice-hsl-luts")),
+    )
+}
+
+/// `build_hsl_qualifier_filter` with explicit LUT directories: `lut_dir` is
+/// tried first, then `fallback_dir`.
+fn build_hsl_qualifier_filter_in(
+    clip: &crate::model::clip::Clip,
+    lut_dir: &std::path::Path,
+    fallback_dir: Option<&std::path::Path>,
+) -> String {
     let q = match &clip.hsl_qualifier {
         Some(q) if !q.is_neutral() => q,
         _ => return String::new(),
     };
+    let size = crate::media::hsl_qualifier::HSL_LUT_SIZE;
+    let path = match crate::media::hsl_qualifier::ensure_hsl_qualifier_lut_file_in(lut_dir, q, size)
+    {
+        Ok(path) => path,
+        Err(err) => {
+            log::warn!(
+                "hsl_qualifier: could not write LUT to {}: {err}",
+                lut_dir.display()
+            );
+            let Some(fallback) = fallback_dir else {
+                log::warn!("hsl_qualifier: no fallback directory; skipping qualifier stage");
+                return String::new();
+            };
+            match crate::media::hsl_qualifier::ensure_hsl_qualifier_lut_file_in(fallback, q, size) {
+                Ok(path) => path,
+                Err(err) => {
+                    log::warn!(
+                        "hsl_qualifier: could not write LUT to {} either: {err}; skipping qualifier stage",
+                        fallback.display()
+                    );
+                    return String::new();
+                }
+            }
+        }
+    };
+    format!(
+        ",format=gbrp,lut3d=file={}:interp=trilinear,format=yuva420p",
+        escape_filter_path(&path.to_string_lossy())
+    )
+}
 
-    let alpha_expr = crate::media::hsl_qualifier::build_hsl_qualifier_geq_alpha(q);
-    let br = q.brightness;
-    let co = q.contrast;
-    let sa = q.saturation;
-
-    // Setup: read the three source channels, derive H/S/L into stored vars,
-    // compute the qualifier alpha, apply secondary grade, blend with original,
-    // and stash the final channel values in regs 25/26/27. The returned value
-    // of the `r` expression itself is 255*final_r.
-    //
-    // Register layout inside a single pixel evaluation:
-    //   20..22  r0 g0 b0 (source 0..1)
-    //   0..2    alias of 20..22 (build_hsl_qualifier_geq_alpha expects that)
-    //   3       V = max(r,g,b)
-    //   4       min(r,g,b)
-    //   5       delta
-    //   6       L
-    //   7       S
-    //   8       H (0..1)
-    //   9       qualifier alpha
-    //   23..24  luma + scratch
-    //   25..27  graded + blended final r/g/b (0..1)
-    //
-    // `alpha_expr` already contains st() calls that populate 0..9 from
-    // r(X,Y)/g(X,Y)/b(X,Y), so calling it once gives us both the setup and
-    // the alpha. We then reuse 20..22 (captured before the alpha math)
-    // for the blend step.
-    //
-    // Format bridges keep the surrounding YUV chain honest.
-    let setup_and_grade = format!(
-        "st(20,r(X,Y)/255)\
-         +st(21,g(X,Y)/255)\
-         +st(22,b(X,Y)/255)\
-         +st(9,{alpha_expr})\
-         +st(25,ld(20)+{br})\
-         +st(26,ld(21)+{br})\
-         +st(27,ld(22)+{br})\
-         +st(25,(ld(25)-0.5)*{co}+0.5)\
-         +st(26,(ld(26)-0.5)*{co}+0.5)\
-         +st(27,(ld(27)-0.5)*{co}+0.5)\
-         +st(23,0.2126*ld(25)+0.7152*ld(26)+0.0722*ld(27))\
-         +st(25,ld(23)+(ld(25)-ld(23))*{sa})\
-         +st(26,ld(23)+(ld(26)-ld(23))*{sa})\
-         +st(27,ld(23)+(ld(27)-ld(23))*{sa})\
-         +st(25,clip(ld(20)*(1-ld(9))+ld(25)*ld(9),0,1))\
-         +st(26,clip(ld(21)*(1-ld(9))+ld(26)*ld(9),0,1))\
-         +st(27,clip(ld(22)*(1-ld(9))+ld(27)*ld(9),0,1))",
-        alpha_expr = alpha_expr,
-        br = br,
-        co = co,
-        sa = sa,
-    );
-    // r expression returns 255*ld(25) while also evaluating all the setup.
-    // Multiplying the setup sum by 0 discards its numeric value but keeps
-    // every st() side effect.
-    let r_expr = format!("0*({setup_and_grade})+255*ld(25)");
-    let g_expr = "255*ld(26)";
-    let b_expr = "255*ld(27)";
-
-    format!(",format=gbrp,geq=r='{r_expr}':g='{g_expr}':b='{b_expr}',format=yuva420p")
+/// Escape a file path for use as a filter option value inside an ffmpeg
+/// filtergraph string (`\` and `:` are the option-level specials; `,` would
+/// otherwise end the filter).
+fn escape_filter_path(path: &str) -> String {
+    path.replace('\\', "\\\\")
+        .replace(':', "\\:")
+        .replace(',', "\\,")
 }
 
 /// Run vidstab analysis (pass 1) for a clip, producing a .trf transform file.
@@ -4565,7 +4558,7 @@ pub(crate) fn build_lut_filter_prefix(clip: &crate::model::clip::Clip) -> String
     let mut result = String::new();
     for path in &clip.lut_paths {
         if !path.is_empty() && std::path::Path::new(path).exists() {
-            let escaped = path.replace('\\', "\\\\").replace(':', "\\:");
+            let escaped = escape_filter_path(path);
             result.push_str(&format!("lut3d={escaped},"));
         }
     }
@@ -7229,6 +7222,7 @@ mod tests {
         build_adjustment_layer_filter_graph, build_adjustment_scope_alpha_expression,
         build_audio_crossfade_filters, build_color_filter, build_crop_filter,
         build_export_snapshot_project, build_grading_filter, build_hsl_qualifier_filter,
+        build_hsl_qualifier_filter_in, escape_filter_path,
         build_keyframed_property_expression, build_pan_expression, build_pitch_filter,
         build_rotation_filter,
         build_scale_position_filter, build_subtitle_filter_composited,
@@ -8608,31 +8602,78 @@ mod tests {
         assert_eq!(r.true_peak_dbtp, 0.0);
     }
 
-    #[test]
-    fn hsl_qualifier_filter_emits_geq_when_active() {
-        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+    fn active_hsl_qualifier() -> crate::model::clip::HslQualifier {
         let mut q = crate::model::clip::HslQualifier::default();
         q.enabled = true;
         q.hue_min = 200.0;
         q.hue_max = 260.0;
         q.brightness = 0.1;
-        clip.hsl_qualifier = Some(q);
-        let f = build_hsl_qualifier_filter(&clip);
-        assert!(f.starts_with(",format=gbrp,geq="), "filter: {f}");
-        assert!(f.ends_with(",format=yuva420p"), "filter: {f}");
-        // Secondary grade registers referenced.
-        assert!(f.contains("ld(25)"));
-        assert!(f.contains("ld(26)"));
-        assert!(f.contains("ld(27)"));
-        // No bare apostrophes in expression values — would break filter parsing.
-        let payload = f.trim_start_matches(",format=gbrp,geq=");
+        q
+    }
+
+    #[test]
+    fn hsl_qualifier_filter_emits_compiled_lut3d_when_active() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.hsl_qualifier = Some(active_hsl_qualifier());
+        let f = build_hsl_qualifier_filter_in(&clip, dir.path(), None);
+        assert!(f.starts_with(",format=gbrp,lut3d=file="), "filter: {f}");
         assert!(
-            payload
-                .trim_start_matches(|c: char| c == 'r' || c == '=' || c == '\'')
-                .len()
-                > 0,
-            "payload: {f}"
+            f.contains(":interp=trilinear,format=yuva420p"),
+            "filter: {f}"
         );
+        assert!(f.ends_with(",format=yuva420p"), "filter: {f}");
+        assert!(!f.contains("geq="), "filter: {f}");
+        // The referenced LUT exists and parses.
+        let path = f
+            .trim_start_matches(",format=gbrp,lut3d=file=")
+            .split(":interp=")
+            .next()
+            .unwrap()
+            .replace("\\:", ":")
+            .replace("\\,", ",");
+        let lut = crate::media::cube_lut::CubeLut::from_file(std::path::Path::new(&path))
+            .expect("compiled LUT parses");
+        assert_eq!(lut.size, crate::media::hsl_qualifier::HSL_LUT_SIZE);
+        // Same clip again → same file, no second compile.
+        assert_eq!(f, build_hsl_qualifier_filter_in(&clip, dir.path(), None));
+    }
+
+    #[test]
+    fn hsl_qualifier_filter_uses_fallback_dir_when_cache_dir_unwritable() {
+        let not_a_dir = tempfile::NamedTempFile::new().expect("tempfile");
+        let fallback = tempfile::tempdir().expect("tempdir");
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.hsl_qualifier = Some(active_hsl_qualifier());
+        let f = build_hsl_qualifier_filter_in(&clip, not_a_dir.path(), Some(fallback.path()));
+        assert!(f.starts_with(",format=gbrp,lut3d=file="), "filter: {f}");
+        assert!(
+            f.contains(&escape_filter_path(&fallback.path().to_string_lossy())),
+            "filter: {f}"
+        );
+    }
+
+    #[test]
+    fn hsl_qualifier_filter_is_skipped_when_no_lut_can_be_written() {
+        let not_a_dir = tempfile::NamedTempFile::new().expect("tempfile");
+        let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
+        clip.hsl_qualifier = Some(active_hsl_qualifier());
+        // No usable directory at all: better to drop the stage than to emit a
+        // filter ffmpeg cannot run (the old geq form rendered solid red).
+        assert_eq!(
+            build_hsl_qualifier_filter_in(&clip, not_a_dir.path(), Some(not_a_dir.path())),
+            ""
+        );
+        assert_eq!(
+            build_hsl_qualifier_filter_in(&clip, not_a_dir.path(), None),
+            ""
+        );
+    }
+
+    #[test]
+    fn escape_filter_path_escapes_option_specials() {
+        assert_eq!(escape_filter_path("/a/b.cube"), "/a/b.cube");
+        assert_eq!(escape_filter_path("/a:b,c\\d"), "/a\\:b\\,c\\\\d");
     }
 
     #[test]

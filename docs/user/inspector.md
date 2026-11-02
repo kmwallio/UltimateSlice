@@ -130,10 +130,14 @@ Open the **HSL Qualifier** expander below Color & Denoise.
 Program Monitor and FFmpeg export share the exact same HSL math. Preview
 runs a CPU pad probe on a dedicated `us-hsl-identity` element placed after
 the primary color chain (so the qualifier sees your primary grade, not the
-raw source). Export emits a single inline `geq` filter wrapped in
-`format=gbrp` / `format=yuva420p` bridges that encodes the RGB→HSL
-conversion, range membership, secondary grade, and alpha blend in one pass.
-Neutral or disabled qualifiers are skipped entirely so existing clips stay
+raw source). Export and Render-and-Replace bakes compile that same per-pixel
+function into a 65³ 3D LUT (written once per parameter set under
+`$XDG_CACHE_HOME/ultimateslice/hsl_luts/`) and apply it with FFmpeg's native
+`lut3d` filter, so a qualifier costs no more at export time than a colour
+LUT does. Pixels fully inside or fully outside the window match the preview
+exactly; along the window edge the LUT interpolates across one grid step,
+which on a zero-softness qualifier reads as a very slight feather. Neutral or
+disabled qualifiers are skipped entirely so existing clips stay
 byte-identical.
 
 Automation: the **`set_clip_hsl_qualifier`** MCP tool accepts every field

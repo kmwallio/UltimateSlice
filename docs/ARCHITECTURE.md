@@ -725,6 +725,26 @@ export path (`export.rs`):
 `ProgramPlayer::` call sites remain valid. New code should import
 `color_math` directly.
 
+**HSL qualifier → 3D LUT.** `src/media/hsl_qualifier.rs` holds the per-pixel
+function (`apply_hsl_qualifier_rgb`) that the Program Monitor pad probe runs
+directly. The export / bake chain (`export::build_hsl_qualifier_filter`)
+never evaluates it inside ffmpeg: `compile_hsl_qualifier_lut` samples the
+function onto a 65³ grid, `ensure_hsl_qualifier_lut_file_in` writes it as a
+`.cube` named by a SHA-256 of the qualifier fields under
+`$XDG_CACHE_HOME/ultimateslice/hsl_luts/` (temp-and-rename, pruned to 24
+files by mtime, system temp dir as fallback, stage skipped with a warning if
+neither is writable), and the chain emits
+`format=gbrp,lut3d=file=…:interp=trilinear,format=yuva420p`. The qualifier
+has no keyframes and no spatial term, so the LUT is exact at the grid points;
+the only approximation is the one-cell interpolation along the window edge,
+and the tests in `hsl_qualifier.rs` bound it (mean error well under one 8-bit
+step, interior/exterior pixels exact). The previous inline `geq` form was
+removed: it was ~15× slower than the rest of the chain and it depended on
+`st()` registers written by the `r` expression surviving into the `g` / `b`
+expressions, which `geq` does not guarantee (planes are evaluated
+separately) — on ffmpeg 8 it rendered a solid red frame. Any new static
+colour effect should take the same LUT route rather than a `geq` expression.
+
 ### Audio analysis utilities
 
 Module: `src/media/audio_analysis.rs`. Subprocess-based FFmpeg utilities

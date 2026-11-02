@@ -2,7 +2,8 @@
 //!
 //! This module provides the shared math + rendering helpers used by both the
 //! Program Monitor preview (CPU pad probe on RGBA frames) and the FFmpeg
-//! export pipeline (`geq` alpha expression). Keeping the matte math in one
+//! export / bake pipelines (a 3D LUT compiled from the same per-pixel
+//! function, see `compile_hsl_qualifier_lut`). Keeping the matte math in one
 //! place means preview and export stay in parity by construction.
 //!
 //! The workflow is:
@@ -15,7 +16,9 @@
 //! 4. Apply a secondary brightness/contrast/saturation grade to the pixel and
 //!    blend back toward the original by the qualifier alpha.
 
+use crate::media::cube_lut::CubeLut;
 use crate::model::clip::HslQualifier;
+use std::path::{Path, PathBuf};
 
 /// Classic `smoothstep` — 0 below edge0, 1 above edge1, cubic hermite in between.
 #[inline]
@@ -225,10 +228,7 @@ pub fn apply_hsl_qualifier_to_rgba_buffer(
             if alpha <= 0.0 {
                 continue;
             }
-            let (gr, gg, gb) = apply_secondary_grade(q, r, g, b);
-            let nr = r * (1.0 - alpha) + gr * alpha;
-            let ng = g * (1.0 - alpha) + gg * alpha;
-            let nb = b * (1.0 - alpha) + gb * alpha;
+            let (nr, ng, nb) = blend_graded(q, r, g, b, alpha);
             data[idx] = (nr * 255.0).round().clamp(0.0, 255.0) as u8;
             data[idx + 1] = (ng * 255.0).round().clamp(0.0, 255.0) as u8;
             data[idx + 2] = (nb * 255.0).round().clamp(0.0, 255.0) as u8;
@@ -236,137 +236,174 @@ pub fn apply_hsl_qualifier_to_rgba_buffer(
     }
 }
 
-/// Build the FFmpeg `geq` alpha expression that computes the qualifier's alpha
-/// for a single pixel using `r(X,Y)` / `g(X,Y)` / `b(X,Y)` and stored-variable
-/// scratch space.
-///
-/// The expression is entirely static per clip — bake it into the filter
-/// string once and let FFmpeg's expression evaluator run it per pixel.
-///
-/// Output range is 0..1. Multiply by 255 on the caller side if used directly
-/// as an alpha channel value.
-pub fn build_hsl_qualifier_geq_alpha(q: &HslQualifier) -> String {
-    // Degrees → fraction 0..1 for hue comparisons in geq (we normalize to
-    // 0..1 because `st()`/`ld()` is easier to reason about than mixed units).
-    let hmin = (q.hue_min / 360.0).clamp(0.0, 1.0);
-    let hmax = (q.hue_max / 360.0).clamp(0.0, 1.0);
-    let hsoft = (q.hue_softness / 360.0).max(0.0);
-    let smin = q.sat_min.clamp(0.0, 1.0);
-    let smax = q.sat_max.clamp(0.0, 1.0);
-    let ssoft = q.sat_softness.max(0.0);
-    let lmin = q.lum_min.clamp(0.0, 1.0);
-    let lmax = q.lum_max.clamp(0.0, 1.0);
-    let lsoft = q.lum_softness.max(0.0);
-    let invert = q.invert;
+/// Grade `(r, g, b)` and blend the result back toward the original by `alpha`.
+#[inline]
+fn blend_graded(q: &HslQualifier, r: f64, g: f64, b: f64, alpha: f64) -> (f64, f64, f64) {
+    let (gr, gg, gb) = apply_secondary_grade(q, r, g, b);
+    (
+        r * (1.0 - alpha) + gr * alpha,
+        g * (1.0 - alpha) + gg * alpha,
+        b * (1.0 - alpha) + gb * alpha,
+    )
+}
 
-    // In `geq`, `st(n, expr)` stores into register n and returns expr; `ld(n)`
-    // reads it back. We use:
-    //   0: r, 1: g, 2: b
-    //   3: max(r,g,b) = V, 4: min(r,g,b)
-    //   5: delta = V - min, 6: L = (V+min)/2, 7: S
-    //   8: Hfrac (0..1)
-    //   9: per-channel membership terms merged
-    //
-    // gte(a,b) returns 1 when a >= b, 0 otherwise. `if(c, t, e)` branches.
-    //
-    // Saturation formula:
-    //   if L < 0.5: S = delta / (V + min)
-    //   else:       S = delta / (2 - V - min)
-    //
-    // Hue formula (standard piecewise):
-    //   if r == V: H = ((g - b)/delta) mod 6
-    //   elif g == V: H = ((b - r)/delta) + 2
-    //   else: H = ((r - g)/delta) + 4
-    //   H /= 6  (to get 0..1)
-    //
-    // Note: ffmpeg expression parser uses `:` between params; single-quoted
-    // strings survive fine, but we do NOT embed any bare apostrophes.
-    //
-    // Everything below uses only addition, subtraction, multiplication,
-    // division, clip/clamp via `between()`, `if()`, `gte()`, `max()`, `min()`.
+/// Apply the qualifier to a single 0..1 RGB sample: matte alpha, secondary
+/// grade on the matched colour, blend back by alpha.
+///
+/// This is the one per-pixel definition shared by the Program Monitor pad
+/// probe (`apply_hsl_qualifier_to_rgba_buffer`) and the compiled LUT the
+/// export / bake pipelines use (`compile_hsl_qualifier_lut`), so preview and
+/// export cannot drift apart.
+pub fn apply_hsl_qualifier_rgb(q: &HslQualifier, r: f64, g: f64, b: f64) -> (f64, f64, f64) {
+    let alpha = hsl_qualifier_alpha(q, r, g, b);
+    if alpha <= 0.0 {
+        return (r, g, b);
+    }
+    blend_graded(q, r, g, b, alpha)
+}
 
-    // Smoothstep expression builder. edge0/edge1 are constants baked in.
-    // smoothstep(e0, e1, x) = clip((x-e0)/(e1-e0), 0, 1)^2 * (3 - 2*t)
-    // where t = clipped. We inline t twice; ugly but correct.
-    fn ss(e0: f64, e1: f64, x_expr: &str) -> String {
-        if (e1 - e0).abs() < 1e-9 {
-            return format!("gte({x},{e0})", x = x_expr, e0 = e0);
+/// Grid size of the compiled qualifier LUT (`HSL_LUT_SIZE³` entries).
+///
+/// The qualifier is a pure per-pixel colour map with no spatial term and no
+/// keyframes, so a 3D LUT represents it exactly at the grid points and ffmpeg
+/// interpolates between them. Pixels fully inside the window (alpha 1) and
+/// fully outside it (identity) reproduce the direct math to within an 8-bit
+/// rounding step; the only approximation is along the window's edge, where
+/// the membership ramp is interpolated across one grid cell (1/64 of the
+/// channel range at this size — about 1.5° of hue), which for a zero-softness
+/// window reads as a very slight feather. The `.cube` file is ~7 MB and ffmpeg
+/// loads it in well under a second; 129 would halve the edge width for an
+/// 8× larger file and was not worth it.
+pub const HSL_LUT_SIZE: usize = 65;
+
+/// Upper bound on compiled LUT files kept under the cache directory; the
+/// oldest are removed when a new one is written past this count.
+const HSL_LUT_CACHE_MAX_FILES: usize = 24;
+
+/// Compile the qualifier into a 3D LUT by sampling `apply_hsl_qualifier_rgb`
+/// on a `size³` grid (row-major, R varying fastest — the `.cube` order).
+pub fn compile_hsl_qualifier_lut(q: &HslQualifier, size: usize) -> CubeLut {
+    let size = size.max(2);
+    let denom = (size - 1) as f64;
+    let mut data = Vec::with_capacity(size * size * size);
+    for bi in 0..size {
+        let b = bi as f64 / denom;
+        for gi in 0..size {
+            let g = gi as f64 / denom;
+            for ri in 0..size {
+                let r = ri as f64 / denom;
+                let (nr, ng, nb) = apply_hsl_qualifier_rgb(q, r, g, b);
+                data.push([
+                    nr.clamp(0.0, 1.0) as f32,
+                    ng.clamp(0.0, 1.0) as f32,
+                    nb.clamp(0.0, 1.0) as f32,
+                ]);
+            }
         }
-        // Use st(31, clip(...)) so we don't re-evaluate the inner expr three times.
+    }
+    CubeLut {
+        size,
+        domain_min: [0.0; 3],
+        domain_max: [1.0; 3],
+        data,
+    }
+}
+
+/// Stable identity of a compiled LUT: SHA-256 over every field that changes
+/// the output plus the grid size. Doubles as the cache file name, so the same
+/// qualifier on any clip, in any session, resolves to the same file.
+pub fn hsl_qualifier_lut_key(q: &HslQualifier, size: usize) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(
         format!(
-            "(if(lt({x},{e0}),0,if(gt({x},{e1}),1,st(31,({x}-{e0})/({span}))*ld(31)*(3-2*ld(31)))))",
-            x = x_expr,
-            e0 = e0,
-            e1 = e1,
-            span = (e1 - e0),
+            "hslq-v1|{size}|{:.6}|{:.6}|{:.6}|{:.6}|{:.6}|{:.6}|{:.6}|{:.6}|{:.6}|{}|{:.6}|{:.6}|{:.6}",
+            q.hue_min,
+            q.hue_max,
+            q.hue_softness,
+            q.sat_min,
+            q.sat_max,
+            q.sat_softness,
+            q.lum_min,
+            q.lum_max,
+            q.lum_softness,
+            q.invert as u8,
+            q.brightness,
+            q.contrast,
+            q.saturation,
         )
-    }
+        .as_bytes(),
+    );
+    format!("{:x}", hasher.finalize())
+}
 
-    // Range membership (low smoothstep × high smoothstep).
-    fn range(min: f64, max: f64, soft: f64, x_expr: &str) -> String {
-        if min >= max {
-            return "0".to_string();
+/// `$XDG_CACHE_HOME/ultimateslice/hsl_luts/` — where compiled qualifier LUTs
+/// live.
+pub fn hsl_qualifier_lut_cache_dir() -> PathBuf {
+    crate::media::cache_support::cache_root_dir("hsl_luts")
+}
+
+/// Return the path of the compiled `.cube` for `q` in `dir`, writing it on
+/// first use (`export::build_hsl_qualifier_filter` passes the cache directory
+/// from `hsl_qualifier_lut_cache_dir`, with the system temp dir as fallback).
+///
+/// The file is written to a temporary name and renamed into place so a
+/// concurrent export never reads a half-written LUT; an existing file is
+/// reused untouched apart from refreshing its modification time, which is
+/// what the size-capped pruning orders on.
+pub fn ensure_hsl_qualifier_lut_file_in(
+    dir: &Path,
+    q: &HslQualifier,
+    size: usize,
+) -> Result<PathBuf, String> {
+    let key = hsl_qualifier_lut_key(q, size);
+    let path = dir.join(format!("hslq-{key}.cube"));
+    if crate::media::cache_support::file_has_content(&path.to_string_lossy()) {
+        if let Ok(file) = std::fs::File::options().append(true).open(&path) {
+            let _ = file.set_modified(std::time::SystemTime::now());
         }
-        let lo = ss(min - soft, min + soft, x_expr);
-        let hi = ss(max - soft, max + soft, x_expr);
-        format!("({lo}*(1-{hi}))", lo = lo, hi = hi)
+        return Ok(path);
     }
+    std::fs::create_dir_all(dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
+    let lut = compile_hsl_qualifier_lut(q, size);
+    let tmp = dir.join(format!("hslq-{key}.{}.tmp", std::process::id()));
+    lut.write_cube_file(&tmp)?;
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        format!("failed to move {} into place: {e}", path.display())
+    })?;
+    prune_hsl_lut_cache(dir, HSL_LUT_CACHE_MAX_FILES);
+    Ok(path)
+}
 
-    // Hue is either a plain range or a wraparound range.
-    let hue_expr = if hmin <= 0.0 && hmax >= 1.0 {
-        "1".to_string()
-    } else if hmin < hmax {
-        range(hmin, hmax, hsoft, "ld(8)")
-    } else {
-        // Wraparound.
-        let a = range(hmin, 1.0, hsoft, "ld(8)");
-        let b = range(0.0, hmax, hsoft, "ld(8)");
-        format!("max({a},{b})", a = a, b = b)
+/// Delete the oldest `hslq-*.cube` files in `dir` beyond `keep`. Best effort;
+/// errors are ignored because the cache is purely an accelerator.
+fn prune_hsl_lut_cache(dir: &Path, keep: usize) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
     };
-    let sat_expr = if smin <= 0.0 && smax >= 1.0 {
-        "1".to_string()
-    } else {
-        range(smin, smax, ssoft, "ld(7)")
-    };
-    let lum_expr = if lmin <= 0.0 && lmax >= 1.0 {
-        "1".to_string()
-    } else {
-        range(lmin, lmax, lsoft, "ld(6)")
-    };
-
-    // RGB → V, min, delta, L, S, H into stored vars.
-    // We pack all setup into a single expression using nested st().
-    let setup = concat!(
-        "st(0,r(X,Y)/255)",
-        "+st(1,g(X,Y)/255)",
-        "+st(2,b(X,Y)/255)",
-        "+st(3,max(ld(0),max(ld(1),ld(2))))",
-        "+st(4,min(ld(0),min(ld(1),ld(2))))",
-        "+st(5,ld(3)-ld(4))",
-        "+st(6,(ld(3)+ld(4))/2)",
-        "+st(7,if(lt(ld(5),0.0001),0,if(lt(ld(6),0.5),ld(5)/(ld(3)+ld(4)+0.0001),ld(5)/(2-ld(3)-ld(4)+0.0001))))",
-        // Hue (0..1): branch on which channel is max.
-        "+st(8,if(lt(ld(5),0.0001),0,",
-        "if(gte(ld(0),ld(3)),", // r is max
-        "(ld(1)-ld(2))/(ld(5)*6)+if(lt(ld(1),ld(2)),1,0),",
-        "if(gte(ld(1),ld(3)),", // g is max
-        "(ld(2)-ld(0))/(ld(5)*6)+2/6,",
-        "(ld(0)-ld(1))/(ld(5)*6)+4/6))))",
-    );
-
-    // Final alpha = H * S * L membership (each as stored var so big expr
-    // doesn't blow up). Invert handled last.
-    let mut alpha_expr = format!(
-        "({setup}+st(9,({h})*({s})*({l}))+0*ld(9)+ld(9))",
-        setup = setup,
-        h = hue_expr,
-        s = sat_expr,
-        l = lum_expr,
-    );
-    if invert {
-        alpha_expr = format!("(1-{inner})", inner = alpha_expr);
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().map(|x| x == "cube").unwrap_or(false)
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with("hslq-"))
+                    .unwrap_or(false)
+        })
+        .filter_map(|p| {
+            let modified = std::fs::metadata(&p).and_then(|m| m.modified()).ok()?;
+            Some((modified, p))
+        })
+        .collect();
+    if files.len() <= keep {
+        return;
     }
-    alpha_expr
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in files.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 #[cfg(test)]
@@ -375,6 +412,280 @@ mod tests {
 
     fn approx(a: f64, b: f64, eps: f64) -> bool {
         (a - b).abs() < eps
+    }
+
+    fn sample_qualifier() -> HslQualifier {
+        HslQualifier {
+            enabled: true,
+            hue_min: 200.0,
+            hue_max: 260.0,
+            hue_softness: 10.0,
+            sat_min: 0.2,
+            sat_max: 1.0,
+            sat_softness: 0.05,
+            lum_min: 0.1,
+            lum_max: 0.9,
+            lum_softness: 0.05,
+            brightness: 0.1,
+            contrast: 1.2,
+            saturation: 0.6,
+            ..HslQualifier::default()
+        }
+    }
+
+    /// Deterministic byte stream (LCG) so the parity sweep is reproducible
+    /// without pulling in a random-number crate.
+    fn lcg_bytes(n: usize) -> Vec<u8> {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        (0..n)
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (state >> 56) as u8
+            })
+            .collect()
+    }
+
+    /// Max and mean absolute 8-bit error of the compiled LUT (trilinear, as
+    /// ffmpeg's `lut3d=interp=trilinear` and `CubeLut::apply_rgb` both do)
+    /// against the direct per-pixel math over a fixed pseudo-random sweep.
+    fn lut_error(q: &HslQualifier, size: usize, pixels: usize) -> (i32, f64, f64) {
+        let lut = compile_hsl_qualifier_lut(q, size);
+        let bytes = lcg_bytes(pixels * 3);
+        let mut max_err = 0i32;
+        let mut sum = 0i64;
+        let mut over_two = 0usize;
+        let mut worst = (0u8, 0u8, 0u8, [0i32; 3], (0u8, 0u8, 0u8));
+        for px in bytes.chunks(3) {
+            let (r, g, b) = (px[0], px[1], px[2]);
+            let (er, eg, eb) =
+                apply_hsl_qualifier_rgb(q, r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+            let expect = [
+                (er * 255.0).round() as i32,
+                (eg * 255.0).round() as i32,
+                (eb * 255.0).round() as i32,
+            ];
+            let (lr, lg, lb) = lut.apply_rgb(r, g, b);
+            let mut px_max = 0;
+            for (e, l) in expect.iter().zip([lr as i32, lg as i32, lb as i32]) {
+                let d = (e - l).abs();
+                px_max = px_max.max(d);
+                sum += d as i64;
+            }
+            if px_max > 2 {
+                over_two += 1;
+            }
+            if px_max > max_err {
+                max_err = px_max;
+                worst = (r, g, b, expect, (lr, lg, lb));
+            }
+        }
+        eprintln!(
+            "lut@{size}: {over_two}/{pixels} samples differ by >2; worst in={:?} direct={:?} lut={:?}",
+            (worst.0, worst.1, worst.2),
+            worst.3,
+            worst.4
+        );
+        (
+            max_err,
+            sum as f64 / (pixels * 3) as f64,
+            over_two as f64 / pixels as f64,
+        )
+    }
+
+    /// Exact-match check for a pixel that is well inside or well outside the
+    /// qualifier window (the LUT only approximates along the edge).
+    fn assert_lut_exact(q: &HslQualifier, lut: &CubeLut, rgb: (u8, u8, u8)) {
+        let (r, g, b) = rgb;
+        let (er, eg, eb) =
+            apply_hsl_qualifier_rgb(q, r as f64 / 255.0, g as f64 / 255.0, b as f64 / 255.0);
+        let expect = [
+            (er * 255.0).round() as i32,
+            (eg * 255.0).round() as i32,
+            (eb * 255.0).round() as i32,
+        ];
+        let (lr, lg, lb) = lut.apply_rgb(r, g, b);
+        let got = [lr as i32, lg as i32, lb as i32];
+        for ch in 0..3 {
+            assert!(
+                (expect[ch] - got[ch]).abs() <= 1,
+                "{rgb:?}: direct {expect:?} vs lut {got:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compiled_lut_matches_direct_math_for_soft_qualifier() {
+        let q = sample_qualifier();
+        let lut = compile_hsl_qualifier_lut(&q, HSL_LUT_SIZE);
+        assert_eq!(lut.data.len(), HSL_LUT_SIZE * HSL_LUT_SIZE * HSL_LUT_SIZE);
+        let (max_err, mean_err, over_two) = lut_error(&q, HSL_LUT_SIZE, 20_000);
+        eprintln!("soft qualifier @{HSL_LUT_SIZE}: max {max_err} mean {mean_err:.3}");
+        assert!(
+            mean_err < 0.1,
+            "mean 8-bit error {mean_err:.3} (max {max_err})"
+        );
+        assert!(
+            over_two < 0.01,
+            "{:.2}% of samples off by >2",
+            over_two * 100.0
+        );
+        // Deep inside the window (blue, saturated, mid luminance) and far
+        // outside it (red, green, grey) the LUT is exact.
+        for rgb in [
+            (40, 80, 230),
+            (20, 120, 240),
+            (230, 40, 40),
+            (40, 230, 40),
+            (128, 128, 128),
+        ] {
+            assert_lut_exact(&q, &lut, rgb);
+        }
+    }
+
+    #[test]
+    fn compiled_lut_stays_close_for_hard_edged_qualifier() {
+        // Zero softness is the worst case for any interpolated LUT: the
+        // membership steps from 0 to 1 inside a single grid cell. Only pixels
+        // right at the window edge can differ, and the sweep keeps the mean
+        // error well below a single 8-bit step.
+        let q = HslQualifier {
+            hue_softness: 0.0,
+            sat_softness: 0.0,
+            lum_softness: 0.0,
+            ..sample_qualifier()
+        };
+        let (max_err, mean_err, over_two) = lut_error(&q, HSL_LUT_SIZE, 20_000);
+        eprintln!("hard qualifier @{HSL_LUT_SIZE}: max {max_err} mean {mean_err:.3}");
+        assert!(
+            mean_err < 0.3,
+            "mean 8-bit error {mean_err:.3} (max {max_err})"
+        );
+        assert!(
+            over_two < 0.03,
+            "{:.2}% of samples off by >2",
+            over_two * 100.0
+        );
+        let lut = compile_hsl_qualifier_lut(&q, HSL_LUT_SIZE);
+        for rgb in [
+            (40, 80, 230),
+            (20, 120, 240),
+            (230, 40, 40),
+            (40, 230, 40),
+            (128, 128, 128),
+        ] {
+            assert_lut_exact(&q, &lut, rgb);
+        }
+    }
+
+    #[test]
+    fn compiled_lut_grid_points_are_exact() {
+        // At the grid points the LUT is the direct math by construction, so
+        // inputs that land exactly on a node must round-trip bit-exact.
+        let q = sample_qualifier();
+        let size = 5;
+        let lut = compile_hsl_qualifier_lut(&q, size);
+        for (i, entry) in lut.data.iter().enumerate() {
+            let ri = i % size;
+            let gi = (i / size) % size;
+            let bi = i / (size * size);
+            let d = (size - 1) as f64;
+            let (r, g, b) =
+                apply_hsl_qualifier_rgb(&q, ri as f64 / d, gi as f64 / d, bi as f64 / d);
+            assert!(
+                approx(entry[0] as f64, r, 1e-6)
+                    && approx(entry[1] as f64, g, 1e-6)
+                    && approx(entry[2] as f64, b, 1e-6)
+            );
+        }
+    }
+
+    #[test]
+    fn neutral_qualifier_compiles_to_identity() {
+        let q = HslQualifier {
+            enabled: true,
+            ..HslQualifier::default()
+        };
+        let size = 9;
+        let lut = compile_hsl_qualifier_lut(&q, size);
+        let d = (size - 1) as f32;
+        for (i, entry) in lut.data.iter().enumerate() {
+            let ri = (i % size) as f32 / d;
+            let gi = ((i / size) % size) as f32 / d;
+            let bi = (i / (size * size)) as f32 / d;
+            assert!(approx(entry[0] as f64, ri as f64, 1e-6), "r at {i}");
+            assert!(approx(entry[1] as f64, gi as f64, 1e-6), "g at {i}");
+            assert!(approx(entry[2] as f64, bi as f64, 1e-6), "b at {i}");
+        }
+    }
+
+    #[test]
+    fn lut_key_is_stable_and_parameter_sensitive() {
+        let q = sample_qualifier();
+        let a = hsl_qualifier_lut_key(&q, HSL_LUT_SIZE);
+        let b = hsl_qualifier_lut_key(&q.clone(), HSL_LUT_SIZE);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64);
+        let mut q2 = q.clone();
+        q2.saturation = 0.61;
+        assert_ne!(a, hsl_qualifier_lut_key(&q2, HSL_LUT_SIZE));
+        let mut q3 = q.clone();
+        q3.invert = true;
+        assert_ne!(a, hsl_qualifier_lut_key(&q3, HSL_LUT_SIZE));
+        assert_ne!(a, hsl_qualifier_lut_key(&q, 33));
+        // Preview-only debug state must not change the compiled output.
+        let mut q4 = q.clone();
+        q4.view_mask = true;
+        assert_eq!(a, hsl_qualifier_lut_key(&q4, HSL_LUT_SIZE));
+    }
+
+    #[test]
+    fn ensure_lut_file_writes_once_and_round_trips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let q = sample_qualifier();
+        let first = ensure_hsl_qualifier_lut_file_in(dir.path(), &q, 9).expect("write");
+        assert!(first.exists());
+        assert!(first.to_string_lossy().ends_with(".cube"));
+        let second = ensure_hsl_qualifier_lut_file_in(dir.path(), &q, 9).expect("reuse");
+        assert_eq!(first, second);
+        let files: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().collect();
+        assert_eq!(files.len(), 1, "no temp files or duplicates left behind");
+        let parsed = CubeLut::from_file(&first).expect("parse back");
+        assert_eq!(parsed.size, 9);
+        // The .cube text carries six decimals, so compare within that.
+        let expect = compile_hsl_qualifier_lut(&q, 9);
+        assert_eq!(parsed.data.len(), expect.data.len());
+        for (a, b) in parsed.data.iter().zip(&expect.data) {
+            for ch in 0..3 {
+                assert!(approx(a[ch] as f64, b[ch] as f64, 1e-6), "{a:?} vs {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn ensure_lut_file_fails_cleanly_when_dir_is_a_file() {
+        let file = tempfile::NamedTempFile::new().expect("tempfile");
+        let err = ensure_hsl_qualifier_lut_file_in(file.path(), &sample_qualifier(), 3)
+            .expect_err("a file cannot be the cache directory");
+        assert!(err.contains("failed to create"), "{err}");
+    }
+
+    #[test]
+    fn lut_cache_is_capped() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for i in 0..(HSL_LUT_CACHE_MAX_FILES + 8) {
+            let q = HslQualifier {
+                brightness: 0.001 * i as f64,
+                ..sample_qualifier()
+            };
+            ensure_hsl_qualifier_lut_file_in(dir.path(), &q, 3).expect("write");
+        }
+        let count = std::fs::read_dir(dir.path()).unwrap().flatten().count();
+        assert!(
+            count <= HSL_LUT_CACHE_MAX_FILES,
+            "{count} files kept, cap is {HSL_LUT_CACHE_MAX_FILES}"
+        );
     }
 
     #[test]
@@ -567,37 +878,6 @@ mod tests {
         apply_hsl_qualifier_to_rgba_buffer(&q, &mut buf, 1, 1);
         // Full-open qualifier with +0.5 brightness → pixel should move toward 0.5 (~128).
         assert!(buf[0] >= 120 && buf[0] <= 135, "r={}", buf[0]);
-    }
-
-    #[test]
-    fn geq_alpha_expression_is_non_empty_and_escaped() {
-        let mut q = HslQualifier::default();
-        q.enabled = true;
-        q.hue_min = 30.0;
-        q.hue_max = 90.0;
-        q.hue_softness = 5.0;
-        q.sat_min = 0.2;
-        q.sat_max = 0.9;
-        q.lum_min = 0.1;
-        q.lum_max = 0.8;
-        let expr = build_hsl_qualifier_geq_alpha(&q);
-        assert!(!expr.is_empty());
-        // No bare apostrophes — they'd break the filter string.
-        assert!(!expr.contains('\''));
-        // Sanity: references the HSL stored vars we set up.
-        assert!(expr.contains("ld(6)"));
-        assert!(expr.contains("ld(7)"));
-        assert!(expr.contains("ld(8)"));
-        assert!(expr.contains("r(X,Y)"));
-    }
-
-    #[test]
-    fn geq_alpha_expression_invert_wraps_with_one_minus() {
-        let mut q = HslQualifier::default();
-        q.enabled = true;
-        q.invert = true;
-        let expr = build_hsl_qualifier_geq_alpha(&q);
-        assert!(expr.starts_with("(1-"));
     }
 
     #[test]
