@@ -73,7 +73,7 @@ Bins are saved with your project and restored when you reopen it.
 - When the current query matches spoken content, matching clips show a short **Spoken:** hint on the card and the tooltip includes the matched transcript excerpt plus the clip's transcript-segment count.
 - When the current query matches a visual embedding, matching clips show a short **Visual:** hint on the card and the tooltip includes the closest matching frame time from that clip.
 - If **Preferences → Models → AI index in background** is enabled, eligible audio-backed items can be queued for transcript indexing and eligible video/still-image items can be queued for visual-search embedding generation after import/open. If **Preferences → Models → Auto-tag visual media** is also enabled, clips with visual embeddings are then queued for persistent contextual auto-tagging. Both preferences are disabled by default.
-- The preferred visual-search model install location is `~/.local/share/ultimateslice/models/clip-search/` containing `image_encoder.onnx`, `text_encoder.onnx`, and `tokenizer.json`. Alternate directory names `clip_search/`, `clip-vit/`, and `clip_vit/` are also accepted.
+- The preferred visual-search model install location is `~/.local/share/ultimateslice/models/clip-search/` containing `image_encoder.onnx`, `text_encoder.onnx`, and `tokenizer.json`. Alternate directory names `clip_search/`, `clip-vit/`, and `clip_vit/` are also accepted, as are the file names of the Hugging Face ONNX export (`vision_model.onnx`, `text_model.onnx`). A known-good set is the `Xenova/clip-vit-base-patch32` repository on Hugging Face: download `onnx/vision_model.onnx`, `onnx/text_model.onnx` and `tokenizer.json` (about 600 MB) into that folder and restart; the models are picked up without any further configuration. With it installed, searches like *camping outdoors* or *a hand washing a potato on a steel table* return visual moments at the matching frames.
 - Use the **type** dropdown to focus on video, audio, images, or offline clips.
 - Use the **size** dropdown to narrow the current browser scope to SD-or-smaller, HD, Full HD, or 4K+ media.
 - Use the **FPS** dropdown to narrow the current browser scope to 24 fps-or-less, 25-30 fps, 31-59 fps, or 60+ fps clips.
@@ -82,6 +82,33 @@ Bins are saved with your project and restored when you reopen it.
   - inside a bin, they filter that bin's items
   - in **All Media**, they filter the flat project-wide media view
   - bins themselves remain visible so navigation still works while filters are active
+
+## Find the Moment
+
+Type in the filter field and a **Moments** strip appears under it: not just
+which clips match, but *where*. Each row is one place inside a clip that
+matches what you typed — a spoken line from the clip's transcript, a visual
+frame that looks like your words (when the CLIP search model is installed), a
+keyword range you drew, or an auto-tag's best frame — with a keyframe
+thumbnail, the clip name and time range, the matched text in bold, and a
+small label saying which signal found it. Whole-clip matches on the file
+name or path are listed last. The strip shows the twelve best moments
+across the whole library, best first.
+
+- **Select** a row to load that moment into the Source Monitor with In and
+  Out set around it, ready for `,` (insert) or `.` (overwrite).
+- **Enter**, double-click or **Go to** seeks the timeline to the moment when
+  that clip is on the timeline (speed changes are honoured); otherwise it
+  opens in the Source Monitor.
+- **Mark** adds a timeline marker at the moment, labelled with the matched
+  text (at the playhead when the clip is not on the timeline).
+- **Insert** edits the moment in at the playhead.
+
+Transcripts come from **Generate Subtitles** (and from *AI index in
+background* when enabled); visual moments need the CLIP search model under
+`~/.local/share/ultimateslice/models/clip-search/`. Automation gets the same
+ranking from the `search_moments` MCP tool and the same three actions from
+`jump_to_moment`.
 
 ## Ratings and Keyword Ranges
 

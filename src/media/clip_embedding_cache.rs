@@ -294,6 +294,68 @@ pub(crate) fn best_visual_frame_match(
     })
 }
 
+/// Highest cosine similarity of any sampled frame to `query_embedding`
+/// (diagnostics; no threshold applied).
+pub(crate) fn best_visual_similarity(
+    query_embedding: &[f32],
+    embedding: &MediaVisualEmbedding,
+) -> Option<f32> {
+    embedding
+        .frames
+        .iter()
+        .filter_map(|frame| cosine_similarity(query_embedding, &frame.embedding))
+        .filter(|s| s.is_finite())
+        .max_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+}
+
+/// Every sampled frame whose similarity to `query_embedding` clears the
+/// match threshold, best first, at most `max_results`, and never two within
+/// `min_gap_ns` of each other (the earlier-ranked frame wins) — the per-frame
+/// counterpart of `best_visual_frame_match` for "find the moment" results.
+pub(crate) fn visual_frame_matches(
+    query_embedding: &[f32],
+    embedding: &MediaVisualEmbedding,
+    max_results: usize,
+    min_gap_ns: u64,
+) -> Vec<VisualSearchMatch> {
+    if query_embedding.is_empty() || max_results == 0 {
+        return Vec::new();
+    }
+    let mut scored: Vec<(f32, u64)> = embedding
+        .frames
+        .iter()
+        .filter_map(|frame| {
+            let similarity = cosine_similarity(query_embedding, &frame.embedding)?;
+            (similarity.is_finite() && similarity >= VISUAL_MATCH_THRESHOLD)
+                .then_some((similarity, frame.time_ns))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let mut out: Vec<VisualSearchMatch> = Vec::new();
+    for (similarity, time_ns) in scored {
+        if out.len() >= max_results {
+            break;
+        }
+        let too_close = out.iter().any(|m| {
+            m.best_frame_time_ns
+                .map(|t| t.abs_diff(time_ns) < min_gap_ns)
+                .unwrap_or(false)
+        });
+        if too_close {
+            continue;
+        }
+        let score = (480.0 + (similarity - VISUAL_MATCH_THRESHOLD) * 620.0)
+            .round()
+            .clamp(480.0, 760.0) as i32;
+        out.push(VisualSearchMatch {
+            score,
+            similarity,
+            best_frame_time_ns: Some(time_ns),
+        });
+    }
+    out
+}
+
 #[derive(Clone, Debug)]
 struct ClipSearchModelPaths {
     image_encoder: PathBuf,
@@ -690,7 +752,13 @@ impl TextSearchEncoder {
         if let Some(cached) = self.cached_queries.get(query) {
             return cached.clone();
         }
-        let encoded = self.encode_query_inner(query).ok();
+        let encoded = match self.encode_query_inner(query) {
+            Ok(embedding) => Some(embedding),
+            Err(err) => {
+                log::warn!("CLIP text query {query:?} failed: {err}");
+                None
+            }
+        };
         self.cached_queries
             .insert(query.to_string(), encoded.clone());
         encoded
@@ -719,13 +787,25 @@ impl TextSearchEncoder {
         let attention_mask = Array2::<i64>::from_shape_vec((1, attn_mask.len()), attn_mask)
             .map_err(|err| err.to_string())?;
 
-        let outputs = self
+        // Exports differ: the Hugging Face / transformers.js CLIP text model
+        // takes `input_ids` only, others also declare `attention_mask`. Feed
+        // exactly the inputs the graph declares or ORT rejects the run.
+        let wants_mask = self
             .session
-            .run(ort::inputs![
+            .inputs()
+            .iter()
+            .any(|input| input.name() == "attention_mask");
+        let outputs = if wants_mask {
+            self.session.run(ort::inputs![
                 "input_ids" => TensorRef::from_array_view(&input_ids).map_err(|err| err.to_string())?,
                 "attention_mask" => TensorRef::from_array_view(&attention_mask).map_err(|err| err.to_string())?
             ])
-            .map_err(|err| format!("CLIP text encoder run failed: {err}"))?;
+        } else {
+            self.session.run(ort::inputs![
+                "input_ids" => TensorRef::from_array_view(&input_ids).map_err(|err| err.to_string())?
+            ])
+        }
+        .map_err(|err| format!("CLIP text encoder run failed: {err}"))?;
         extract_embedding_tensor(
             &outputs,
             &[
@@ -756,6 +836,10 @@ fn encode_text_query(query: &str) -> Option<Vec<f32>> {
             .map(|current| current.model_signature != model_paths.signature)
             .unwrap_or(true);
         if needs_reload {
+            log::info!(
+                "CLIP text encoder: loading {}",
+                model_paths.text_encoder.display()
+            );
             *encoder = TextSearchEncoder::load(&model_paths).ok();
         }
         encoder.as_mut()?.encode_query(query)
@@ -770,6 +854,40 @@ fn encode_text_query(_query: &str) -> Option<Vec<f32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn visual_frame_matches_rank_spread_and_cap() {
+        let frame = |t: u64, e: [f32; 2]| MediaVisualEmbeddingFrame {
+            time_ns: t,
+            embedding: e.to_vec(),
+        };
+        let embedding = MediaVisualEmbedding {
+            model_id: "test".into(),
+            frames: vec![
+                frame(0, [1.0, 0.0]),
+                frame(1_000_000_000, [0.95, 0.31]),
+                frame(10_000_000_000, [0.7, 0.7]),
+                frame(20_000_000_000, [0.0, 1.0]),
+                frame(30_000_000_000, [0.9, 0.44]),
+            ],
+        };
+        let query = [1.0f32, 0.0];
+        let all = visual_frame_matches(&query, &embedding, 10, 0);
+        // Frames at 20 s (orthogonal) is below threshold; the rest are
+        // ranked best first.
+        let times: Vec<u64> = all.iter().filter_map(|m| m.best_frame_time_ns).collect();
+        assert_eq!(
+            times,
+            vec![0, 1_000_000_000, 30_000_000_000, 10_000_000_000]
+        );
+        assert!(all[0].score >= all[1].score && all[1].score >= all[2].score);
+        // A 3 s gap drops the 1 s frame (too close to the 0 s winner).
+        let spread = visual_frame_matches(&query, &embedding, 10, 3_000_000_000);
+        let times: Vec<u64> = spread.iter().filter_map(|m| m.best_frame_time_ns).collect();
+        assert_eq!(times, vec![0, 30_000_000_000, 10_000_000_000]);
+        assert_eq!(visual_frame_matches(&query, &embedding, 2, 0).len(), 2);
+        assert!(visual_frame_matches(&[], &embedding, 2, 0).is_empty());
+    }
 
     #[test]
     fn representative_frame_times_cover_middle_of_clip() {

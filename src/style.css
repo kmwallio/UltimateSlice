@@ -995,6 +995,43 @@ expander > title {
 }
 
 /* Command palette (Ctrl+Shift+P) */
+.media-moments {
+    margin-top: 2px;
+    padding: 4px 6px;
+    border: 1px solid @bg_hover;
+    border-radius: 6px;
+    background: @bg1;
+}
+.media-moments-header {
+    color: @text_dim;
+    font-size: 0.85em;
+    margin-bottom: 2px;
+}
+.media-moments-list row {
+    padding: 3px 4px;
+    border-radius: 4px;
+}
+.media-moments-list row:selected {
+    background: @accent;
+}
+.moment-title {
+    font-size: 0.9em;
+}
+.moment-excerpt {
+    color: @text_dim;
+    font-size: 0.82em;
+}
+.moment-kind {
+    color: @text_dim;
+    font-size: 0.72em;
+    font-style: italic;
+    padding: 0 4px;
+}
+.moment-btn {
+    padding: 1px 6px;
+    font-size: 0.8em;
+    min-height: 0;
+}
 .command-palette {
     background: @bg1;
     border: 1px solid @bg_hover;
@@ -1015,6 +1052,16 @@ expander > title {
 .command-palette .cmd-category {
     color: @text_dim;
     font-size: 0.85em;
+}
+.command-palette .cmd-detail {
+    color: @text_dim;
+    font-size: 0.8em;
+}
+.command-palette .cmd-recent {
+    color: @text_dim;
+    font-size: 0.75em;
+    font-style: italic;
+    padding: 1px 6px;
 }
 .command-palette .cmd-shortcut {
     color: @text_dim;

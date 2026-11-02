@@ -89,6 +89,7 @@ pub(crate) struct McpCallbacks<'a> {
     pub apply_program_monitor_ab_midline: &'a Rc<dyn Fn(f64)>,
     pub apply_program_monitor_ab_reference: &'a Rc<dyn Fn(Option<String>)>,
     pub refresh_reference_stills: &'a Rc<dyn Fn()>,
+    pub on_moment_action: &'a Rc<dyn Fn(crate::ui::media_browser::MomentAction)>,
 }
 
 /// Everything `handle_mcp_command` needs from the main window, bundled so the
@@ -114,6 +115,7 @@ pub(crate) struct McpCtx<'a> {
     pub clear_media_browser_on_next_reload: &'a Rc<Cell<bool>>,
     pub keymap: &'a Rc<RefCell<crate::keybindings::Keymap>>,
     pub action_map: &'a Rc<RefCell<crate::keybindings::ActionMap>>,
+    pub palette_registry: &'a Rc<RefCell<crate::ui::command_palette::CommandRegistry>>,
     pub callbacks: McpCallbacks<'a>,
 }
 
@@ -155,6 +157,7 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
         clear_media_browser_on_next_reload,
         keymap,
         action_map,
+        palette_registry,
         callbacks:
             McpCallbacks {
                 on_close_preview,
@@ -172,6 +175,7 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
                 apply_program_monitor_ab_midline,
                 apply_program_monitor_ab_reference,
                 refresh_reference_stills,
+                on_moment_action,
             },
     } = ctx;
 
@@ -1262,6 +1266,52 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
                     "config_path": crate::keybindings::config_path().map(|p| p.display().to_string()),
                 }))
                 .ok();
+        }
+
+        McpCommand::ListPaletteCommands { reply } => {
+            let reg = palette_registry.borrow();
+            let commands: Vec<Value> = reg
+                .commands()
+                .iter()
+                .map(|c| {
+                    json!({
+                        "title": c.title,
+                        "category": c.category,
+                        "shortcut": c.shortcut,
+                        "detail": c.detail,
+                        "recent": reg.is_recent(&c.title),
+                    })
+                })
+                .collect();
+            reply
+                .send(json!({
+                    "count": commands.len(),
+                    "recent": reg.recent(),
+                    "commands": commands,
+                }))
+                .ok();
+        }
+
+        McpCommand::RunPaletteCommand { title, reply } => {
+            // Clone the handler out so no borrow is held while it runs
+            // (handlers open dialogs, re-dispatch MCP commands, or reopen
+            // the palette).
+            let resolved = palette_registry.borrow().resolve(&title);
+            match resolved {
+                None => {
+                    reply
+                        .send(json!({"success": false, "error": format!("no palette command matches '{title}' (see list_palette_commands)")}))
+                        .ok();
+                }
+                Some((matched, handler)) => {
+                    palette_registry.borrow_mut().record_use(&matched);
+                    // Reply first: MCP-tool entries defer their own dispatch to
+                    // the next main-loop iteration and some actions open modal
+                    // dialogs, so the caller must not wait on the handler.
+                    reply.send(json!({"success": true, "title": matched})).ok();
+                    handler();
+                }
+            }
         }
 
         McpCommand::TriggerAction { action_id, reply } => {
@@ -5415,6 +5465,105 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
                     }
                 }
             });
+        }
+
+        McpCommand::SearchMoments {
+            query,
+            limit,
+            reply,
+        } => {
+            let moments = crate::model::media_library::search_library_moments(
+                &library.borrow(),
+                &query,
+                limit.clamp(1, 200),
+            );
+            let proj = project.borrow();
+            let results: Vec<Value> = moments
+                .iter()
+                .map(|m| {
+                    let positions =
+                        proj.timeline_positions_for_source_time(&m.source_path, m.thumb_time_ns);
+                    json!({
+                        "item_id": m.item_id,
+                        "source_path": m.source_path,
+                        "display_name": m.display_name,
+                        "field": m.field,
+                        "score": m.score,
+                        "excerpt": m.excerpt,
+                        "source_in_ns": m.source_in_ns,
+                        "source_out_ns": m.source_out_ns,
+                        "thumb_time_ns": m.thumb_time_ns,
+                        "timeline_position_ns": positions.first().copied(),
+                        "timeline_positions_ns": positions,
+                    })
+                })
+                .collect();
+            reply
+                .send(json!({"query": query, "count": results.len(), "moments": results}))
+                .ok();
+        }
+
+        McpCommand::JumpToMoment {
+            source_path,
+            source_in_ns,
+            source_out_ns,
+            action,
+            label,
+            reply,
+        } => {
+            use crate::ui::media_browser::MomentAction;
+            let item = {
+                let lib = library.borrow();
+                lib.items
+                    .iter()
+                    .find(|i| i.source_path == source_path && i.has_backing_file())
+                    .cloned()
+            };
+            let Some(item) = item else {
+                reply
+                    .send(json!({"success": false, "error": format!("no library item with source_path '{source_path}'")}))
+                    .ok();
+                return;
+            };
+            let source_out_ns = source_out_ns.unwrap_or(source_in_ns).max(source_in_ns);
+            let moment = crate::model::media_library::MediaMoment {
+                item_id: item.id.clone(),
+                display_name: crate::model::media_library::media_display_name(&item),
+                duration_ns: item.duration_ns,
+                source_path: item.source_path.clone(),
+                field: crate::model::media_library::MediaSearchField::Keyword,
+                score: 0,
+                excerpt: label.unwrap_or_default(),
+                source_in_ns,
+                source_out_ns,
+                thumb_time_ns: source_in_ns,
+            };
+            let timeline_position_ns = project
+                .borrow()
+                .timeline_positions_for_source_time(&moment.source_path, moment.thumb_time_ns)
+                .first()
+                .copied();
+            let act = match action.trim().to_ascii_lowercase().as_str() {
+                "" | "goto" | "seek" | "go_to" => MomentAction::GoTo(moment),
+                "mark" | "marker" => MomentAction::Mark(moment),
+                "insert" => MomentAction::Insert(moment),
+                other => {
+                    reply
+                        .send(json!({"success": false, "error": format!("unknown action '{other}' (expected goto, mark or insert)")}))
+                        .ok();
+                    return;
+                }
+            };
+            let verb = act.verb();
+            on_moment_action(act);
+            reply
+                .send(json!({
+                    "success": true,
+                    "action": verb,
+                    "on_timeline": timeline_position_ns.is_some(),
+                    "timeline_position_ns": timeline_position_ns,
+                }))
+                .ok();
         }
 
         McpCommand::ListLibrary { search_text, reply } => {

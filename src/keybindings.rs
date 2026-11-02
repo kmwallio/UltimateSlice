@@ -876,6 +876,16 @@ pub const STATIC_SECTIONS: &[(&str, &str, &[(&str, &str)])] = &[
 
 #[cfg_attr(not(test), allow(dead_code))] // consumed by the docs-generation test
 pub const DOCS_NOTES: &str = "\
+## Command palette
+
+`Ctrl+Shift+P` opens a fuzzy-searchable list of everything the app can do. Type part of a name (`rip del` finds *Ripple Delete*), move with Up/Down, run with Enter, dismiss with Esc. Entries come from three places:
+
+- **Shortcut actions** — every rebindable action above, shown with its current key label.
+- **Toolbar** — header-bar buttons that have no shortcut action of their own.
+- **MCP** — every automation tool that needs no arguments (`Get Project Health`, `Capture Reference Still`, `Add Track`, `Run Export Queue`, …), with its description as a dimmed second line that the search also matches. A tool that returns a short status shows it as a toast; one that returns data (`List Tracks`, `Get Performance Snapshot`, `Get Preferences`, …) opens its JSON in a window with a **Copy** button. Tools that discard state without confirmation (`Create Project`, `Reset Shortcuts`, `Clear Export Queue`) are deliberately not listed.
+
+The last eight commands you ran are listed first while the search box is empty, tagged *recent*; the list is remembered across sessions in `~/.config/ultimateslice/palette-recent.json`. Automation can read the palette with the `list_palette_commands` MCP tool and run an entry by title with `run_palette_command`.
+
 ## Notes
 
 - **Customise**: Preferences → **Shortcuts** lists every rebindable action; click a shortcut and press the new key combination. Overrides are stored in `~/.config/ultimateslice/keybindings.json` (only actions that differ from the defaults), which can be exported, imported or deleted to reset.

@@ -1091,6 +1091,33 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "search_moments",
+            "description": "Find the moment: rank every in-clip match for a natural-language query across the Media Library — spoken transcript segments, CLIP visual frames, keyword ranges and auto-tag frames (whole-clip name/path hits rank last). Each result carries the source range, a representative frame time, an excerpt with the match in [brackets], and the timeline position(s) where that frame is currently used, if any.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string", "description": "What to look for, e.g. 'opens the tent' or 'everyone cheering'." },
+                    "limit": { "type": "integer", "description": "Maximum results (default 20, max 200)." }
+                },
+                "required": ["query"]
+            }
+        },
+        {
+            "name": "jump_to_moment",
+            "description": "Act on a moment (a source range of a library clip, e.g. a search_moments result) exactly as the Media Library's Moments strip does: 'goto' seeks the timeline to it when the clip is on the timeline (otherwise opens it in the Source Monitor with In/Out around it), 'mark' adds a timeline marker there (at the playhead when it is not on the timeline), 'insert' opens it in the Source Monitor and inserts it at the playhead.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source_path": { "type": "string", "description": "Absolute path of the library clip." },
+                    "source_in_ns": { "type": "integer", "description": "Start of the moment in source time (ns)." },
+                    "source_out_ns": { "type": "integer", "description": "End of the moment in source time (ns). Defaults to source_in_ns." },
+                    "action": { "type": "string", "enum": ["goto", "mark", "insert"], "description": "Default 'goto'." },
+                    "label": { "type": "string", "description": "Marker label for 'mark' (default: clip name and time)." }
+                },
+                "required": ["source_path", "source_in_ns"]
+            }
+        },
+        {
             "name": "list_library",
             "description": "List media-library items, or filter them by optional search text. Search text matches browser metadata, any stored speech-to-text transcript content, and any cached visual-search embeddings, and filtered results are returned in browser-style relevance order with match metadata.",
             "inputSchema": {
@@ -1361,6 +1388,22 @@ fn tools_list() -> Value {
                     "action_id": { "type": "string", "description": "Action id from list_actions, e.g. 'play_pause', 'add_marker', 'tool_razor'." }
                 },
                 "required": ["action_id"]
+            }
+        },
+        {
+            "name": "list_palette_commands",
+            "description": "List every command the Ctrl+Shift+P command palette offers (shortcut actions, toolbar buttons and argument-free MCP tools) with category, shortcut label, detail line and whether it is in the recent list.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "run_palette_command",
+            "description": "Run a command palette entry by title (exact, case-insensitive, else the best fuzzy match) exactly as selecting it in the palette would, including recording it as recent. Returns the title that was matched.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "description": "Command title from list_palette_commands, e.g. 'Get Project Health' or 'Razor tool'." }
+                },
+                "required": ["title"]
             }
         },
         {
@@ -2965,11 +3008,72 @@ fn cache_key(name: &str, args: &Value) -> String {
     format!("{name}\u{1f}{args_json}")
 }
 
-fn dispatch_tool_payload(
+/// A tool that can be called with no arguments (nothing `required` in its
+/// schema), as listed in the command palette.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZeroArgTool {
+    pub name: String,
+    pub description: String,
+}
+
+/// Tools the palette must not offer even though they take no arguments:
+/// they discard state without the confirmation the matching UI action has,
+/// or only make sense with their optional arguments.
+const PALETTE_EXCLUDED_TOOLS: &[&str] = &[
+    "batch_call_tools",
+    "create_project",
+    "reset_shortcuts",
+    "clear_export_queue",
+    "apply_script_assembly",
+    "set_program_monitor_timecode_burnin",
+    "set_program_monitor_ab_compare",
+    "list_palette_commands",
+    "run_palette_command",
+];
+
+/// Every tool with no required arguments, minus `PALETTE_EXCLUDED_TOOLS`,
+/// in `tools_list` order.
+pub fn zero_arg_tools() -> Vec<ZeroArgTool> {
+    let list = tools_list();
+    let Some(tools) = list.get("tools").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    tools
+        .iter()
+        .filter_map(|t| {
+            let name = t.get("name")?.as_str()?;
+            if PALETTE_EXCLUDED_TOOLS.contains(&name) {
+                return None;
+            }
+            let required = t
+                .get("inputSchema")
+                .and_then(|s| s.get("required"))
+                .and_then(Value::as_array)
+                .map(|r| !r.is_empty())
+                .unwrap_or(false);
+            if required {
+                return None;
+            }
+            Some(ZeroArgTool {
+                name: name.to_string(),
+                description: t
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Build the `McpCommand` for a tool call together with the receiver its
+/// reply arrives on. The command must then be handed to the main thread
+/// (`dispatch_tool_payload` sends it over the MCP channel; the command
+/// palette dispatches it in-process).
+pub fn build_tool_command(
     name: &str,
     args: &Value,
-    sender: &std::sync::mpsc::Sender<McpCommand>,
-) -> Result<Value, Value> {
+) -> Result<(McpCommand, std::sync::mpsc::Receiver<Value>), Value> {
     // Every tool call gets a dedicated one-shot reply channel.
     let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(1);
 
@@ -3512,6 +3616,26 @@ fn dispatch_tool_payload(
             reply: tx,
         },
 
+        "search_moments" => McpCommand::SearchMoments {
+            query: arg_str!(args, "query"),
+            limit: args.get("limit").and_then(Value::as_u64).unwrap_or(20) as usize,
+            reply: tx,
+        },
+        "jump_to_moment" => McpCommand::JumpToMoment {
+            source_path: arg_str!(args, "source_path"),
+            source_in_ns: arg_u64!(args, "source_in_ns", 0),
+            source_out_ns: args.get("source_out_ns").and_then(Value::as_u64),
+            action: args
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("goto")
+                .to_string(),
+            label: args
+                .get("label")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            reply: tx,
+        },
         "list_library" => McpCommand::ListLibrary {
             search_text: args
                 .get("search_text")
@@ -3847,6 +3971,11 @@ fn dispatch_tool_payload(
         "list_actions" => McpCommand::ListActions { reply: tx },
         "trigger_action" => McpCommand::TriggerAction {
             action_id: arg_str!(args, "action_id"),
+            reply: tx,
+        },
+        "list_palette_commands" => McpCommand::ListPaletteCommands { reply: tx },
+        "run_palette_command" => McpCommand::RunPaletteCommand {
+            title: arg_str!(args, "title"),
             reply: tx,
         },
         "set_shortcut" => McpCommand::SetShortcut {
@@ -4713,6 +4842,15 @@ fn dispatch_tool_payload(
             ))
         }
     };
+    Ok((cmd, rx))
+}
+
+fn dispatch_tool_payload(
+    name: &str,
+    args: &Value,
+    sender: &std::sync::mpsc::Sender<McpCommand>,
+) -> Result<Value, Value> {
+    let (cmd, rx) = build_tool_command(name, args)?;
 
     if sender.send(cmd).is_err() {
         return Err(tool_error_payload(-32603, "App main thread unavailable"));

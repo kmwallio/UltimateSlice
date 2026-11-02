@@ -16902,10 +16902,124 @@ pub fn build_window(
         let cb = on_replace_media_gui.clone();
         Rc::new(move |item_id: String| cb(ReplaceMediaTarget::LibraryItem(item_id)))
     };
+    // "Find the moment" actions from the Media Library's Moments strip (and
+    // the `jump_to_moment` MCP tool). A moment is a source range of a
+    // library clip; when that clip is on the timeline the range maps to a
+    // playhead position, otherwise the Source Monitor stands in.
+    let on_moment_action: Rc<dyn Fn(crate::ui::media_browser::MomentAction)> = {
+        let project = project.clone();
+        let timeline_state = timeline_state.clone();
+        let prog_player = prog_player.clone();
+        let on_source_selected = on_source_selected.clone();
+        let actions = actions.clone();
+        let on_project_changed = on_project_changed.clone();
+        let window = window.clone();
+        Rc::new(move |action| {
+            use crate::ui::media_browser::MomentAction;
+            let m = action.moment().clone();
+            let timeline_pos = project
+                .borrow()
+                .timeline_positions_for_source_time(&m.source_path, m.thumb_time_ns)
+                .first()
+                .copied();
+            let plain_excerpt: String = m
+                .excerpt
+                .chars()
+                .filter(|c| *c != '[' && *c != ']')
+                .collect();
+            let where_text = format!(
+                "{} at {}",
+                m.display_name,
+                crate::ui::media_browser::format_moment_time(m.thumb_time_ns)
+            );
+            match action {
+                MomentAction::GoTo(_) => {
+                    if let Some(pos) = timeline_pos {
+                        let visual_pos_ns = timeline_state.borrow_mut().set_playhead_visual(pos);
+                        let needs_async = prog_player.borrow_mut().seek(visual_pos_ns);
+                        if needs_async {
+                            let pp = prog_player.clone();
+                            glib::timeout_add_local_once(
+                                std::time::Duration::from_millis(500),
+                                move || pp.borrow().complete_playing_pulse(),
+                            );
+                        }
+                        show_window_status_toast(
+                            &window,
+                            &format!("Jumped to {where_text}"),
+                            ToastSeverity::Info,
+                        );
+                    } else {
+                        on_source_selected(
+                            m.source_path.clone(),
+                            m.duration_ns,
+                            Some((m.source_in_ns, m.source_out_ns.max(m.source_in_ns + 1))),
+                        );
+                        show_window_status_toast(
+                            &window,
+                            &format!(
+                                "{} is not on the timeline — opened in the Source Monitor",
+                                m.display_name
+                            ),
+                            ToastSeverity::Info,
+                        );
+                    }
+                }
+                MomentAction::Mark(_) => {
+                    let pos = timeline_pos
+                        .unwrap_or_else(|| timeline_state.borrow().editing_playhead_ns());
+                    let label = if plain_excerpt.trim().is_empty() {
+                        where_text.clone()
+                    } else {
+                        plain_excerpt.trim().to_string()
+                    };
+                    let marker = crate::model::project::Marker::new(pos, label.clone());
+                    {
+                        let mut st = timeline_state.borrow_mut();
+                        let mut p = project.borrow_mut();
+                        st.history
+                            .execute(Box::new(crate::undo::AddMarkerCommand { marker }), &mut p);
+                    }
+                    on_project_changed();
+                    show_window_status_toast(
+                        &window,
+                        &format!("Marker added: {label}"),
+                        ToastSeverity::Success,
+                    );
+                }
+                MomentAction::Insert(_) => {
+                    on_source_selected(
+                        m.source_path.clone(),
+                        m.duration_ns,
+                        Some((m.source_in_ns, m.source_out_ns.max(m.source_in_ns + 1))),
+                    );
+                    let handler = actions
+                        .borrow()
+                        .handler(crate::keybindings::ActionId::InsertAtPlayhead);
+                    let inserted = handler.map(|h| h()).unwrap_or(false);
+                    show_window_status_toast(
+                        &window,
+                        &if inserted {
+                            format!("Inserted {where_text} at the playhead")
+                        } else {
+                            format!("Could not insert {where_text}")
+                        },
+                        if inserted {
+                            ToastSeverity::Success
+                        } else {
+                            ToastSeverity::Warning
+                        },
+                    );
+                }
+            }
+        })
+    };
+
     let (browser, clear_media_selection, force_rebuild_media_browser) =
         media_browser::build_media_browser(
             library.clone(),
             on_source_selected.clone(),
+            on_moment_action.clone(),
             on_reverse_match_frame,
             on_relink_media_gui.clone(),
             on_replace_library_source,
@@ -21857,6 +21971,10 @@ pub fn build_window(
     }
 
     // ── MCP server (stdio + optional socket) ────────────────────────────
+    // Command palette registry (created here so the MCP dispatch context can
+    // reach it; filled after the shortcut registry below).
+    let palette_registry: Rc<RefCell<crate::ui::command_palette::CommandRegistry>> =
+        Rc::new(RefCell::new(crate::ui::command_palette::CommandRegistry::new()));
     {
         let mcp_receiver = mcp_receiver
             .borrow_mut()
@@ -21938,6 +22056,7 @@ pub fn build_window(
         let stt_cache = stt_cache.clone();
         let music_gen_cache = music_gen_cache.clone();
         let main_stack_for_mcp = main_stack.clone();
+        let palette_registry_for_mcp = palette_registry.clone();
         let window_weak = window.downgrade();
         let workspace_layout_pending_name_for_mcp = workspace_layout_pending_name.clone();
         let apply_program_monitor_ab_enabled_mcp = apply_program_monitor_ab_enabled.clone();
@@ -21950,6 +22069,7 @@ pub fn build_window(
         let background_render_state_for_mcp = background_render_state.clone();
         let keymap_for_mcp = keymap.clone();
         let actions_for_mcp = actions.clone();
+        let on_moment_action_for_mcp = on_moment_action.clone();
         MCP_MAIN_DISPATCH.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move |cmd| {
                 if let Some(win) = window_weak.upgrade() {
@@ -21986,6 +22106,7 @@ pub fn build_window(
                             clear_media_browser_on_next_reload: &clear_media_browser_on_next_reload,
                             keymap: &keymap_for_mcp,
                             action_map: &actions_for_mcp,
+                            palette_registry: &palette_registry_for_mcp,
                             callbacks: crate::ui::mcp_handler::McpCallbacks {
                                 on_close_preview: &on_close_preview,
                                 on_source_selected: &on_source_selected,
@@ -22007,6 +22128,7 @@ pub fn build_window(
                                 apply_program_monitor_ab_reference:
                                     &apply_program_monitor_ab_reference_mcp,
                                 refresh_reference_stills: &refresh_reference_stills_mcp,
+                                on_moment_action: &on_moment_action_for_mcp,
                             },
                         },
                     );
@@ -22103,8 +22225,6 @@ pub fn build_window(
     // ActionId; one Capture-phase resolver on the window (and on the
     // popped-out Program Monitor) maps key events through the user's keymap.
     // See src/keybindings.rs / docs/ARCHITECTURE.md "Keyboard shortcuts".
-    let palette_registry: Rc<RefCell<crate::ui::command_palette::CommandRegistry>> =
-        Rc::new(RefCell::new(crate::ui::command_palette::CommandRegistry::new()));
     {
         use crate::keybindings::ActionId;
         use std::cell::Cell;
@@ -22359,6 +22479,19 @@ pub fn build_window(
         // buttons that are not already covered by an action.
         register_action_commands(&palette_registry, &actions, &keymap);
         collect_header_commands(&header, &palette_registry);
+        register_mcp_tool_commands(&palette_registry, &window);
+        {
+            use crate::ui::command_palette::{
+                load_recent_from_path, recent_config_path, save_recent_to_path,
+            };
+            let mut reg = palette_registry.borrow_mut();
+            if let Some(path) = recent_config_path() {
+                reg.set_recent(load_recent_from_path(&path));
+                reg.set_persist(Rc::new(move |recent: &[String]| {
+                    save_recent_to_path(&path, recent);
+                }));
+            }
+        }
 
         crate::ui::key_dispatch::install_key_resolver(
             &window,
@@ -22547,6 +22680,92 @@ fn register_action_commands(
             }
         });
         reg.push(info.title, info.context.label(), shortcut.as_deref(), handler);
+    }
+}
+
+/// Register every argument-free MCP tool as an "MCP" palette command. The
+/// handler builds the same `McpCommand` the socket server would, dispatches
+/// it on the next main-loop iteration (so a palette command triggered from
+/// inside an MCP dispatch — `run_palette_command` — does not re-enter the
+/// dispatcher), then toasts a short status or opens the JSON result dialog.
+fn register_mcp_tool_commands(
+    registry: &Rc<RefCell<crate::ui::command_palette::CommandRegistry>>,
+    window: &gtk::ApplicationWindow,
+) {
+    use crate::ui::command_palette::{
+        humanize_tool_name, show_tool_result_dialog, summarize_tool_result,
+    };
+    let mut reg = registry.borrow_mut();
+    for tool in crate::mcp::server::zero_arg_tools() {
+        let title = humanize_tool_name(&tool.name);
+        if reg.has_title(&title) {
+            continue;
+        }
+        let name = tool.name.clone();
+        let title_for_handler = title.clone();
+        let window_weak = window.downgrade();
+        let handler: Rc<dyn Fn()> = Rc::new(move || {
+            let Some(win) = window_weak.upgrade() else {
+                return;
+            };
+            let title = title_for_handler.clone();
+            let (cmd, rx) =
+                match crate::mcp::server::build_tool_command(&name, &serde_json::json!({})) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        show_window_status_toast(
+                            &win,
+                            &format!("{title}: {e}"),
+                            ToastSeverity::Error,
+                        );
+                        return;
+                    }
+                };
+            glib::idle_add_local_once(move || {
+                MCP_MAIN_DISPATCH.with(|slot| {
+                    if let Some(dispatch) = slot.borrow_mut().as_mut() {
+                        dispatch(cmd);
+                    }
+                });
+                // Most handlers reply synchronously inside the dispatch; jobs
+                // that answer from a worker thread are polled for a while.
+                let started = std::time::Instant::now();
+                glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+                    match rx.try_recv() {
+                        Ok(result) => {
+                            match summarize_tool_result(&title, &result) {
+                                Some(Ok(msg)) => {
+                                    show_window_status_toast(&win, &msg, ToastSeverity::Success)
+                                }
+                                Some(Err(msg)) => {
+                                    show_window_status_toast(&win, &msg, ToastSeverity::Error)
+                                }
+                                None => show_tool_result_dialog(
+                                    win.upcast_ref::<gtk::Window>(),
+                                    &title,
+                                    &result,
+                                ),
+                            }
+                            glib::ControlFlow::Break
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty)
+                            if started.elapsed() < std::time::Duration::from_secs(60) =>
+                        {
+                            glib::ControlFlow::Continue
+                        }
+                        Err(_) => {
+                            show_window_status_toast(
+                                &win,
+                                &format!("{title}: no reply"),
+                                ToastSeverity::Warning,
+                            );
+                            glib::ControlFlow::Break
+                        }
+                    }
+                });
+            });
+        });
+        reg.push_with_detail(title, "MCP", None, tool.description.clone(), handler);
     }
 }
 

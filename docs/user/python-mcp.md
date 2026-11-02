@@ -53,6 +53,23 @@ python3 tools/mcp_call.py add_track '{"kind":"video"}'      # → {"index": 2, "
 python3 tools/mcp_call.py add_clip '{"source_path":"/path/b-roll.mp4","track_index":2,"timeline_start_ns":0,"source_in_ns":0,"source_out_ns":5000000000}'
 ```
 
+Drive the command palette (everything a user can reach with `Ctrl+Shift+P`,
+including the argument-free MCP tools) by title:
+
+```bash
+python3 tools/mcp_call.py list_palette_commands         # titles, categories, shortcuts, recent flags
+python3 tools/mcp_call.py run_palette_command '{"title":"Get Project Health"}'   # exact or fuzzy title
+```
+
+Find a moment by what is in the footage and act on it:
+
+```bash
+python3 tools/mcp_call.py search_moments '{"query":"opens the tent","limit":5}'
+# → moments with source_in_ns/source_out_ns, excerpt ("…[tent]…"), field (transcript/visual/…)
+#   and timeline_position_ns when that frame is on the timeline
+python3 tools/mcp_call.py jump_to_moment '{"source_path":"/path/clip.mp4","source_in_ns":20700000000,"source_out_ns":36660000000,"action":"mark","label":"tent"}'
+```
+
 ## Helper scripts for perf/FPS checks
 
 - `python3 tools/mcp_call.py <tool_name> '<json-args>'`

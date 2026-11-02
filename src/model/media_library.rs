@@ -1124,6 +1124,12 @@ impl SearchQuery {
             folded.split_whitespace().map(ToOwned::to_owned).collect()
         };
         tokens.retain(|token| !token.is_empty());
+        // Articles and short function words ("a", "in", "the") would match
+        // almost any text one letter at a time; drop them when the query has
+        // a real word to match on.
+        if tokens.iter().any(|token| token.chars().count() >= 3) {
+            tokens.retain(|token| token.chars().count() >= 3);
+        }
         if tokens.is_empty() {
             tokens.push(raw_lower.clone());
         }
@@ -1255,6 +1261,328 @@ fn consider_text_search(
     if replace {
         *best = Some(candidate);
     }
+}
+
+// ── "Find the moment": every matching range in a clip, ranked ──────────────
+
+/// One place inside a media item that matches a search: a transcript
+/// segment, a visual frame, a keyword range, an auto-tag's best frame, or
+/// (lowest priority) the whole clip when only its name / path matched.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MediaMoment {
+    pub item_id: String,
+    pub source_path: String,
+    pub display_name: String,
+    pub duration_ns: u64,
+    pub field: MediaSearchField,
+    pub score: i32,
+    /// Human-readable reason; `[…]` brackets mark the matched text.
+    pub excerpt: String,
+    pub source_in_ns: u64,
+    pub source_out_ns: u64,
+    /// The frame that represents the moment (thumbnail, seek target).
+    pub thumb_time_ns: u64,
+}
+
+/// Visual moments per clip (best frames, at least `VISUAL_MOMENT_GAP_NS` apart).
+const VISUAL_MOMENTS_PER_ITEM: usize = 3;
+const VISUAL_MOMENT_GAP_NS: u64 = 3_000_000_000;
+/// Range a visual frame or auto-tag frame moment covers (centred on the frame).
+const FRAME_MOMENT_HALF_SPAN_NS: u64 = 1_000_000_000;
+/// Whole-clip (name / path / codec) hits rank below any content hit.
+const WHOLE_CLIP_MOMENT_PENALTY: i32 = 260;
+
+fn push_moment(
+    out: &mut Vec<MediaMoment>,
+    item: &MediaItem,
+    field: MediaSearchField,
+    score: i32,
+    excerpt: String,
+    source_in_ns: u64,
+    source_out_ns: u64,
+    thumb_time_ns: u64,
+) {
+    let source_out_ns = source_out_ns.max(source_in_ns);
+    // Merge with an overlapping moment of the same item: keep the better
+    // score, widen to the union so the Source Monitor marks cover both.
+    if let Some(existing) = out.iter_mut().find(|m| {
+        m.item_id == item.id && m.source_in_ns <= source_out_ns && source_in_ns <= m.source_out_ns
+    }) {
+        if score > existing.score {
+            existing.score = score;
+            existing.field = field;
+            existing.excerpt = excerpt;
+            existing.thumb_time_ns = thumb_time_ns;
+        }
+        existing.source_in_ns = existing.source_in_ns.min(source_in_ns);
+        existing.source_out_ns = existing.source_out_ns.max(source_out_ns);
+        return;
+    }
+    out.push(MediaMoment {
+        item_id: item.id.clone(),
+        source_path: item.source_path.clone(),
+        display_name: media_display_name(item),
+        duration_ns: item.duration_ns,
+        field,
+        score,
+        excerpt,
+        source_in_ns,
+        source_out_ns,
+        thumb_time_ns,
+    });
+}
+
+/// Every moment in `item` that matches `query` (text) and, when given, the
+/// CLIP text embedding `visual_query`. Unsorted; see `search_library_moments`.
+pub fn media_item_moments(
+    item: &MediaItem,
+    query: &str,
+    visual_query: Option<&[f32]>,
+) -> Vec<MediaMoment> {
+    let mut out = Vec::new();
+    let Some(sq) = SearchQuery::new(query) else {
+        return out;
+    };
+    if !item.has_backing_file() || item.source_path.is_empty() {
+        return out;
+    }
+    let clip_in = item.effective_source_in_ns();
+    let clip_out = item.effective_source_out_ns().max(clip_in);
+
+    // Spoken content: each matching segment is its own moment; a window
+    // whose segments only match when joined becomes one window-wide moment.
+    for window in &item.transcript_windows {
+        let mut segment_hit = false;
+        for segment in &window.segments {
+            let text = segment.text.trim();
+            if text.is_empty() {
+                continue;
+            }
+            if let Some(score) = score_search_text(text, &sq, 820, 690) {
+                segment_hit = true;
+                let start = window.source_in_ns.saturating_add(segment.start_ns);
+                let end = window
+                    .source_in_ns
+                    .saturating_add(segment.end_ns)
+                    .max(start);
+                push_moment(
+                    &mut out,
+                    item,
+                    MediaSearchField::Transcript,
+                    score,
+                    highlight_search_excerpt(text, &sq),
+                    start,
+                    end,
+                    start,
+                );
+            }
+        }
+        if !segment_hit {
+            let joined = window
+                .segments
+                .iter()
+                .map(|segment| segment.text.trim())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+            if let Some(score) = score_search_text(&joined, &sq, 780, 650) {
+                push_moment(
+                    &mut out,
+                    item,
+                    MediaSearchField::Transcript,
+                    score,
+                    highlight_search_excerpt(&joined, &sq),
+                    window.source_in_ns,
+                    window.source_out_ns.max(window.source_in_ns),
+                    window.source_in_ns,
+                );
+            }
+        }
+    }
+
+    // Keyword ranges the user drew on the clip.
+    for range in &item.keyword_ranges {
+        let label = range.label.trim();
+        if label.is_empty() {
+            continue;
+        }
+        if let Some(score) = score_search_text(label, &sq, 860, 700) {
+            push_moment(
+                &mut out,
+                item,
+                MediaSearchField::Keyword,
+                score,
+                highlight_search_excerpt(label, &sq),
+                range.start_ns,
+                range.end_ns,
+                range.start_ns,
+            );
+        }
+    }
+
+    // Auto-tags with a best frame.
+    for tag in &item.auto_tags {
+        let text = format!("{} {}", tag.category.search_text(), tag.label);
+        let Some(score) = score_search_text(&text, &sq, 850, 720) else {
+            continue;
+        };
+        let at = tag.best_frame_time_ns.unwrap_or(clip_in);
+        push_moment(
+            &mut out,
+            item,
+            MediaSearchField::AutoTag,
+            score,
+            format!("Tagged [{}]", tag.label.trim()),
+            at.saturating_sub(FRAME_MOMENT_HALF_SPAN_NS).max(clip_in),
+            at.saturating_add(FRAME_MOMENT_HALF_SPAN_NS)
+                .min(clip_out.max(at)),
+            at,
+        );
+    }
+
+    // Visual frames (CLIP): several per clip, spread out in time.
+    if let (Some(query_embedding), Some(embedding)) = (visual_query, item.visual_embedding.as_ref())
+    {
+        if log::log_enabled!(log::Level::Debug) {
+            let best = crate::media::clip_embedding_cache::best_visual_similarity(
+                query_embedding,
+                embedding,
+            );
+            log::debug!(
+                "moments: {} best visual similarity {:?} over {} frames",
+                media_display_name(item),
+                best,
+                embedding.frames.len()
+            );
+        }
+        for m in crate::media::clip_embedding_cache::visual_frame_matches(
+            query_embedding,
+            embedding,
+            VISUAL_MOMENTS_PER_ITEM,
+            VISUAL_MOMENT_GAP_NS,
+        ) {
+            let Some(at) = m.best_frame_time_ns else {
+                continue;
+            };
+            push_moment(
+                &mut out,
+                item,
+                MediaSearchField::Visual,
+                m.score,
+                format!(
+                    "Looks like it ({:.0}% match)",
+                    (m.similarity.clamp(0.0, 1.0) * 100.0)
+                ),
+                at.saturating_sub(FRAME_MOMENT_HALF_SPAN_NS).max(clip_in),
+                at.saturating_add(FRAME_MOMENT_HALF_SPAN_NS)
+                    .min(clip_out.max(at)),
+                at,
+            );
+        }
+    }
+
+    // Whole-clip hits (name, label, title, path, codec) — only when nothing
+    // inside the clip matched, and ranked below any content hit.
+    if out.is_empty() {
+        let mut best: Option<MediaSearchMatch> = None;
+        for (field, text, exact, token) in [
+            (
+                MediaSearchField::DisplayName,
+                media_display_name(item),
+                920,
+                760,
+            ),
+            (MediaSearchField::Label, item.label.clone(), 900, 740),
+            (
+                MediaSearchField::TitleText,
+                item.title_text.clone().unwrap_or_default(),
+                910,
+                750,
+            ),
+            (
+                MediaSearchField::SourcePath,
+                item.source_path.clone(),
+                760,
+                620,
+            ),
+            (
+                MediaSearchField::Codec,
+                item.codec_summary.clone().unwrap_or_default(),
+                680,
+                560,
+            ),
+        ] {
+            if text.trim().is_empty() {
+                continue;
+            }
+            consider_text_search(
+                &mut best,
+                field,
+                &text,
+                &sq,
+                exact,
+                token,
+                Some(highlight_search_excerpt(&text, &sq)),
+                None,
+                None,
+            );
+        }
+        if let Some(m) = best {
+            push_moment(
+                &mut out,
+                item,
+                m.field,
+                m.score - WHOLE_CLIP_MOMENT_PENALTY,
+                m.excerpt.unwrap_or_default(),
+                clip_in,
+                clip_out,
+                clip_in,
+            );
+        }
+    }
+    out
+}
+
+/// Rank every moment across the library for `query`: best score first, then
+/// by clip and time. At most `limit` results. The CLIP text encoder runs
+/// once per query and only when some item carries a visual embedding.
+pub fn search_library_moments(
+    library: &MediaLibrary,
+    query: &str,
+    limit: usize,
+) -> Vec<MediaMoment> {
+    let query = query.trim();
+    if query.is_empty() || limit == 0 {
+        return Vec::new();
+    }
+    let wants_visual = library
+        .items
+        .iter()
+        .any(|item| item.visual_embedding.is_some());
+    let visual_query = if wants_visual {
+        let embedding = crate::media::clip_embedding_cache::text_query_embedding(query);
+        if embedding.is_none() {
+            log::warn!(
+                "search_library_moments: CLIP text encoder returned no embedding for {query:?} (visual moments skipped)"
+            );
+        }
+        embedding
+    } else {
+        None
+    };
+    let mut moments: Vec<MediaMoment> = library
+        .items
+        .iter()
+        .flat_map(|item| media_item_moments(item, query, visual_query.as_deref()))
+        .collect();
+    moments.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.source_path.cmp(&b.source_path))
+            .then_with(|| a.source_in_ns.cmp(&b.source_in_ns))
+    });
+    moments.truncate(limit);
+    moments
 }
 
 pub fn matches_media_kind_filter(item: &MediaItem, filter: MediaKindFilter) -> bool {
@@ -2141,6 +2469,116 @@ mod tests {
             u64::MAX,
             segments
         ));
+    }
+
+    #[test]
+    fn moments_rank_every_transcript_segment_and_whole_clip_hits_last() {
+        let mut item = MediaItem::new("/tmp/tent.mov", 30_000_000_000);
+        item.is_missing = false;
+        item.has_audio = true;
+        item.upsert_transcript_window(
+            0,
+            30_000_000_000,
+            vec![
+                SubtitleSegment {
+                    id: "a".into(),
+                    start_ns: 1_000_000_000,
+                    end_ns: 2_000_000_000,
+                    text: "let's open the tent".into(),
+                    words: Vec::new(),
+                },
+                SubtitleSegment {
+                    id: "b".into(),
+                    start_ns: 5_000_000_000,
+                    end_ns: 6_000_000_000,
+                    text: "nothing here".into(),
+                    words: Vec::new(),
+                },
+                SubtitleSegment {
+                    id: "c".into(),
+                    start_ns: 12_000_000_000,
+                    end_ns: 13_500_000_000,
+                    text: "the tent is up".into(),
+                    words: Vec::new(),
+                },
+            ],
+        );
+        item.keyword_ranges.push(MediaKeywordRange::new(
+            "tent pegs",
+            20_000_000_000,
+            22_000_000_000,
+        ));
+        let mut named = MediaItem::new("/tmp/tent-wide.mov", 10_000_000_000);
+        named.is_missing = false;
+        let mut lib = MediaLibrary::new();
+        lib.items.push(item);
+        lib.items.push(named);
+
+        let moments = search_library_moments(&lib, "tent", 10);
+        let fields: Vec<_> = moments
+            .iter()
+            .map(|m| (m.field.clone(), m.source_in_ns))
+            .collect();
+        // Two transcript segments + the keyword range from the first clip,
+        // then the whole-clip name hit of the second clip.
+        assert_eq!(moments.len(), 4, "{fields:?}");
+        assert!(
+            moments[..3]
+                .iter()
+                .all(|m| m.source_path == "/tmp/tent.mov"),
+            "{fields:?}"
+        );
+        assert!(moments[..3]
+            .iter()
+            .any(|m| m.field == MediaSearchField::Transcript
+                && m.source_in_ns == 1_000_000_000
+                && m.excerpt.contains("[tent]")));
+        assert!(moments[..3]
+            .iter()
+            .any(|m| m.field == MediaSearchField::Transcript && m.source_in_ns == 12_000_000_000));
+        assert!(moments[..3]
+            .iter()
+            .any(|m| m.field == MediaSearchField::Keyword
+                && m.source_in_ns == 20_000_000_000
+                && m.source_out_ns == 22_000_000_000));
+        assert_eq!(moments[3].field, MediaSearchField::DisplayName);
+        assert_eq!(moments[3].source_path, "/tmp/tent-wide.mov");
+        assert!(moments[3].score < moments[2].score);
+        assert_eq!(moments[3].thumb_time_ns, 0);
+        // Limit and empty query.
+        assert_eq!(search_library_moments(&lib, "tent", 2).len(), 2);
+        assert!(search_library_moments(&lib, "   ", 10).is_empty());
+        assert!(search_library_moments(&lib, "zebra", 10).is_empty());
+    }
+
+    #[test]
+    fn overlapping_moments_of_one_clip_merge() {
+        let mut item = MediaItem::new("/tmp/merge.mov", 30_000_000_000);
+        item.is_missing = false;
+        item.has_audio = true;
+        item.upsert_transcript_window(
+            0,
+            30_000_000_000,
+            vec![SubtitleSegment {
+                id: "a".into(),
+                start_ns: 4_000_000_000,
+                end_ns: 6_000_000_000,
+                text: "fire".into(),
+                words: Vec::new(),
+            }],
+        );
+        item.keyword_ranges.push(MediaKeywordRange::new(
+            "campfire",
+            5_000_000_000,
+            9_000_000_000,
+        ));
+        let moments = media_item_moments(&item, "fire", None);
+        assert_eq!(moments.len(), 1, "{moments:?}");
+        assert_eq!(moments[0].source_in_ns, 4_000_000_000);
+        assert_eq!(moments[0].source_out_ns, 9_000_000_000);
+        // The keyword hit scores higher than the transcript segment and wins
+        // the excerpt / field while the range is the union.
+        assert_eq!(moments[0].field, MediaSearchField::Keyword);
     }
 
     #[test]

@@ -214,7 +214,6 @@ impl TimecodeBurninPosition {
     pub fn from_str(s: &str) -> Option<TimecodeBurninPosition> {
         Self::ALL.iter().copied().find(|p| p.as_str() == s)
     }
-
 }
 
 /// An audio submix bus. Each `AudioRole` (Dialogue, Effects, Music) has a
@@ -551,6 +550,36 @@ impl Project {
     /// result uniformly.
     pub fn master_gain_linear(&self) -> f64 {
         10.0_f64.powf(self.master_gain_db / 20.0)
+    }
+
+    /// Timeline positions (earliest first) at which `source_ns` of the media
+    /// file `source_path` is shown by a top-level video clip, honouring the
+    /// clip's constant speed. Clips inside compounds are not searched.
+    pub fn timeline_positions_for_source_time(
+        &self,
+        source_path: &str,
+        source_ns: u64,
+    ) -> Vec<u64> {
+        let mut out: Vec<u64> = self
+            .video_tracks()
+            .flat_map(|track| track.clips.iter())
+            .filter(|clip| {
+                clip.source_path == source_path
+                    && source_ns >= clip.source_in
+                    && source_ns < clip.source_out.max(clip.source_in + 1)
+            })
+            .map(|clip| {
+                let speed = if clip.speed.is_finite() && clip.speed > 0.0 {
+                    clip.speed
+                } else {
+                    1.0
+                };
+                let offset = (source_ns - clip.source_in) as f64 / speed;
+                clip.timeline_start.saturating_add(offset.round() as u64)
+            })
+            .collect();
+        out.sort_unstable();
+        out
     }
 
     pub fn add_video_track(&mut self) {
@@ -1112,6 +1141,52 @@ mod tests {
     fn test_frame_rate_fps60() {
         let fps = FrameRate::fps_60();
         assert!((fps.as_f64() - 60.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn timeline_positions_for_source_time_honour_window_and_speed() {
+        let mut p = Project::new("t");
+        p.add_video_track();
+        let mut a = crate::model::clip::Clip::new(
+            "/m/a.mp4",
+            10_000_000_000,
+            5_000_000_000,
+            crate::model::clip::ClipKind::Video,
+        );
+        a.source_in = 2_000_000_000;
+        a.source_out = 12_000_000_000;
+        let mut b = crate::model::clip::Clip::new(
+            "/m/a.mp4",
+            4_000_000_000,
+            30_000_000_000,
+            crate::model::clip::ClipKind::Video,
+        );
+        b.source_in = 0;
+        b.source_out = 8_000_000_000;
+        b.speed = 2.0;
+        let vt = p
+            .tracks
+            .iter()
+            .position(|t| t.kind == crate::model::track::TrackKind::Video)
+            .unwrap();
+        p.tracks[vt].clips.push(a);
+        p.tracks[vt].clips.push(b);
+        // 3 s into the source: inside both clips. a: 5 + (3-2) = 6 s; b at 2×: 30 + 1.5 = 31.5 s.
+        assert_eq!(
+            p.timeline_positions_for_source_time("/m/a.mp4", 3_000_000_000),
+            vec![6_000_000_000, 31_500_000_000]
+        );
+        // 10 s: only a covers it.
+        assert_eq!(
+            p.timeline_positions_for_source_time("/m/a.mp4", 10_000_000_000),
+            vec![13_000_000_000]
+        );
+        assert!(p
+            .timeline_positions_for_source_time("/m/a.mp4", 20_000_000_000)
+            .is_empty());
+        assert!(p
+            .timeline_positions_for_source_time("/m/other.mp4", 3_000_000_000)
+            .is_empty());
     }
 
     #[test]

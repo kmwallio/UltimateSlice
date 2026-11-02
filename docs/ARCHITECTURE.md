@@ -1062,6 +1062,32 @@ preview-only** layer on top of it and deliberately never writes to the model:
   `BackgroundRenderState::suppress` and reloads. Ticking the manual checkbox
   on an auto clip makes `reconcile` drop it from the auto set (manual wins).
 
+### "Find the moment" (ranked in-clip search)
+
+`media_library::media_item_moments` / `search_library_moments` turn the
+library search signals into `MediaMoment`s — a source range plus a
+representative frame — instead of one best match per item: every matching
+transcript segment (a window whose segments only match when joined becomes a
+window-wide moment), every keyword range, every matching auto-tag's best
+frame, and up to three CLIP frames per clip
+(`clip_embedding_cache::visual_frame_matches`, best first, ≥ 3 s apart; the
+text encoder runs once per query and only when some item has an embedding).
+Overlapping moments of one item merge (best score wins the excerpt, the
+range becomes the union). Name / path / codec hits are emitted only when
+nothing inside the clip matched and carry a 260-point penalty so content
+always ranks first. `Project::timeline_positions_for_source_time` maps a
+source time to the top-level video clips showing it (constant speed
+honoured) — that is how a moment becomes a playhead position.
+
+The Media Library's Moments strip (`media_browser.rs`, `refresh_moments`)
+re-runs the search on every filter-text change and library refresh, requests
+a `ThumbnailCache` frame per row and redraws rows as the cache fills (bounded
+timer, cancelled by a generation counter). Row selection reuses
+`on_source_selected` with the moment as the In/Out window; the three
+actions go through `MomentAction` to `window.rs`'s `on_moment_action`
+(seek / `AddMarkerCommand` / Source Monitor + `InsertAtPlayhead` action),
+which the `jump_to_moment` MCP tool shares.
+
 ## GTK rendering performance rules (GSK + cairo)
 
 Measured on GTK 4.22 with the Vulkan and NGL renderers (gdb/eu-stack sampling
@@ -1132,6 +1158,24 @@ the single source of truth:
    `RefCell` borrow (C trampolines cannot unwind).
 3. Regenerate the docs page: `UPDATE_SHORTCUTS_DOC=1 cargo test keybindings`.
    The `?` dialog and the command palette pick the action up automatically.
+
+Command palette (`src/ui/command_palette.rs`): `CommandRegistry` is filled
+at startup from the shortcut registry (re-registered with live key labels
+each time the palette opens), the header bar's buttons, and
+`mcp::server::zero_arg_tools()` — every tool whose schema has no `required`
+arguments minus `PALETTE_EXCLUDED_TOOLS` (state-discarding or
+argument-dependent ones). An MCP entry's handler calls
+`mcp::server::build_tool_command(name, {})` (the same match the socket server
+uses, split out so it returns the command and its reply receiver) and hands
+the command to `MCP_MAIN_DISPATCH` on the *next* main-loop iteration via
+`glib::idle_add_local_once` — the dispatcher's `RefCell` must not be
+re-entered when `run_palette_command` itself triggers the entry — then polls
+the receiver on a 50 ms timeout: `summarize_tool_result` turns small
+`{success, …}` replies into a toast and sends anything with data to
+`show_tool_result_dialog`. Recents (`MAX_RECENT = 8`) are kept in the
+registry, lead the empty-query listing, and persist through the `persist`
+hook to `$XDG_CONFIG_HOME/ultimateslice/palette-recent.json`. `resolve`
+(exact title, else best fuzzy match) backs `run_palette_command`.
 
 Dispatch (`src/ui/key_dispatch.rs::install_key_resolver`): modifier-only
 keys are ignored → `Chord::from_event` normalises (Lock/Num masked, letters
@@ -1369,6 +1413,10 @@ Before declaring a task finished, agents must verify via MCP:
 | `export_live_frame` | Capture the next composited frame without pausing (PPM) and return the playhead position at capture |
 | `list_actions` | List rebindable shortcut actions (id, title, context, current/default accelerators, labels) |
 | `trigger_action` | Invoke a shortcut action by id through the registry (as pressing its key would) |
+| `list_palette_commands` | Every command palette entry (shortcut actions, toolbar buttons, argument-free MCP tools) with category, shortcut label, detail and recent flag |
+| `run_palette_command` | Run a palette entry by title (exact, else best fuzzy match), recording it as recent; returns the matched title |
+| `search_moments` | "Find the moment": every in-clip match for a query across the library (transcript segments, CLIP frames, keyword ranges, auto-tag frames; whole-clip name hits last) with source range, excerpt and current timeline position(s) |
+| `jump_to_moment` | Act on a moment like the Media Library's Moments strip: `goto` (seek the timeline, or open in the Source Monitor), `mark` (timeline marker), `insert` (edit in at the playhead) |
 | `set_shortcut` | Rebind an action (`action_id`, `accelerators[]` in GTK syntax; empty = unbound); reports conflicts/shadows; persists |
 | `reset_shortcuts` | Reset one action (`action_id`) or all shortcuts to defaults; persists |
 | `set_gsk_renderer` | Set GTK renderer backend (`auto` / `cairo` / `opengl` / `vulkan`); requires restart |

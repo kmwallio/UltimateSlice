@@ -5,9 +5,10 @@ use crate::model::clip::ClipKind;
 use crate::model::media_library::{
     media_auto_tag_state_key, media_auto_tag_summary, media_display_name, media_frame_rate_value,
     media_keyword_summary, media_matches_filters, media_rating_text, media_search_match,
-    media_transcript_state_key, non_file_clip_kind_text, normalized_media_text, FrameRateFilter,
-    MediaCollection, MediaFilterCriteria, MediaItem, MediaKindFilter, MediaLibrary, MediaRating,
-    MediaRatingFilter, MediaSearchField, ResolutionFilter,
+    media_transcript_state_key, non_file_clip_kind_text, normalized_media_text,
+    search_library_moments, FrameRateFilter, MediaCollection, MediaFilterCriteria, MediaItem,
+    MediaKindFilter, MediaLibrary, MediaMoment, MediaRating, MediaRatingFilter, MediaSearchField,
+    ResolutionFilter,
 };
 use crate::ui::id_dropdown::IdDropDown;
 use crate::ui_state::PreferencesState;
@@ -158,9 +159,78 @@ fn refresh_collection_picker(
 /// * `on_source_selected` – called when the user selects a library item (path, duration_ns)
 /// * `proxy_cache`        – shared proxy cache; used to pre-generate proxies when proxy mode is on
 /// * `preferences_state`  – shared preferences; read for proxy mode/scale
+/// What the user asked to do with a "Moments" search result.
+#[derive(Debug, Clone)]
+pub enum MomentAction {
+    /// Seek the timeline to the moment when its clip is on the timeline,
+    /// otherwise open it in the Source Monitor with In/Out around it.
+    GoTo(MediaMoment),
+    /// Add a timeline marker at the moment (at the playhead when the clip is
+    /// not on the timeline), labelled with the match.
+    Mark(MediaMoment),
+    /// Open the moment in the Source Monitor and insert it at the playhead.
+    Insert(MediaMoment),
+}
+
+impl MomentAction {
+    pub fn moment(&self) -> &MediaMoment {
+        match self {
+            MomentAction::GoTo(m) | MomentAction::Mark(m) | MomentAction::Insert(m) => m,
+        }
+    }
+
+    pub fn verb(&self) -> &'static str {
+        match self {
+            MomentAction::GoTo(_) => "goto",
+            MomentAction::Mark(_) => "mark",
+            MomentAction::Insert(_) => "insert",
+        }
+    }
+}
+
+/// `mm:ss.t` (or `h:mm:ss.t`) for a moment's source time.
+pub fn format_moment_time(ns: u64) -> String {
+    let tenths = ns / 100_000_000;
+    let s = tenths / 10;
+    let (h, m, sec) = (s / 3600, (s / 60) % 60, s % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{sec:02}.{}", tenths % 10)
+    } else {
+        format!("{m:02}:{sec:02}.{}", tenths % 10)
+    }
+}
+
+/// Pango markup for an excerpt whose `[…]` brackets mark the matched text.
+fn moment_excerpt_markup(excerpt: &str) -> String {
+    let mut out = String::with_capacity(excerpt.len() + 16);
+    for ch in excerpt.chars() {
+        match ch {
+            '[' => out.push_str("<b>"),
+            ']' => out.push_str("</b>"),
+            _ => out.push_str(&glib::markup_escape_text(&ch.to_string())),
+        }
+    }
+    out
+}
+
+fn moment_kind_label(field: &MediaSearchField) -> &'static str {
+    match field {
+        MediaSearchField::Transcript => "spoken",
+        MediaSearchField::Visual => "visual",
+        MediaSearchField::AutoTag => "tag",
+        MediaSearchField::Keyword => "keyword",
+        MediaSearchField::DisplayName
+        | MediaSearchField::Label
+        | MediaSearchField::TitleText
+        | MediaSearchField::SourcePath
+        | MediaSearchField::Codec => "clip",
+    }
+}
+
 pub fn build_media_browser(
     library: Rc<RefCell<MediaLibrary>>,
     on_source_selected: Rc<dyn Fn(String, u64, Option<(u64, u64)>)>,
+    on_moment_action: Rc<dyn Fn(MomentAction)>,
     on_reverse_match_frame: Rc<dyn Fn(String)>,
     on_relink_media: Rc<dyn Fn()>,
     // Invoked from the library item context menu to swap the source
@@ -404,6 +474,225 @@ pub fn build_media_browser(
     // Async media probe cache — duration/audio-only detection in background threads.
     let probe_cache: Rc<RefCell<MediaProbeCache>> = Rc::new(RefCell::new(MediaProbeCache::new()));
 
+    // "Find the moment": ranked in-clip matches for the current search text,
+    // shown under the filter field. Rows carry a keyframe thumbnail and the
+    // matched excerpt; selecting one opens it in the Source Monitor with
+    // In/Out around the moment, Enter / "Go to" seeks the timeline, "Mark"
+    // drops a marker, "Insert" edits it in at the playhead.
+    let moments_box = GBox::new(Orientation::Vertical, 2);
+    moments_box.add_css_class("media-moments");
+    moments_box.set_visible(false);
+    let moments_header = Label::new(Some("Moments"));
+    moments_header.add_css_class("media-moments-header");
+    moments_header.set_xalign(0.0);
+    moments_box.append(&moments_header);
+    let moments_list = gtk::ListBox::new();
+    moments_list.set_selection_mode(gtk::SelectionMode::Single);
+    moments_list.add_css_class("media-moments-list");
+    let moments_scroll = ScrolledWindow::new();
+    moments_scroll.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+    moments_scroll.set_propagate_natural_height(true);
+    moments_scroll.set_max_content_height(236);
+    moments_scroll.set_child(Some(&moments_list));
+    moments_box.append(&moments_scroll);
+    filter_box.insert_child_after(&moments_box, Some(&filter_search));
+    let moments_data: Rc<RefCell<Vec<MediaMoment>>> = Rc::new(RefCell::new(Vec::new()));
+    let moments_generation: Rc<Cell<u64>> = Rc::new(Cell::new(0));
+    let refresh_moments: Rc<dyn Fn()> = {
+        let library = library.clone();
+        let filter_search = filter_search.clone();
+        let moments_box = moments_box.clone();
+        let moments_header = moments_header.clone();
+        let moments_list = moments_list.clone();
+        let moments_data = moments_data.clone();
+        let moments_generation = moments_generation.clone();
+        let thumb_cache = thumb_cache.clone();
+        let on_moment_action = on_moment_action.clone();
+        Rc::new(move || {
+            let generation = moments_generation.get().wrapping_add(1);
+            moments_generation.set(generation);
+            while let Some(child) = moments_list.first_child() {
+                moments_list.remove(&child);
+            }
+            let query = filter_search.text().trim().to_string();
+            if query.is_empty() {
+                moments_data.borrow_mut().clear();
+                moments_box.set_visible(false);
+                return;
+            }
+            let moments = search_library_moments(&library.borrow(), &query, 12);
+            if moments.is_empty() {
+                moments_data.borrow_mut().clear();
+                moments_box.set_visible(false);
+                return;
+            }
+            moments_header.set_text(&format!(
+                "Moments — {} match{}",
+                moments.len(),
+                if moments.len() == 1 { "" } else { "es" }
+            ));
+            let mut thumb_areas: Vec<(DrawingArea, String, u64)> = Vec::new();
+            for (idx, m) in moments.iter().enumerate() {
+                let row_box = GBox::new(Orientation::Horizontal, 8);
+                row_box.add_css_class("moment-row");
+                let thumb = DrawingArea::new();
+                thumb.set_content_width(96);
+                thumb.set_content_height(54);
+                thumb.set_valign(gtk::Align::Center);
+                {
+                    let thumb_cache = thumb_cache.clone();
+                    let path = m.source_path.clone();
+                    let at = m.thumb_time_ns;
+                    thumb.set_draw_func(move |_, cr, w, h| {
+                        cr.set_source_rgb(0.12, 0.12, 0.14);
+                        cr.rectangle(0.0, 0.0, w as f64, h as f64);
+                        cr.fill().ok();
+                        let cache = thumb_cache.borrow();
+                        if let Some(surface) = cache.get(&path, at) {
+                            let sw = surface.width().max(1) as f64;
+                            let sh = surface.height().max(1) as f64;
+                            cr.save().ok();
+                            cr.scale(w as f64 / sw, h as f64 / sh);
+                            cr.set_source_surface(surface, 0.0, 0.0).ok();
+                            cr.paint().ok();
+                            cr.restore().ok();
+                        }
+                    });
+                }
+                thumb_cache
+                    .borrow_mut()
+                    .request(&m.source_path, m.thumb_time_ns);
+                thumb_areas.push((thumb.clone(), m.source_path.clone(), m.thumb_time_ns));
+                row_box.append(&thumb);
+
+                let text_box = GBox::new(Orientation::Vertical, 1);
+                text_box.set_hexpand(true);
+                text_box.set_valign(gtk::Align::Center);
+                let title = Label::new(Some(&format!(
+                    "{}  ·  {}–{}",
+                    m.display_name,
+                    format_moment_time(m.source_in_ns),
+                    format_moment_time(m.source_out_ns)
+                )));
+                title.add_css_class("moment-title");
+                title.set_xalign(0.0);
+                title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                text_box.append(&title);
+                let excerpt = Label::new(None);
+                excerpt.set_markup(&moment_excerpt_markup(&m.excerpt));
+                excerpt.add_css_class("moment-excerpt");
+                excerpt.set_xalign(0.0);
+                excerpt.set_ellipsize(gtk::pango::EllipsizeMode::End);
+                text_box.append(&excerpt);
+                row_box.append(&text_box);
+
+                let kind = Label::new(Some(moment_kind_label(&m.field)));
+                kind.add_css_class("moment-kind");
+                kind.set_valign(gtk::Align::Center);
+                row_box.append(&kind);
+
+                let actions_box = GBox::new(Orientation::Horizontal, 2);
+                actions_box.set_valign(gtk::Align::Center);
+                type Make = fn(MediaMoment) -> MomentAction;
+                let buttons: [(&str, &str, Make); 3] = [
+                    (
+                        "Go to",
+                        "Seek the timeline to this moment (or open it in the Source Monitor)",
+                        MomentAction::GoTo,
+                    ),
+                    ("Mark", "Add a timeline marker here", MomentAction::Mark),
+                    (
+                        "Insert",
+                        "Insert this moment at the playhead",
+                        MomentAction::Insert,
+                    ),
+                ];
+                for (label, tip, make) in buttons {
+                    let btn = Button::with_label(label);
+                    btn.add_css_class("moment-btn");
+                    btn.set_tooltip_text(Some(tip));
+                    let moments_data = moments_data.clone();
+                    let on_moment_action = on_moment_action.clone();
+                    btn.connect_clicked(move |_| {
+                        let moment = moments_data.borrow().get(idx).cloned();
+                        if let Some(moment) = moment {
+                            on_moment_action(make(moment));
+                        }
+                    });
+                    actions_box.append(&btn);
+                }
+                row_box.append(&actions_box);
+
+                let row = gtk::ListBoxRow::new();
+                row.set_child(Some(&row_box));
+                moments_list.append(&row);
+            }
+            *moments_data.borrow_mut() = moments;
+            moments_box.set_visible(true);
+
+            // Redraw thumbnails as the cache fills in (bounded, cancelled by
+            // the next refresh through the generation counter).
+            let thumb_cache = thumb_cache.clone();
+            let moments_generation = moments_generation.clone();
+            let mut ticks = 0u32;
+            glib::timeout_add_local(std::time::Duration::from_millis(150), move || {
+                if moments_generation.get() != generation {
+                    return glib::ControlFlow::Break;
+                }
+                ticks += 1;
+                let _ = thumb_cache.borrow_mut().poll_ready_keys();
+                let mut pending = false;
+                {
+                    let cache = thumb_cache.borrow();
+                    for (area, path, at) in &thumb_areas {
+                        if cache.get(path, *at).is_some() {
+                            area.queue_draw();
+                        } else {
+                            pending = true;
+                        }
+                    }
+                }
+                if pending && ticks < 200 {
+                    glib::ControlFlow::Continue
+                } else {
+                    glib::ControlFlow::Break
+                }
+            });
+        })
+    };
+    {
+        // Selecting a row previews the moment in the Source Monitor with
+        // In/Out around it; activating (Enter / double-click) goes there.
+        let moments_data_for_activate = moments_data.clone();
+        let moments_data = moments_data.clone();
+        let on_source_selected = on_source_selected.clone();
+        moments_list.connect_row_selected(move |_, row| {
+            let Some(row) = row else { return };
+            let moment = moments_data
+                .borrow()
+                .get(row.index().max(0) as usize)
+                .cloned();
+            if let Some(m) = moment {
+                on_source_selected(
+                    m.source_path.clone(),
+                    m.duration_ns,
+                    Some((m.source_in_ns, m.source_out_ns.max(m.source_in_ns + 1))),
+                );
+            }
+        });
+        let moments_data = moments_data_for_activate.clone();
+        let on_moment_action = on_moment_action.clone();
+        moments_list.connect_row_activated(move |_, row| {
+            let moment = moments_data
+                .borrow()
+                .get(row.index().max(0) as usize)
+                .cloned();
+            if let Some(m) = moment {
+                on_moment_action(MomentAction::GoTo(m));
+            }
+        });
+    }
+
     // Grid of thumbnail cells.
     let flow_box = FlowBox::new();
     flow_box.set_selection_mode(gtk::SelectionMode::Multiple);
@@ -473,6 +762,7 @@ pub fn build_media_browser(
         let all_media_btn = all_media_btn.clone();
         let filters = filters.clone();
         let on_library_changed = on_library_changed.clone();
+        let refresh_moments = refresh_moments.clone();
         Rc::new(move || {
             refresh_bin_view(
                 &library,
@@ -486,6 +776,7 @@ pub fn build_media_browser(
                 &filters,
                 &on_library_changed,
             );
+            refresh_moments();
         })
     };
 
@@ -494,12 +785,14 @@ pub fn build_media_browser(
         let refresh_filtered_view = refresh_filtered_view.clone();
         let collection_filter = collection_filter.clone();
         let applying_collection = applying_collection.clone();
+        let refresh_moments = refresh_moments.clone();
         filter_search.connect_search_changed(move |entry| {
             filters.borrow_mut().search_text = entry.text().trim().to_string();
             if !applying_collection.get() {
                 collection_filter.set_active_id(COLLECTION_NONE_ID);
             }
             refresh_filtered_view();
+            refresh_moments();
         });
     }
     {

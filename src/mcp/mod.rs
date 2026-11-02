@@ -169,6 +169,13 @@ pub enum McpCommand {
         action_id: String,
         reply: SyncSender<Value>,
     },
+    ListPaletteCommands {
+        reply: SyncSender<Value>,
+    },
+    RunPaletteCommand {
+        title: String,
+        reply: SyncSender<Value>,
+    },
     SetShortcut {
         action_id: String,
         accelerators: Vec<String>,
@@ -460,6 +467,19 @@ pub enum McpCommand {
     },
     ListLibrary {
         search_text: Option<String>,
+        reply: SyncSender<Value>,
+    },
+    SearchMoments {
+        query: String,
+        limit: usize,
+        reply: SyncSender<Value>,
+    },
+    JumpToMoment {
+        source_path: String,
+        source_in_ns: u64,
+        source_out_ns: Option<u64>,
+        action: String,
+        label: Option<String>,
         reply: SyncSender<Value>,
     },
     ImportMedia {
