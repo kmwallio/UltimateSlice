@@ -1265,6 +1265,26 @@ fn export_project_impl(
             build_tonemap_filter_prefix(&clip.source_path)
         };
         let lut_prefix = build_lut_filter_prefix(clip);
+        // Static grades: one compiled LUT measured from the preview chain
+        // replaces the LUT prefix + eq + temperature/tint + grading + HSL
+        // stages (see `color_lut`). Keyframed grades keep the per-stage chain.
+        let (lut_prefix, color_filter, temp_tint_filter, grading_filter, hsl_filter) =
+            match build_static_color_lut_stage(clip) {
+                Some(stage) => (
+                    String::new(),
+                    stage,
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ),
+                None => (
+                    lut_prefix,
+                    color_filter,
+                    temp_tint_filter,
+                    grading_filter,
+                    hsl_filter,
+                ),
+            };
         let gpu_prefix = gpu_decode_filter_prefix(gpu_inputs.contains(&i), out_w, out_h);
         let crop_filter =
             build_crop_filter(clip, out_w, out_h, project.width, project.height, false);
@@ -1453,6 +1473,26 @@ fn export_project_impl(
             build_tonemap_filter_prefix(&clip.source_path)
         };
         let lut_prefix = build_lut_filter_prefix(clip);
+        // Static grades: one compiled LUT measured from the preview chain
+        // replaces the LUT prefix + eq + temperature/tint + grading + HSL
+        // stages (see `color_lut`). Keyframed grades keep the per-stage chain.
+        let (lut_prefix, color_filter, temp_tint_filter, grading_filter, hsl_filter) =
+            match build_static_color_lut_stage(clip) {
+                Some(stage) => (
+                    String::new(),
+                    stage,
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ),
+                None => (
+                    lut_prefix,
+                    color_filter,
+                    temp_tint_filter,
+                    grading_filter,
+                    hsl_filter,
+                ),
+            };
         let gpu_prefix = gpu_decode_filter_prefix(gpu_inputs.contains(&in_idx), out_w, out_h);
         let crop_filter =
             build_crop_filter(clip, out_w, out_h, project.width, project.height, true);
@@ -4041,7 +4081,7 @@ fn append_pan_filter_chain(
     ));
 }
 
-fn build_temperature_tint_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_temperature_tint_filter(clip: &crate::model::clip::Clip) -> String {
     build_temperature_tint_filter_with_caps(clip, &ColorFilterCapabilities::default())
 }
 
@@ -4149,6 +4189,30 @@ pub(crate) fn build_blur_filter(clip: &crate::model::clip::Clip) -> String {
     }
 }
 
+/// One compiled LUT for a clip's whole static colour stack (user LUTs →
+/// primaries → temperature/tint → 3-point → HSL), measured from the preview's
+/// own elements (`color_lut`). Returns `None` when any colour slider is
+/// keyframed or the LUT could not be built (callers then use the per-stage
+/// chain) and `Some("")` when the clip has no colour work at all.
+pub(crate) fn build_static_color_lut_stage(clip: &crate::model::clip::Clip) -> Option<String> {
+    if crate::media::color_lut::color_lut_disabled_by_env()
+        || !crate::media::color_lut::clip_color_is_static(clip)
+    {
+        return None;
+    }
+    let spec = crate::media::color_lut::ColorGradeSpec::from_clip(clip);
+    match crate::media::color_lut::color_lut_filter_stage(&spec) {
+        Ok(stage) => Some(stage.unwrap_or_default()),
+        Err(err) => {
+            log::warn!(
+                "color_lut: clip {} falls back to the per-stage colour chain: {err}",
+                clip.id
+            );
+            None
+        }
+    }
+}
+
 /// HSL qualifier stage for the export / bake filter chain.
 ///
 /// The qualifier is a static per-pixel colour map, so it is compiled once into
@@ -4210,7 +4274,7 @@ fn build_hsl_qualifier_filter_in(
         }
     };
     format!(
-        ",format=gbrp,lut3d=file={}:interp=trilinear,format=yuva420p",
+        ",format=gbrap,lut3d=file={}:interp=trilinear,format=yuva420p",
         escape_filter_path(&path.to_string_lossy())
     )
 }
@@ -4218,7 +4282,7 @@ fn build_hsl_qualifier_filter_in(
 /// Escape a file path for use as a filter option value inside an ffmpeg
 /// filtergraph string (`\` and `:` are the option-level specials; `,` would
 /// otherwise end the filter).
-fn escape_filter_path(path: &str) -> String {
+pub(crate) fn escape_filter_path(path: &str) -> String {
     path.replace('\\', "\\\\")
         .replace(':', "\\:")
         .replace(',', "\\,")
@@ -4570,13 +4634,17 @@ fn build_adjustment_effects_chain_filter(
     color_caps: &ColorFilterCapabilities,
 ) -> String {
     let mut effects_chain = String::new();
-    let lut = build_lut_filter_prefix(clip);
-    if !lut.is_empty() {
-        effects_chain.push_str(&lut);
+    if let Some(stage) = build_static_color_lut_stage(clip) {
+        effects_chain.push_str(&stage);
+    } else {
+        let lut = build_lut_filter_prefix(clip);
+        if !lut.is_empty() {
+            effects_chain.push_str(&lut);
+        }
+        effects_chain.push_str(&build_color_filter(clip));
+        effects_chain.push_str(&build_temperature_tint_filter_with_caps(clip, color_caps));
+        effects_chain.push_str(&build_grading_filter_with_caps(clip, color_caps));
     }
-    effects_chain.push_str(&build_color_filter(clip));
-    effects_chain.push_str(&build_temperature_tint_filter_with_caps(clip, color_caps));
-    effects_chain.push_str(&build_grading_filter_with_caps(clip, color_caps));
     effects_chain.push_str(&build_denoise_filter(clip));
     effects_chain.push_str(&build_sharpen_filter(clip));
     effects_chain.push_str(&build_blur_filter(clip));
@@ -5419,7 +5487,7 @@ fn srt_timecode(ns: u64) -> String {
     format!("{h:02}:{m:02}:{s:02},{ms:03}")
 }
 
-fn build_grading_filter(clip: &crate::model::clip::Clip) -> String {
+pub(crate) fn build_grading_filter(clip: &crate::model::clip::Clip) -> String {
     build_grading_filter_with_caps(clip, &ColorFilterCapabilities::default())
 }
 
@@ -7222,20 +7290,19 @@ mod tests {
         build_adjustment_layer_filter_graph, build_adjustment_scope_alpha_expression,
         build_audio_crossfade_filters, build_color_filter, build_crop_filter,
         build_export_snapshot_project, build_grading_filter, build_hsl_qualifier_filter,
-        build_hsl_qualifier_filter_in, escape_filter_path,
-        build_keyframed_property_expression, build_pan_expression, build_pitch_filter,
-        build_rotation_filter,
-        build_scale_position_filter, build_subtitle_filter_composited,
-        build_surround_lfe_tap_filter, build_surround_upmix_filter, build_temperature_tint_filter,
-        build_timing_filter, build_title_filter, build_volume_filter,
-        clamped_primary_transition_timing, clamped_primary_xfade_duration_s,
-        compute_clip_audio_fades, compute_export_coloradj_params, estimate_export_size_bytes,
-        find_ffmpeg, flatten_compound_tracks, has_linked_audio_peer, has_transform_keyframes,
-        parse_loudness_report, parse_progress_line, primary_clip_transition_stop_pad_ns,
-        resolve_stem_position, resolve_subtitle_font_style, split_active_video_tracks_for_export,
-        video_input_seek_and_duration, write_chapter_metadata, AdjustmentExportRoi,
-        AdjustmentMatteInput, AudioChannelLayout, AudioCodec, ClipAudioFade,
-        ColorFilterCapabilities, ExportOptions, LoudnessReport, SurroundPosition, VideoCodec,
+        build_hsl_qualifier_filter_in, build_keyframed_property_expression, build_pan_expression,
+        build_pitch_filter, build_rotation_filter, build_scale_position_filter,
+        build_subtitle_filter_composited, build_surround_lfe_tap_filter,
+        build_surround_upmix_filter, build_temperature_tint_filter, build_timing_filter,
+        build_title_filter, build_volume_filter, clamped_primary_transition_timing,
+        clamped_primary_xfade_duration_s, compute_clip_audio_fades, compute_export_coloradj_params,
+        escape_filter_path, estimate_export_size_bytes, find_ffmpeg, flatten_compound_tracks,
+        has_linked_audio_peer, has_transform_keyframes, parse_loudness_report, parse_progress_line,
+        primary_clip_transition_stop_pad_ns, resolve_stem_position, resolve_subtitle_font_style,
+        split_active_video_tracks_for_export, video_input_seek_and_duration,
+        write_chapter_metadata, AdjustmentExportRoi, AdjustmentMatteInput, AudioChannelLayout,
+        AudioCodec, ClipAudioFade, ColorFilterCapabilities, ExportOptions, LoudnessReport,
+        SurroundPosition, VideoCodec,
     };
     use crate::media::color_math;
     use crate::model::clip::{
@@ -8617,7 +8684,7 @@ mod tests {
         let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
         clip.hsl_qualifier = Some(active_hsl_qualifier());
         let f = build_hsl_qualifier_filter_in(&clip, dir.path(), None);
-        assert!(f.starts_with(",format=gbrp,lut3d=file="), "filter: {f}");
+        assert!(f.starts_with(",format=gbrap,lut3d=file="), "filter: {f}");
         assert!(
             f.contains(":interp=trilinear,format=yuva420p"),
             "filter: {f}"
@@ -8626,7 +8693,7 @@ mod tests {
         assert!(!f.contains("geq="), "filter: {f}");
         // The referenced LUT exists and parses.
         let path = f
-            .trim_start_matches(",format=gbrp,lut3d=file=")
+            .trim_start_matches(",format=gbrap,lut3d=file=")
             .split(":interp=")
             .next()
             .unwrap()
@@ -8646,7 +8713,7 @@ mod tests {
         let mut clip = Clip::new("/tmp/test.mp4", 2_000_000_000, 0, ClipKind::Video);
         clip.hsl_qualifier = Some(active_hsl_qualifier());
         let f = build_hsl_qualifier_filter_in(&clip, not_a_dir.path(), Some(fallback.path()));
-        assert!(f.starts_with(",format=gbrp,lut3d=file="), "filter: {f}");
+        assert!(f.starts_with(",format=gbrap,lut3d=file="), "filter: {f}");
         assert!(
             f.contains(&escape_filter_path(&fallback.path().to_string_lossy())),
             "filter: {f}"

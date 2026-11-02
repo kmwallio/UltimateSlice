@@ -55,6 +55,10 @@ section:
 
 This is the fastest way to inspect preview/export parity for color, LUT, HDR
 tone-map, and compositing differences without running a full delivery export.
+For a numeric check, `tools/mcp_color_parity_chart.py` builds a flat-patch
+colour chart, runs a set of grades through both stills over MCP and prints the
+per-patch error (turn proxies, background prerender and hardware decode off
+first so the live still is the real preview colour chain).
 
 Reference stills are capped at 4 per project. They are review aids, not timeline
 media: deleting one never affects clips on the timeline.

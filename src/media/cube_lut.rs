@@ -290,6 +290,37 @@ impl CubeLut {
     }
 }
 
+/// Delete the oldest `<prefix>*.cube` files in `dir` beyond `keep` (by mtime).
+/// Best effort: the caches this serves are pure accelerators, so errors are
+/// ignored.
+pub(crate) fn prune_cube_files(dir: &Path, prefix: &str, keep: usize) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension().map(|x| x == "cube").unwrap_or(false)
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.starts_with(prefix))
+                    .unwrap_or(false)
+        })
+        .filter_map(|p| {
+            let modified = fs::metadata(&p).and_then(|m| m.modified()).ok()?;
+            Some((modified, p))
+        })
+        .collect();
+    if files.len() <= keep {
+        return;
+    }
+    files.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in files.into_iter().skip(keep) {
+        let _ = fs::remove_file(path);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

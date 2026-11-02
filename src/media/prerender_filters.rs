@@ -257,6 +257,33 @@ pub(crate) fn prerender_build_anamorphic_filter(clip: &ProgramClip) -> String {
     }
 }
 
+/// Static grades: one compiled LUT measured from the live preview chain
+/// (`color_lut`) in place of the LUT + eq + temperature/tint + grading
+/// stages, so prerendered segments match the live slot. `None` when a colour
+/// slider is keyframed or the LUT could not be built; `Some("")` when the
+/// clip has no colour work.
+pub(crate) fn prerender_build_static_color_lut_stage(
+    clip: &ProgramClip,
+    source_is_proxy: bool,
+) -> Option<String> {
+    if crate::media::color_lut::color_lut_disabled_by_env()
+        || !crate::media::color_lut::program_clip_color_is_static(clip)
+    {
+        return None;
+    }
+    let spec = crate::media::color_lut::ColorGradeSpec::from_program_clip(clip, !source_is_proxy);
+    match crate::media::color_lut::color_lut_filter_stage(&spec) {
+        Ok(stage) => Some(stage.unwrap_or_default()),
+        Err(err) => {
+            log::warn!(
+                "color_lut: prerender of clip {} falls back to the per-stage colour chain: {err}",
+                clip.id
+            );
+            None
+        }
+    }
+}
+
 pub(crate) fn prerender_build_lut_filter(clip: &ProgramClip, source_is_proxy: bool) -> String {
     if source_is_proxy {
         return String::new();

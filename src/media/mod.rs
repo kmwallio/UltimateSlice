@@ -12,6 +12,7 @@ pub mod bg_removal_cache;
 pub mod cache_key;
 pub mod cache_support;
 pub mod clip_embedding_cache;
+pub mod color_lut;
 pub mod color_match;
 pub mod color_math;
 pub mod cube_lut;

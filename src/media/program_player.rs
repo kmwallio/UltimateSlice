@@ -88,7 +88,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_PREVIEW_AUDIO_GAIN: f64 = 3.981_071_705_5; // +12 dB
-const BACKGROUND_PRERENDER_CACHE_VERSION: u32 = 5;
+const BACKGROUND_PRERENDER_CACHE_VERSION: u32 = 6;
 const PROGRAM_PREVIEW_AUDIO_RATE: i32 = 48_000;
 const PROGRAM_PREVIEW_AUDIO_CHANNELS: i32 = 2;
 const MAX_READY_PRERENDER_SEGMENTS: usize = 24;
@@ -4372,6 +4372,10 @@ impl ProgramPlayer {
     /// `export_displayed_frame_ppm`, but returns the frame in memory rather
     /// than writing to disk.
     pub fn capture_current_frame_rgba(&mut self) -> Result<ScopeFrame> {
+        // Debugging aid (no-op unless GST_DEBUG_DUMP_DOT_DIR is set): the
+        // graph as negotiated at capture time, i.e. with every slot's caps.
+        self.pipeline
+            .debug_to_dot_file_with_ts(gst::DebugGraphDetails::ALL, "program_player_capture");
         let was_playing = self.state == PlayerState::Playing;
         if was_playing {
             self.pause();
@@ -10140,7 +10144,7 @@ impl ProgramPlayer {
             proc_h,
             self.project_width,
             self.project_height,
-            None,
+            Vec::new(),
             Arc::new(Mutex::new(Vec::new())),
             Arc::new(Mutex::new(None)),
         );
@@ -10403,6 +10407,9 @@ impl ProgramPlayer {
     fn prerender_signature_for_active(&self, active: &[usize]) -> u64 {
         let mut hasher = DefaultHasher::new();
         BACKGROUND_PRERENDER_CACHE_VERSION.hash(&mut hasher);
+        // Segments rendered through the compiled colour LUT and through the
+        // per-stage chain are not interchangeable.
+        crate::media::color_lut::color_lut_disabled_by_env().hash(&mut hasher);
         self.project_width.hash(&mut hasher);
         self.project_height.hash(&mut hasher);
         self.preview_divisor.hash(&mut hasher);
@@ -11275,7 +11282,7 @@ impl ProgramPlayer {
         } else if self.should_prioritize_ui_responsiveness() {
             // Responsiveness-first paused seeks: keep each per-decoder wait tiny
             // so the GTK main loop regains control quickly.
-            (self.effective_wait_timeout_ms(220) / self.slots.len() as u64).max(45)
+            (self.effective_wait_timeout_ms(220) / (self.slots.len() as u64).max(1)).max(45)
         } else {
             500
         };
@@ -13068,6 +13075,34 @@ impl ProgramPlayer {
     /// If `lut` is `Some`, a buffer pad probe is attached to the capsfilter src pad
     /// that applies the 3D LUT to every RGBA frame. This provides real-time LUT preview
     /// without requiring LUT-baked proxy media.
+    /// `capsfilter` pinning `video/x-raw,format=RGBA` (any size), used to stop
+    /// the geometry elements in the slot chain from negotiating AYUV.
+    /// True when the caps carry no colour range: no `colorimetry` field, or a
+    /// numeric colorimetry whose range component is 0 (unknown). Named
+    /// colorimetries (`bt709`, `bt601`, `sRGB`, …) all imply a range.
+    fn caps_color_range_is_unknown_impl(caps: &gst::CapsRef) -> bool {
+        let Some(st) = caps.structure(0) else {
+            return true;
+        };
+        match st.get::<&str>("colorimetry") {
+            Ok(c) => c.starts_with("0:"),
+            Err(_) => true,
+        }
+    }
+
+    fn rgba_pin(name: &str) -> Option<gst::Element> {
+        gst::ElementFactory::make("capsfilter")
+            .name(name)
+            .property(
+                "caps",
+                &gst::Caps::builder("video/x-raw")
+                    .field("format", "RGBA")
+                    .build(),
+            )
+            .build()
+            .ok()
+    }
+
     fn build_effects_bin(
         clip: &ProgramClip,
         animated_svg_rendered: bool,
@@ -13075,7 +13110,7 @@ impl ProgramPlayer {
         target_height: u32,
         project_width: u32,
         project_height: u32,
-        lut: Option<Arc<CubeLut>>,
+        luts: Vec<Arc<CubeLut>>,
         mask_shared: Arc<Mutex<Vec<crate::model::clip::ClipMask>>>,
         hsl_shared: Arc<Mutex<Option<crate::model::clip::HslQualifier>>>,
     ) -> (
@@ -13314,6 +13349,41 @@ impl ProgramPlayer {
             .property("add-borders", true)
             .build()
             .ok();
+        if !luts.is_empty() {
+            if let Some(sink) = convertscale.as_ref().and_then(|cs| cs.static_pad("sink")) {
+                sink.add_probe(gst::PadProbeType::EVENT_DOWNSTREAM, |_pad, info| {
+                    let replacement = match info.data {
+                        Some(gst::PadProbeData::Event(ref ev)) => match ev.view() {
+                            gst::EventView::Caps(c) => {
+                                let caps = c.caps_owned();
+                                if caps_color_range_is_unknown(&caps) {
+                                    let mut new_caps = caps.copy();
+                                    new_caps
+                                        .get_mut()
+                                        .unwrap()
+                                        .set("colorimetry", "1:3:5:1");
+                                    log::info!(
+                                        "ProgramPlayer: LUT clip source has no colour range; assuming BT.709 full range ({})",
+                                        caps.structure(0)
+                                            .and_then(|st| st.get::<&str>("colorimetry").ok())
+                                            .unwrap_or("unset")
+                                    );
+                                    Some(gst::event::Caps::new(&new_caps))
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    if let Some(ev) = replacement {
+                        info.data = Some(gst::PadProbeData::Event(ev));
+                    }
+                    gst::PadProbeReturn::Ok
+                });
+            }
+        }
         #[cfg(target_os = "macos")]
         if let Some(ref cs) = convertscale {
             if cs.find_property("n-threads").is_some() {
@@ -13526,28 +13596,25 @@ impl ProgramPlayer {
                 chain.push(cs);
             }
         }
-        // 0b. When a real-time LUT is active, override the source colorimetry
-        //    to BT.709 full-range.  Many camera files (S-Log3 HEVC, etc.) carry
-        //    unknown/unset colorimetry; GStreamer's default YUV→RGB conversion
-        //    for unknown sources diverges from FFmpeg's swscale default, causing
-        //    a systematic RGB offset (~4 RMSE) that the steep LUT amplifies into
-        //    a visible pink/magenta cast.  Setting BT.709 via capssetter reduces
-        //    the post-LUT RMSE from ~6.4 to ~2.8 (measured with S-Log3 33-pt LUT).
-        if lut.is_some() {
-            if let Some(cs) = gst::ElementFactory::make("capssetter")
-                .property("join", true)
-                .property(
-                    "caps",
-                    &gst::Caps::builder("video/x-raw")
-                        .field("colorimetry", "1:3:5:1")
-                        .build(),
-                )
-                .build()
-                .ok()
-            {
-                chain.push(cs);
-            }
-        }
+        // 0b. When a real-time LUT is active and the source carries NO colour
+        //    range, interpret it as BT.709 full range.  Many camera files
+        //    (S-Log3 HEVC, etc.) carry unknown/unset colorimetry; GStreamer
+        //    treats an unknown range as full (0–255) while its default
+        //    matrix for such sources diverges from FFmpeg's swscale default,
+        //    causing a systematic RGB offset (~4 RMSE) that a steep LUT
+        //    amplifies into a visible pink/magenta cast.  Pinning BT.709 full
+        //    range reduced the post-LUT RMSE from ~6.4 to ~2.8 (measured with
+        //    an S-Log3 33-pt LUT).
+        //
+        //    A source that *does* declare its range (most phone / DSLR /
+        //    broadcast files are tagged limited; GoPro and Sony files are
+        //    tagged full) is left alone: forcing full range on a tagged
+        //    limited-range file skipped the 16–235 expansion and every LUT'd
+        //    clip previewed darker and flatter than its export (measured on a
+        //    tagged chart: blues 76,72,223 came out 77,28,252 in preview vs
+        //    64,5,255 in export).  Done with a caps-event probe rather than a
+        //    `capssetter` so the decision can look at the decoded caps.
+        // (The probe is attached to convertscale's sink pad where it is created.)
         // 0. HDR tone mapping — insert a tone-mapping element before the RGBA
         //    capsfilter clamps to SDR.  Try GPU-accelerated paths first:
         //      1. glcolorconvert (GL-based, widely available with GL plugins)
@@ -13583,15 +13650,19 @@ impl ProgramPlayer {
         // Applied AFTER downscale (RGBA at processing resolution) so the
         // trilinear interpolation runs on the smaller preview buffer, and
         // BEFORE any color effects — matching export LUT placement order.
-        if let (Some(ref cf), Some(lut_ref)) = (&capsfilter_proj, &lut) {
-            let lut_clone = lut_ref.clone();
+        if let (Some(ref cf), false) = (&capsfilter_proj, luts.is_empty()) {
+            // Every LUT of the stack, in order, each rounding to 8-bit like
+            // the export-side `lut3d` chain (and the compiled colour LUT).
+            let luts_clone = luts.clone();
             cf.static_pad("src").unwrap().add_probe(
                 gst::PadProbeType::BUFFER,
                 move |_pad, info| {
                     if let Some(gst::PadProbeData::Buffer(ref mut buffer)) = info.data {
                         let buf = buffer.make_mut();
                         if let Ok(mut map) = buf.map_writable() {
-                            lut_clone.apply_to_rgba_buffer(map.as_mut_slice());
+                            for lut in &luts_clone {
+                                lut.apply_to_rgba_buffer(map.as_mut_slice());
+                            }
                         }
                     }
                     gst::PadProbeReturn::Ok
@@ -13907,6 +13978,16 @@ impl ProgramPlayer {
         if let Some(ref e) = videobox_zoom {
             chain.push(e.clone());
         }
+        // Keep the slot in RGBA from here to the compositor.  Without this
+        // pin, videobox/rotate/videoflip negotiate AYUV between themselves and
+        // the compositor converts back: an 8-bit RGB→YUV→RGB round trip with
+        // untagged colorimetry that darkened every clip by ~5 code values and
+        // clipped saturated colours (measured on a flat colour chart: 23/116/255
+        // greys came out 18/111/249).  Pinning RGBA removes two conversions
+        // per frame and makes the preview pixel-exact against the source.
+        if let Some(cf) = Self::rgba_pin("rgba_pin_post_zoom") {
+            chain.push(cf);
+        }
         // 5. Rotate / flip after zoom so scaled-down clips don't get
         // prematurely clipped by rotation at full-frame size.
         if let Some(ref e) = conv3 {
@@ -13927,6 +14008,10 @@ impl ProgramPlayer {
         }
         if let Some(ref e) = textoverlay {
             chain.push(e.clone());
+        }
+        // Same pin at the bin output (see rgba_pin_post_zoom above).
+        if let Some(cf) = Self::rgba_pin("rgba_pin_out") {
+            chain.push(cf);
         }
 
         if chain.is_empty() {
@@ -14883,6 +14968,14 @@ impl ProgramPlayer {
                 );
             let grading_filter =
                 crate::media::prerender_filters::prerender_build_grading_filter(clip);
+            let (lut_filter, color_filter, temp_tint_filter, grading_filter) =
+                match crate::media::prerender_filters::prerender_build_static_color_lut_stage(
+                    clip,
+                    *source_is_proxy,
+                ) {
+                    Some(stage) => (String::new(), stage, String::new(), String::new()),
+                    None => (lut_filter, color_filter, temp_tint_filter, grading_filter),
+                };
             let denoise_filter =
                 crate::media::prerender_filters::prerender_build_denoise_filter(clip);
             let sharpen_filter =
@@ -15131,6 +15224,13 @@ impl ProgramPlayer {
                 );
             let adj_grading =
                 crate::media::prerender_filters::prerender_build_grading_filter(adj_clip);
+            let (adj_color, adj_temp_tint, adj_grading) =
+                match crate::media::prerender_filters::prerender_build_static_color_lut_stage(
+                    adj_clip, false,
+                ) {
+                    Some(stage) => (stage, String::new(), String::new()),
+                    None => (adj_color, adj_temp_tint, adj_grading),
+                };
             let adj_denoise =
                 crate::media::prerender_filters::prerender_build_denoise_filter(adj_clip);
             let adj_sharpen =
@@ -15442,13 +15542,14 @@ impl ProgramPlayer {
         let lut_baked_in_source = !self.proxy_wanted_for_source(&clip.source_path)
             && self.preview_luts
             && !clip.lut_paths.is_empty();
-        let realtime_lut = if lut_baked_in_source {
-            None
+        let realtime_luts: Vec<Arc<CubeLut>> = if lut_baked_in_source {
+            Vec::new()
         } else {
             clip.lut_paths
-                .first()
+                .iter()
                 .filter(|p| !p.is_empty())
-                .and_then(|p| self.get_or_parse_lut(p))
+                .filter_map(|p| self.get_or_parse_lut(p))
+                .collect()
         };
 
         // Build per-slot effects bin.
@@ -15482,7 +15583,7 @@ impl ProgramPlayer {
             proc_h,
             self.project_width,
             self.project_height,
-            realtime_lut,
+            realtime_luts,
             slot_mask_data.clone(),
             slot_hsl_data.clone(),
         );
@@ -17375,6 +17476,11 @@ impl ProgramPlayer {
             if was_playing {
                 let _ = self.pipeline.set_state(gst::State::Playing);
             }
+            // Debugging aid: with GST_DEBUG_DUMP_DOT_DIR set, write the fully
+            // negotiated pipeline graph (caps, colorimetry, every element) after
+            // each rebuild. A no-op without the env var.
+            self.pipeline
+                .debug_to_dot_file_with_ts(gst::DebugGraphDetails::ALL, "program_player_rebuild");
             log::info!(
                 "rebuild_pipeline_at: END timeline_pos={}ns slots=0 elapsed_ms={}",
                 timeline_pos,
@@ -17685,6 +17791,11 @@ impl ProgramPlayer {
         if was_playing {
             self.record_rebuild_duration_ms(rebuild_elapsed_ms);
         }
+        // Debugging aid: with GST_DEBUG_DUMP_DOT_DIR set, write the fully
+        // negotiated pipeline graph (caps, colorimetry, every element) after
+        // each rebuild. A no-op without the env var.
+        self.pipeline
+            .debug_to_dot_file_with_ts(gst::DebugGraphDetails::ALL, "program_player_rebuild");
         log::info!(
             "rebuild_pipeline_at: END timeline_pos={}ns slots={} elapsed_ms={} scale={:.2} phases=teardown:{}|build:{}|link:{}|preroll:{}|seek:{}",
             timeline_pos,
@@ -18842,6 +18953,10 @@ fn clamp_f64_to_pspec(pspec: &glib::ParamSpec, val: f64) -> f64 {
 /// Frei0r parameters are stored as f64 in our model, but the actual GStreamer
 /// property may be `gdouble`, `gboolean`, or `gchararray`. Setting a `gdouble`
 /// on a `gboolean` property panics, so we inspect the property type first.
+fn caps_color_range_is_unknown(caps: &gst::Caps) -> bool {
+    ProgramPlayer::caps_color_range_is_unknown_impl(caps)
+}
+
 fn set_frei0r_property(elem: &gst::Element, param: &str, val: f64) {
     // Skip NaN/Inf — setting non-finite values panics in GStreamer.
     if !val.is_finite() {
@@ -20280,7 +20395,7 @@ mod tests {
             360,
             640,
             360,
-            None,
+            Vec::new(),
             mask_shared,
             hsl_shared,
         );

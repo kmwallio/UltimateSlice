@@ -85,7 +85,7 @@ Adjustments are applied live via GStreamer `videobalance` and rendered through f
 | **Shadows Warmth** | −1.0 → 1.0 | 0.0 | Warm/cool shift in shadows (left = cooler, right = warmer) |
 | **Shadows Tint** | −1.0 → 1.0 | 0.0 | Green/magenta shift in shadows |
 
-> **Note:** Exposure uses preview-aligned brightness/contrast deltas in both Program Monitor and export (not gamma-only mapping). Per-tone Warmth/Tint uses a non-linear response with fine control near `0.0` and stronger effect at slider ends for creative grading (e.g., cooler shadows, warmer highlights). Preview applies GStreamer's frei0r `3-point-color-balance` plugin, which uses quadratic (parabola) interpolation internally. Export now emits matching FFmpeg `lutrgb` expressions with identical parabola coefficients for near-exact preview/export parity. Shadows warmth/tint endpoints are intentionally stronger for more pronounced creative looks at slider extremes.
+> **Note:** Exposure uses preview-aligned brightness/contrast deltas in both Program Monitor and export (not gamma-only mapping). Per-tone Warmth/Tint uses a non-linear response with fine control near `0.0` and stronger effect at slider ends for creative grading (e.g., cooler shadows, warmer highlights). Preview applies GStreamer's frei0r `3-point-color-balance` plugin, which uses quadratic (parabola) interpolation internally. For static grades export no longer re-expresses this in FFmpeg at all: the whole colour stack is compiled into one LUT measured from the preview's elements (see the Export page), so the two match exactly; keyframed grades keep the matching FFmpeg `lutrgb` parabola path. Shadows warmth/tint endpoints are intentionally stronger for more pronounced creative looks at slider extremes.
 
 ---
 

@@ -372,38 +372,8 @@ pub fn ensure_hsl_qualifier_lut_file_in(
         let _ = std::fs::remove_file(&tmp);
         format!("failed to move {} into place: {e}", path.display())
     })?;
-    prune_hsl_lut_cache(dir, HSL_LUT_CACHE_MAX_FILES);
+    crate::media::cube_lut::prune_cube_files(dir, "hslq-", HSL_LUT_CACHE_MAX_FILES);
     Ok(path)
-}
-
-/// Delete the oldest `hslq-*.cube` files in `dir` beyond `keep`. Best effort;
-/// errors are ignored because the cache is purely an accelerator.
-fn prune_hsl_lut_cache(dir: &Path, keep: usize) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension().map(|x| x == "cube").unwrap_or(false)
-                && p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|n| n.starts_with("hslq-"))
-                    .unwrap_or(false)
-        })
-        .filter_map(|p| {
-            let modified = std::fs::metadata(&p).and_then(|m| m.modified()).ok()?;
-            Some((modified, p))
-        })
-        .collect();
-    if files.len() <= keep {
-        return;
-    }
-    files.sort_by(|a, b| b.0.cmp(&a.0));
-    for (_, path) in files.into_iter().skip(keep) {
-        let _ = std::fs::remove_file(path);
-    }
 }
 
 #[cfg(test)]

@@ -1846,10 +1846,19 @@ fn build_bake_video_filter(clip: &Clip) -> String {
         }
     };
 
-    push(crate::media::export::build_lut_filter_prefix(clip));
-    push(crate::media::export::build_color_filter(clip));
-    // HSL qualifier — selective-color pass.
-    push(crate::media::export::build_hsl_qualifier_filter(clip));
+    if let Some(stage) = crate::media::export::build_static_color_lut_stage(clip) {
+        // Static grade: the whole colour stack (LUTs, primaries,
+        // temperature/tint, 3-point, HSL) as one LUT measured from the
+        // preview chain, so the sidecar looks exactly like the live preview.
+        push(stage);
+    } else {
+        push(crate::media::export::build_lut_filter_prefix(clip));
+        push(crate::media::export::build_color_filter(clip));
+        push(crate::media::export::build_temperature_tint_filter(clip));
+        push(crate::media::export::build_grading_filter(clip));
+        // HSL qualifier — selective-color pass.
+        push(crate::media::export::build_hsl_qualifier_filter(clip));
+    }
     push(crate::media::export::build_denoise_filter(clip));
     push(crate::media::export::build_sharpen_filter(clip));
     push(crate::media::export::build_blur_filter(clip));

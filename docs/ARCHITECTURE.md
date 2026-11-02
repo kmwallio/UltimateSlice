@@ -745,6 +745,64 @@ expressions, which `geq` does not guarantee (planes are evaluated
 separately) — on ffmpeg 8 it rendered a solid red frame. Any new static
 colour effect should take the same LUT route rather than a `geq` expression.
 
+**Compiled per-clip colour LUT (static grades).** `src/media/color_lut.rs`
+goes one step further for the whole static colour stack: instead of
+re-expressing each preview stage as an FFmpeg filter and bridging the two
+with calibration polynomials, it *measures* the preview chain. A 4096²
+Hald image holding every 8-bit RGB triple is run through the same GStreamer
+elements the slot uses (`videoconvert ! videobalance ! frei0r coloradj_RGB
+! frei0r 3-point-color-balance`, configured by the same
+`compute_videobalance_params` / `compute_coloradj_params` /
+`compute_3point_params` calls as `build_effects_bin`, with the same
+frei0r-missing fallbacks), with the CPU stages applied around it exactly as
+the pad probes do (user `.cube` LUTs before, `apply_hsl_qualifier_to_rgba_buffer`
+after). The resulting transfer function is sampled onto a 65³ `.cube`
+(nodes coincide with 17³/33³/65³ user LUTs, so those reproduce exactly) and
+applied by FFmpeg as one `format=gbrap,lut3d=…:interp=trilinear,format=yuva420p`
+stage in place of the LUT prefix + `eq` + temperature/tint + `lutrgb` + HSL
+stages. Callers: `export::build_static_color_lut_stage` (primary and
+secondary clip chains, adjustment layers, Render-and-Replace leaf bakes) and
+`prerender_filters::prerender_build_static_color_lut_stage` (background
+prerender segments and their adjustment layers). A clip with keyframes on
+brightness / contrast / saturation / temperature / tint keeps the per-stage
+chain (`clip_color_is_static`); `ULTIMATESLICE_DISABLE_COLOR_LUT=1` forces
+the per-stage chain everywhere (bisecting aid; also folded into the
+prerender cache signature). Compiling takes ~100 ms and is cached under
+`$XDG_CACHE_HOME/ultimateslice/color_luts/cg-<sha256>.cube` keyed by every
+slider, the LUT files (path + size + mtime), the HSL fields and which frei0r
+elements exist; pruned to 24 files; temp-dir fallback; the stage is skipped
+with a warning if nothing is writable.
+
+Measured with `tools/mcp_color_parity_chart.py` (84 flat patches, live
+Program Monitor still vs export-pipeline still, mean absolute 8-bit error,
+proxies / prerender / hardware decode off): identity 1.8 (the floor —
+GStreamer's limited-range YUV→RGB conversion lands ~2 code values under
+FFmpeg's across the whole ramp), primaries 2.4 → 1.5 (max 32 → 7),
+temperature+tint 10.7 → 1.3 (max 49 → 4), 3-point 1.5 → 2.1, user LUT
+6.5 → 1.7 (max 24 → 6), everything + LUT 8.2 → 2.1 (max 100 → 20). A strong
+grade amplifies the 2-level input floor, which is where the remaining error
+lives. The preview itself had to be fixed first for any of this to hold:
+
+- every slot left `build_effects_bin` as untagged **AYUV** (videobox /
+  rotate / videoflip negotiated it among themselves) and the compositor
+  converted back, an 8-bit RGB→YUV→RGB round trip that darkened every clip
+  by ~5 code values and clipped saturated colours; `rgba_pin_post_zoom` /
+  `rgba_pin_out` capsfilters now keep the slot in RGBA to the compositor
+  (also two fewer conversions per frame);
+- the LUT-time colorimetry override (`1:3:5:1`, BT.709 full range) is now a
+  caps-event probe on `convertscale`'s sink that only fires when the decoded
+  caps carry **no** range (`0:…` or unset); a source tagged limited or full
+  is trusted, as FFmpeg does. Forcing full range on a tagged limited-range
+  file skipped the 16–235 expansion and made LUT'd clips preview darker than
+  their export;
+- the realtime LUT probe applies every LUT of the stack in order (it used to
+  apply only the first), matching export and the compiled LUT.
+
+`GST_DEBUG_DUMP_DOT_DIR=<dir>` makes the Program Monitor write its
+negotiated pipeline graph after every rebuild (`program_player_rebuild`) and
+at every reference-still capture (`program_player_capture`); the capture-time
+dump is the one that shows the slots' caps.
+
 ### Audio analysis utilities
 
 Module: `src/media/audio_analysis.rs`. Subprocess-based FFmpeg utilities
