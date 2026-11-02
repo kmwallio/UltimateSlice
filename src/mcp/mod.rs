@@ -750,6 +750,18 @@ pub enum McpCommand {
         enabled: bool,
         reply: SyncSender<Value>,
     },
+    SetBackgroundRenderMode {
+        mode: String,
+        reply: SyncSender<Value>,
+    },
+    GetBackgroundRenderStatus {
+        reply: SyncSender<Value>,
+    },
+    SetBackgroundRenderClip {
+        clip_id: String,
+        enabled: bool,
+        reply: SyncSender<Value>,
+    },
     SetProgramMonitorHud {
         enabled: bool,
         reply: SyncSender<Value>,

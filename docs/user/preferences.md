@@ -203,6 +203,27 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
   - `get_preferences` returns `persist_prerenders_next_to_project_file`.
   - `set_prerender_project_persistence` toggles the setting.
 
+## Background Rendering (Proxies)
+
+**Background rendering (effect stacks)** is automatic, preview-only Render and Replace. Instead of ticking **Render and Replace** on a clip yourself, UltimateSlice decides which clips the Program Monitor cannot keep up with and bakes their effect stack to a ProRes sidecar in the background. Once the sidecar is ready the preview switches to it (no rebuild, no playhead jump) and the live effects for that clip are suppressed so they apply exactly once.
+
+- **Off** — nothing is baked automatically; only clips with the manual **Render and Replace** checkbox get a sidecar.
+- **When playback drops frames** (default) — while playing, the monitor watches the Program Monitor's dropped-frame counter and effective frame rate. When a clip under the playhead keeps dropping frames for a sustained stretch (roughly a second of pressure with a dozen or more drops, or two seconds below 80 % of the project frame rate), that clip is baked. The first second after play starts and after each cut is ignored so boundary staging never counts. Only clips that actually have something in the baked scope qualify (see **Render and Replace** in the Inspector guide); a plain clip that drops frames because of its codec is left to the proxy system.
+- **Always, for every complex effect stack** — every top-level clip whose stack goes beyond the basic colour sliders (LUTs, frei0r, blur / denoise / sharpness, stabilization, HSL qualifier, chroma key, static masks, colour keyframes, LADSPA audio effects, compounds with two or more video tracks or any inner effect, multicams) is baked as soon as it exists or is edited into that state.
+
+What stays the same in every mode:
+
+- **Export is unaffected.** Auto bakes are a preview optimisation; the exporter keeps rendering the effects from the original media. Tick **Render and Replace** on a clip if you want export to use the sidecar too.
+- **The project file is unaffected.** The auto set lives for the session; nothing is marked dirty. Editing a baked field re-bakes in the background, exactly like the manual toggle.
+- The Inspector's status row shows **Background render queued / baking… / playing baked sidecar / failed** for an auto-baked clip and offers **Use live effects** to opt that clip out for the rest of the session. Ticking **Render and Replace** on an auto-baked clip turns it into a manual bake.
+- A toast announces each automatic bake; the Jobs tray shows **Render and Replace** progress; bake jobs run at a lower CPU priority so they do not steal time from playback.
+- Sidecars share the manual cache (`$XDG_CACHE_HOME/ultimateslice/render_replace/`, LRU-evicted).
+- MCP automation:
+  - `get_preferences` returns `background_render_mode`.
+  - `set_background_render_mode` with `off` / `when_dropping` / `always`.
+  - `get_background_render_status` lists auto-baked clips with their bake status, opted-out clips, the per-clip pressure scores and the live counters.
+  - `set_background_render_clip` forces one clip into or out of the auto set.
+
 ## Shortcuts
 
 The **Shortcuts** page lists every rebindable action grouped by context (**Global**, **Timeline**, **Source Monitor**) with its category and current keys. The full default list is in [shortcuts.md](shortcuts.md).

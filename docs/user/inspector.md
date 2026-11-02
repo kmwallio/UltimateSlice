@@ -193,6 +193,8 @@ The **Render and Replace** checkbox (in the Effects section, above the Frei0r ch
 
 The status row under the checkbox shows **Baking… / Sidecar ready / Bake failed**, and the Jobs tray surfaces overall progress. Sidecars live under `$XDG_CACHE_HOME/ultimateslice/render_replace/` and are LRU-evicted. MCP: `set_clip_render_replace`.
 
+**Background rendering (automatic).** With **Preferences → Proxies → Background rendering** set to *When playback drops frames* (the default) or *Always*, UltimateSlice bakes clips on its own when the Program Monitor cannot keep up with their effect stack. Such a clip keeps the checkbox unticked, but its status row reads **Background render queued / baking… / playing baked sidecar / failed**, and the button next to it becomes **Use live effects** — click it to opt that clip out for the rest of the session. Automatic bakes affect the preview only (export still renders the effects) and never touch the project file. Tick **Render and Replace** to make the bake manual and used by export as well. See [Preferences → Background Rendering](preferences.md#background-rendering-proxies).
+
 ---
 
 ## Audio

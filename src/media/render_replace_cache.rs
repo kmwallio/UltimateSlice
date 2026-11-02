@@ -1832,57 +1832,37 @@ fn strip_subtitle_visibility_recursive(tracks: &mut [crate::model::track::Track]
 /// effects into the sidecar. Reuses the same helpers the MP4 export
 /// pipeline uses so preview-vs-export parity is preserved downstream.
 fn build_bake_video_filter(clip: &Clip) -> String {
+    // The export helpers are written for string concatenation: the LUT
+    // prefix ends with a comma, and the HSL / denoise / sharpen / blur /
+    // chroma-key fragments start with one. Normalise every fragment to a
+    // bare filter chain before joining, otherwise the result carries an
+    // empty stage (`a,,b` or a leading/trailing comma) and ffmpeg rejects
+    // the whole graph with "No such filter: ''".
     let mut parts: Vec<String> = Vec::new();
+    let mut push = |raw: String| {
+        let trimmed = raw.trim_matches(',');
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_string());
+        }
+    };
 
-    let lut = crate::media::export::build_lut_filter_prefix(clip);
-    if !lut.is_empty() {
-        parts.push(lut);
-    }
-    let color = crate::media::export::build_color_filter(clip);
-    if !color.is_empty() {
-        parts.push(color);
-    }
-    // HSL qualifier — selective-color pass. `build_hsl_qualifier_filter`
-    // returns a chain prefixed with a leading comma (designed for
-    // concatenation inside a pre-built filter string); strip it so
-    // we can join it alongside the other baked filters below.
-    let hsl_raw = crate::media::export::build_hsl_qualifier_filter(clip);
-    let hsl = hsl_raw.strip_prefix(',').unwrap_or(&hsl_raw).to_string();
-    if !hsl.is_empty() {
-        parts.push(hsl);
-    }
-    let denoise = crate::media::export::build_denoise_filter(clip);
-    if !denoise.is_empty() {
-        parts.push(denoise);
-    }
-    let sharpen = crate::media::export::build_sharpen_filter(clip);
-    if !sharpen.is_empty() {
-        parts.push(sharpen);
-    }
-    let blur = crate::media::export::build_blur_filter(clip);
-    if !blur.is_empty() {
-        parts.push(blur);
-    }
-    let frei0r = crate::media::export::build_frei0r_effects_filter(clip);
-    if !frei0r.is_empty() {
-        parts.push(frei0r);
-    }
-    // Chroma key — produces per-pixel alpha. The builder returns a
-    // leading-comma prefixed chain, same as HSL qualifier — strip
-    // the comma so we can join normally. When this fires, the job
-    // must use the ProRes 4444 encoder path so alpha survives into
-    // the sidecar; `needs_alpha` below drives that switch.
-    let ck_raw = crate::media::export::build_chroma_key_filter(clip);
-    let ck = ck_raw.strip_prefix(',').unwrap_or(&ck_raw).to_string();
-    if !ck.is_empty() {
-        parts.push(ck);
-    }
+    push(crate::media::export::build_lut_filter_prefix(clip));
+    push(crate::media::export::build_color_filter(clip));
+    // HSL qualifier — selective-color pass.
+    push(crate::media::export::build_hsl_qualifier_filter(clip));
+    push(crate::media::export::build_denoise_filter(clip));
+    push(crate::media::export::build_sharpen_filter(clip));
+    push(crate::media::export::build_blur_filter(clip));
+    push(crate::media::export::build_frei0r_effects_filter(clip));
+    // Chroma key — produces per-pixel alpha. When this fires, the job
+    // must use the ProRes 4444 encoder path so alpha survives into the
+    // sidecar; `needs_alpha` in the caller drives that switch.
+    push(crate::media::export::build_chroma_key_filter(clip));
 
     if parts.is_empty() {
         // No effects in the baked scope — return a simple passthrough so
-        // the sidecar is still valid ProRes. (Could be optimized by
-        // skipping the request entirely; left as-is for Phase 1
-        // simplicity.)
+        // the sidecar is still valid ProRes. Callers that want to avoid
+        // the bake entirely check `clip_has_bakeable_effects` first.
         "null".to_string()
     } else {
         parts.join(",")
@@ -2145,7 +2125,7 @@ fn run_leaf_bake(
         output_path.to_string(),
     ]);
     let outcome = (|| -> JobOutcome {
-        let mut child = match Command::new("ffmpeg").args(&args).spawn() {
+        let mut child = match background_ffmpeg_command().args(&args).spawn() {
             Ok(c) => c,
             Err(e) => {
                 log::warn!("RenderReplaceCache: leaf ffmpeg spawn error: {e}");
@@ -2232,7 +2212,7 @@ fn run_vidstab_detect(
         params.trf_path,
         params.shakiness
     );
-    let mut child = match Command::new("ffmpeg").args(&args).spawn() {
+    let mut child = match background_ffmpeg_command().args(&args).spawn() {
         Ok(c) => c,
         Err(e) => {
             log::warn!("RenderReplaceCache: vidstab detect spawn error: {e}");
@@ -2323,6 +2303,114 @@ fn run_compound_bake(
     }
 }
 
+// ── Background rendering (auto Render-and-Replace) helpers ───────────────
+
+/// Whether a bake of `clip` would actually change anything: the clip is a
+/// bakeable kind and carries at least one baked-scope effect (or, for
+/// compounds / multicams, has content to flatten). Used by background
+/// rendering so an auto-bake is never queued for a clip whose sidecar
+/// would be a plain transcode of the source.
+pub fn clip_has_bakeable_effects(clip: &Clip) -> bool {
+    match clip.kind {
+        ClipKind::Compound => clip
+            .compound_tracks
+            .as_ref()
+            .map_or(false, |tracks| tracks.iter().any(|t| !t.clips.is_empty())),
+        ClipKind::Multicam => clip
+            .multicam_angles
+            .as_ref()
+            .map_or(false, |angles| !angles.is_empty()),
+        ClipKind::Video | ClipKind::Image | ClipKind::Audio => {
+            if clip.source_path.trim().is_empty() {
+                return false;
+            }
+            build_bake_video_filter(clip) != "null"
+                || !crate::media::export::build_ladspa_effects_filter(clip).is_empty()
+                || leaf_masks_bakeable(&clip.masks, clip.chroma_key_enabled)
+                || (matches!(clip.kind, ClipKind::Video)
+                    && clip.vidstab_enabled
+                    && clip.vidstab_smoothing > 0.0)
+        }
+        _ => false,
+    }
+}
+
+/// Whether `clip`'s effect stack is *complex*: something heavier than the
+/// basic colour sliders, which the live preview handles cheaply. This is
+/// the predicate behind the "Always" background-rendering mode — the
+/// "when playback drops frames" mode uses `clip_has_bakeable_effects`
+/// plus measured frame drops instead, so a cheap stack that still stalls
+/// a slow machine is covered there.
+pub fn clip_effect_stack_is_complex(clip: &Clip) -> bool {
+    match clip.kind {
+        ClipKind::Compound => {
+            let Some(tracks) = clip.compound_tracks.as_ref() else {
+                return false;
+            };
+            let video_tracks = tracks
+                .iter()
+                .filter(|t| t.is_video() && !t.clips.is_empty())
+                .count();
+            video_tracks >= 2 || tracks_have_bakeable_effects(tracks, 0)
+        }
+        ClipKind::Multicam => clip_has_bakeable_effects(clip),
+        ClipKind::Video | ClipKind::Image | ClipKind::Audio => {
+            if !clip_has_bakeable_effects(clip) {
+                return false;
+            }
+            !clip.lut_paths.is_empty()
+                || !clip.frei0r_effects.is_empty()
+                || !clip.ladspa_effects.is_empty()
+                || clip.blur > 0.0
+                || clip.denoise > 0.0
+                || clip.sharpness > 0.0
+                || (clip.vidstab_enabled && clip.vidstab_smoothing > 0.0)
+                || clip.hsl_qualifier.as_ref().map_or(false, |q| q.enabled)
+                || clip.chroma_key_enabled
+                || leaf_masks_bakeable(&clip.masks, clip.chroma_key_enabled)
+                || !clip.brightness_keyframes.is_empty()
+                || !clip.contrast_keyframes.is_empty()
+                || !clip.saturation_keyframes.is_empty()
+                || !clip.temperature_keyframes.is_empty()
+                || !clip.tint_keyframes.is_empty()
+        }
+        _ => false,
+    }
+}
+
+fn tracks_have_bakeable_effects(tracks: &[crate::model::track::Track], depth: usize) -> bool {
+    if depth >= MAX_COMPOUND_DEPTH {
+        return false;
+    }
+    tracks.iter().any(|t| {
+        t.clips.iter().any(|c| {
+            if let Some(inner) = c.compound_tracks.as_ref() {
+                tracks_have_bakeable_effects(inner, depth + 1)
+            } else {
+                is_bakeable_kind(&c.kind) && clip_has_bakeable_effects(c)
+            }
+        })
+    })
+}
+
+/// Build an `ffmpeg` command that runs at a lower scheduling priority
+/// (nice 10). Bakes are background work: a sidecar kicked off while the
+/// user keeps playing must not take CPU time away from the decoders and
+/// the compositor that are trying to hold the frame rate.
+fn background_ffmpeg_command() -> Command {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = Command::new("ffmpeg");
+    // SAFETY: `setpriority` is async-signal-safe and touches no Rust
+    // state; it only adjusts the child's own nice value after fork.
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setpriority(libc::PRIO_PROCESS as _, 0, 10);
+            Ok(())
+        });
+    }
+    cmd
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2345,6 +2433,83 @@ mod tests {
         let mut compound = Clip::new("", 5_000_000_000, 0, ClipKind::Compound);
         compound.compound_tracks = Some(vec![track]);
         compound
+    }
+
+    #[test]
+    fn bake_filter_has_no_empty_stage_with_lut_and_other_effects() {
+        let dir = std::env::temp_dir().join(format!("us-rr-lut-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lut = dir.join("look.cube");
+        std::fs::write(&lut, "TITLE \"t\"\nLUT_3D_SIZE 2\n").unwrap();
+        let mut clip = make_clip();
+        clip.lut_paths.push(lut.to_string_lossy().to_string());
+        clip.blur = 0.4;
+        let filter = build_bake_video_filter(&clip);
+        assert!(filter.starts_with("lut3d="), "{filter}");
+        assert!(filter.contains(",boxblur="), "{filter}");
+        assert!(!filter.contains(",,"), "{filter}");
+        assert!(!filter.ends_with(','), "{filter}");
+        // LUT alone must not leave a dangling comma either.
+        clip.blur = 0.0;
+        let only_lut = build_bake_video_filter(&clip);
+        assert!(!only_lut.ends_with(','), "{only_lut}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn bakeable_effects_and_complexity_predicates() {
+        // Untouched clip: nothing in the baked scope.
+        let plain = make_clip();
+        assert!(!clip_has_bakeable_effects(&plain));
+        assert!(!clip_effect_stack_is_complex(&plain));
+
+        // Basic colour slider: bakeable but not "complex".
+        let mut graded = make_clip();
+        graded.brightness = 0.2;
+        assert!(clip_has_bakeable_effects(&graded));
+        assert!(!clip_effect_stack_is_complex(&graded));
+
+        // Blur / denoise / vidstab / colour keyframes: complex.
+        let mut blurred = make_clip();
+        blurred.blur = 0.4;
+        assert!(clip_effect_stack_is_complex(&blurred));
+        let mut stabilized = make_clip();
+        stabilized.vidstab_enabled = true;
+        stabilized.vidstab_smoothing = 0.5;
+        assert!(clip_has_bakeable_effects(&stabilized));
+        assert!(clip_effect_stack_is_complex(&stabilized));
+
+        // Empty source path never bakes.
+        let mut no_source = make_clip();
+        no_source.source_path = String::new();
+        no_source.blur = 0.4;
+        assert!(!clip_has_bakeable_effects(&no_source));
+
+        // Compound: bakeable when it has content; complex with two
+        // video tracks or any inner effect.
+        let simple_compound = make_compound_with_one_inner(0.0);
+        assert!(clip_has_bakeable_effects(&simple_compound));
+        assert!(!clip_effect_stack_is_complex(&simple_compound));
+        let mut inner_blur = make_compound_with_one_inner(0.0);
+        inner_blur.compound_tracks.as_mut().unwrap()[0].clips[0].blur = 0.3;
+        assert!(clip_effect_stack_is_complex(&inner_blur));
+        let mut two_tracks = make_compound_with_one_inner(0.0);
+        let mut second = crate::model::track::Track::new_video("V2");
+        second.clips.push(Clip::new(
+            "/tmp/other.mp4",
+            1_000_000_000,
+            0,
+            ClipKind::Video,
+        ));
+        two_tracks.compound_tracks.as_mut().unwrap().push(second);
+        assert!(clip_effect_stack_is_complex(&two_tracks));
+        let mut empty_compound = Clip::new("", 1_000_000_000, 0, ClipKind::Compound);
+        empty_compound.compound_tracks = Some(vec![]);
+        assert!(!clip_has_bakeable_effects(&empty_compound));
+
+        // Non-bakeable kinds.
+        let title = Clip::new("", 1_000_000_000, 0, ClipKind::Title);
+        assert!(!clip_has_bakeable_effects(&title));
     }
 
     #[test]

@@ -6431,6 +6431,7 @@ fn clip_to_program_clips(
         voice_enhance: c.voice_enhance,
         voice_enhance_strength: c.voice_enhance_strength,
         render_replace_enabled: c.render_replace_enabled,
+        render_replace_sidecar: None,
         voice_isolation_pad_ns: (c.voice_isolation_pad_ms as f64 * 1_000_000.0) as u64,
         voice_isolation_fade_ns: (c.voice_isolation_fade_ms as f64 * 1_000_000.0) as u64,
         voice_isolation_floor: c.voice_isolation_floor as f64,
@@ -6847,6 +6848,12 @@ pub fn build_window(
     let render_replace_cache = Rc::new(RefCell::new(
         crate::media::render_replace_cache::RenderReplaceCache::new(),
     ));
+    // Background rendering (automatic, preview-only Render-and-Replace):
+    // the auto set, the per-session opt-outs and the drop-pressure
+    // monitor. See `media::background_render`.
+    let background_render_state = Rc::new(RefCell::new(
+        crate::media::background_render::BackgroundRenderState::default(),
+    ));
     let frame_interp_cache = Rc::new(RefCell::new(
         crate::media::frame_interp_cache::FrameInterpCache::new(),
     ));
@@ -6924,6 +6931,8 @@ pub fn build_window(
         let prog_player = prog_player.clone();
         let proxy_cache = proxy_cache.clone();
         let voice_enhance_cache_apply = voice_enhance_cache.clone();
+        let background_render_state_apply = background_render_state.clone();
+        let on_project_changed_apply = on_project_changed.clone();
         let effective_auto_proxy_sources_prefs = effective_auto_proxy_sources.clone();
         let project = project.clone();
         let timeline_state = timeline_state.clone();
@@ -7024,6 +7033,29 @@ pub fn build_window(
                 voice_enhance_cache_apply
                     .borrow_mut()
                     .set_cache_cap_bytes(cap_bytes);
+            }
+            // Background rendering policy change: Off drops every auto
+            // bake (and forgets the session opt-outs so a later On starts
+            // clean); any change reconciles through a reload so Always
+            // promotes immediately and Off goes back to live effects.
+            if new_state.background_render_mode != old_state.background_render_mode {
+                {
+                    let mut brs = background_render_state_apply.borrow_mut();
+                    if new_state.background_render_mode
+                        == crate::ui_state::BackgroundRenderMode::Off
+                    {
+                        brs.clear();
+                        brs.suppressed.clear();
+                    } else {
+                        brs.monitor.reset();
+                    }
+                }
+                log::info!(
+                    "background_render: mode {} -> {}",
+                    old_state.background_render_mode.as_str(),
+                    new_state.background_render_mode.as_str()
+                );
+                on_project_changed_apply();
             }
             if new_state.proxy_mode.is_enabled() {
                 // If the proxy scale changed, invalidate old entries so clips are
@@ -8306,6 +8338,8 @@ pub fn build_window(
         let project = project.clone();
         let iv = inspector_view.clone();
         let cache = render_replace_cache.clone();
+        let background_render_state = background_render_state.clone();
+        let on_project_changed = on_project_changed.clone();
         inspector_view
             .render_replace_cancel_btn
             .connect_clicked(move |_| {
@@ -8314,6 +8348,13 @@ pub fn build_window(
                 let clip_opt = project.borrow().clip_ref(&id).cloned();
                 let Some(clip) = clip_opt else { return };
                 cache.borrow_mut().cancel(&clip);
+                // Auto-baked clip: opt it out for the session and go back
+                // to live effects (the reload drops the auto flag).
+                let was_auto = background_render_state.borrow_mut().suppress(&id);
+                if was_auto {
+                    log::info!("background_render: user opted clip {id} out (live effects)");
+                    on_project_changed();
+                }
             });
     }
 
@@ -17848,6 +17889,8 @@ pub fn build_window(
         let render_replace_cache_for_reload = render_replace_cache.clone();
         let effective_auto_proxy_sources_for_reload = effective_auto_proxy_sources.clone();
         let render_replace_cache_for_flatten = render_replace_cache.clone();
+        let background_render_state_for_reload = background_render_state.clone();
+        let background_render_state_for_flatten = background_render_state.clone();
 
         *on_project_changed_impl.borrow_mut() = Some(Box::new(move || {
             // Sync compound clip duration when editing inside a compound.
@@ -17948,6 +17991,41 @@ pub fn build_window(
                 // the normal recursive flatten.
                 let render_replace_paths: std::collections::HashMap<String, String> =
                     render_replace_cache_for_flatten.borrow().paths.clone();
+                // Background rendering: clips in the auto set are
+                // flattened as if Render-and-Replace were checked, on a
+                // clone of the editing tracks. The project model keeps
+                // its real flags (export is unaffected).
+                // Reconcile the auto set against the current project +
+                // policy *before* flattening so a promotion (Always mode,
+                // or a drop-triggered one from the poll loop) is reflected
+                // in this very reload: the deferred phase below requests
+                // the bakes and, when a sidecar is already cached, the
+                // live reload hot-swaps the on-screen slot right away.
+                let auto_render_ids = {
+                    let mode = preferences_state.borrow().background_render_mode;
+                    let mut brs = background_render_state_for_flatten.borrow_mut();
+                    let added =
+                        crate::media::background_render::reconcile(&mut brs, &proj.tracks, mode);
+                    if !added.is_empty() {
+                        log::info!(
+                            "background_render: Always mode queued {} clip(s): {}",
+                            added.len(),
+                            added.join(", ")
+                        );
+                    }
+                    brs.auto_ids.clone()
+                };
+                let auto_render_tracks: Option<Vec<crate::model::track::Track>> =
+                    if auto_render_ids.is_empty() {
+                        None
+                    } else {
+                        Some(crate::media::background_render::apply_auto_flags(
+                            editing_tracks,
+                            &auto_render_ids,
+                        ))
+                    };
+                let editing_tracks: &[crate::model::track::Track] =
+                    auto_render_tracks.as_deref().unwrap_or(editing_tracks);
                 let mut clips: Vec<ProgramClip> = editing_tracks
                     .iter()
                     .enumerate()
@@ -18092,6 +18170,7 @@ pub fn build_window(
             let bg_removal_cache_reload = bg_removal_cache.clone();
             let voice_enhance_cache_reload = voice_enhance_cache.clone();
             let render_replace_cache_reload = render_replace_cache_for_reload.clone();
+            let background_render_state_reload = background_render_state_for_reload.clone();
             let frame_interp_cache_reload = frame_interp_cache.clone();
             let reload_ticket = pending_reload_ticket.get().wrapping_add(1);
             pending_reload_ticket.set(reload_ticket);
@@ -18258,6 +18337,11 @@ pub fn build_window(
                     {
                         let proj = project_reload.borrow();
                         let mut cache = render_replace_cache_reload.borrow_mut();
+                        // Background rendering: the auto set was reconciled
+                        // before the flatten above; fold it into the
+                        // request walk so auto clips get their bakes.
+                        let auto_render_ids =
+                            background_render_state_reload.borrow().auto_ids.clone();
                         // Post-order walk: recurse into `compound_tracks`
                         // FIRST so inner bakes are in flight (or ready)
                         // by the time the outer compound's request()
@@ -18270,6 +18354,7 @@ pub fn build_window(
                         fn walk_render_replace_request(
                             cache: &mut crate::media::render_replace_cache::RenderReplaceCache,
                             tracks: &[crate::model::track::Track],
+                            auto_ids: &HashSet<String>,
                             parent_w: u32,
                             parent_h: u32,
                             parent_fps_num: u32,
@@ -18282,13 +18367,14 @@ pub fn build_window(
                                         walk_render_replace_request(
                                             cache,
                                             ctracks,
+                                            auto_ids,
                                             parent_w,
                                             parent_h,
                                             parent_fps_num,
                                             parent_fps_den,
                                         );
                                     }
-                                    if clip.render_replace_enabled {
+                                    if clip.render_replace_enabled || auto_ids.contains(&clip.id) {
                                         match clip.kind {
                                             crate::model::clip::ClipKind::Compound => {
                                                 cache.request_compound_with_parent(
@@ -18322,7 +18408,15 @@ pub fn build_window(
                             proj.frame_rate.numerator,
                             proj.frame_rate.denominator,
                         );
-                        walk_render_replace_request(&mut cache, &proj.tracks, pw, ph, pn, pd);
+                        walk_render_replace_request(
+                            &mut cache,
+                            &proj.tracks,
+                            &auto_render_ids,
+                            pw,
+                            ph,
+                            pn,
+                            pd,
+                        );
                         let paths = cache.paths.clone();
                         prog_player_reload
                             .borrow_mut()
@@ -20715,6 +20809,7 @@ pub fn build_window(
         let collect_active_background_jobs = collect_active_background_jobs.clone();
         let render_job_tray = render_job_tray.clone();
         let render_replace_cache = render_replace_cache.clone();
+        let background_render_state = background_render_state.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
             let resolved = proxy_cache.borrow_mut().poll();
             if !resolved.is_empty() {
@@ -20831,6 +20926,102 @@ pub fn build_window(
                 }
                 if !rr_resolved.is_empty() {
                     on_project_changed_voice_enhance();
+                }
+            }
+            // Background rendering: feed the drop-pressure monitor while
+            // playing and promote clips that keep dropping frames. A
+            // promoted clip's bake is requested right away; the sidecar
+            // is swapped into the preview by the normal render-replace
+            // completion path above (reload → auto flags → sidecar).
+            {
+                use crate::media::background_render::MonitorSample;
+                use crate::ui_state::BackgroundRenderMode;
+                let mode = preferences_state.borrow().background_render_mode;
+                if mode == BackgroundRenderMode::WhenDropping {
+                    let (playing, dropped_total, effective_fps, pos_ns) = {
+                        let p = prog_player.borrow();
+                        (
+                            p.is_playing(),
+                            p.dropped_frames_count(),
+                            p.effective_fps(),
+                            p.timeline_pos_ns,
+                        )
+                    };
+                    let (candidates, project_fps, dims) = {
+                        let proj = project_for_stt.borrow();
+                        let brs = background_render_state.borrow();
+                        let candidates = if playing {
+                            let ts = timeline_state_stt.borrow();
+                            let tracks = ts.resolve_editing_tracks(&proj);
+                            crate::media::background_render::candidates_at(tracks, pos_ns, &brs)
+                        } else {
+                            Vec::new()
+                        };
+                        (
+                            candidates,
+                            proj.frame_rate.as_f64(),
+                            (
+                                proj.width,
+                                proj.height,
+                                proj.frame_rate.numerator,
+                                proj.frame_rate.denominator,
+                            ),
+                        )
+                    };
+                    let promoted: Vec<String> = {
+                        let mut brs = background_render_state.borrow_mut();
+                        let hits = brs.monitor.tick(MonitorSample {
+                            playing,
+                            dropped_total,
+                            effective_fps,
+                            project_fps,
+                            candidates: &candidates,
+                        });
+                        hits.into_iter().filter(|id| brs.promote(id)).collect()
+                    };
+                    if !promoted.is_empty() {
+                        let proj = project_for_stt.borrow();
+                        let mut cache = render_replace_cache.borrow_mut();
+                        let mut labels = Vec::new();
+                        for id in &promoted {
+                            let Some(clip) = proj.clip_ref(id) else {
+                                continue;
+                            };
+                            labels.push(clip.label.clone());
+                            match clip.kind {
+                                crate::model::clip::ClipKind::Compound => cache
+                                    .request_compound_with_parent(
+                                        clip, dims.0, dims.1, dims.2, dims.3,
+                                    ),
+                                crate::model::clip::ClipKind::Multicam => cache
+                                    .request_multicam_with_parent(
+                                        clip, dims.0, dims.1, dims.2, dims.3,
+                                    ),
+                                _ => cache.request(clip),
+                            }
+                        }
+                        drop(cache);
+                        drop(proj);
+                        log::info!(
+                            "background_render: playback dropping frames, baking {} clip(s): {}",
+                            promoted.len(),
+                            labels.join(", ")
+                        );
+                        if let Some(win) = window_weak_music.upgrade() {
+                            let message = if labels.len() == 1 {
+                                format!(
+                                    "Rendering \"{}\" in the background for smoother playback",
+                                    labels[0]
+                                )
+                            } else {
+                                format!(
+                                    "Rendering {} clips in the background for smoother playback",
+                                    labels.len()
+                                )
+                            };
+                            show_window_status_toast(&win, &message, ToastSeverity::Info);
+                        }
+                    }
                 }
             }
             // Poll AI frame-interpolation cache. New sidecars are pushed to
@@ -20960,7 +21151,7 @@ pub fn build_window(
             // non-bakeable kinds by the inspector sync.
             {
                 use crate::media::render_replace_cache::RenderReplaceStatus;
-                let (text, is_pending) = {
+                let (text, is_pending, cancel_label) = {
                     let proj = project_for_stt.borrow();
                     let selected = inspector_view.selected_clip_id.borrow().clone();
                     let clip = selected.and_then(|id| proj.clip_ref(&id).cloned());
@@ -20968,17 +21159,53 @@ pub fn build_window(
                         Some(c) if c.render_replace_enabled => {
                             let status = render_replace_cache.borrow().status(&c);
                             match status {
-                                RenderReplaceStatus::Idle => (String::new(), false),
-                                RenderReplaceStatus::Pending => ("Baking…".to_string(), true),
-                                RenderReplaceStatus::Ready => ("Sidecar ready".to_string(), false),
+                                RenderReplaceStatus::Idle => (String::new(), false, "Cancel"),
+                                RenderReplaceStatus::Pending => {
+                                    ("Baking…".to_string(), true, "Cancel")
+                                }
+                                RenderReplaceStatus::Ready => {
+                                    ("Sidecar ready".to_string(), false, "Cancel")
+                                }
+                                RenderReplaceStatus::Failed => (
+                                    "Bake failed — toggle off/on to retry".to_string(),
+                                    false,
+                                    "Cancel",
+                                ),
+                            }
+                        }
+                        // Background rendering (auto, preview-only): same
+                        // status, labelled so the user knows it was not
+                        // their toggle, with a button to go back to live
+                        // effects for this clip.
+                        Some(c) if background_render_state.borrow().is_auto(&c.id) => {
+                            let status = render_replace_cache.borrow().status(&c);
+                            let label = "Use live effects";
+                            match status {
+                                RenderReplaceStatus::Idle => {
+                                    ("Background render queued".to_string(), true, label)
+                                }
+                                RenderReplaceStatus::Pending => {
+                                    ("Background render: baking…".to_string(), true, label)
+                                }
+                                RenderReplaceStatus::Ready => (
+                                    "Background render: playing baked sidecar".to_string(),
+                                    true,
+                                    label,
+                                ),
                                 RenderReplaceStatus::Failed => {
-                                    ("Bake failed — toggle off/on to retry".to_string(), false)
+                                    ("Background render failed".to_string(), true, label)
                                 }
                             }
                         }
-                        _ => (String::new(), false),
+                        _ => (String::new(), false, "Cancel"),
                     }
                 };
+                if inspector_view.render_replace_cancel_btn.label().as_deref() != Some(cancel_label)
+                {
+                    inspector_view
+                        .render_replace_cancel_btn
+                        .set_label(cancel_label);
+                }
                 if inspector_view.render_replace_status_label.text() != text.as_str() {
                     inspector_view.render_replace_status_label.set_text(&text);
                     inspector_view
@@ -21720,6 +21947,7 @@ pub fn build_window(
             apply_program_monitor_timecode_burnin.clone();
         let refresh_reference_stills_mcp = refresh_reference_stills.clone();
         let render_replace_cache_for_mcp = render_replace_cache.clone();
+        let background_render_state_for_mcp = background_render_state.clone();
         let keymap_for_mcp = keymap.clone();
         let actions_for_mcp = actions.clone();
         MCP_MAIN_DISPATCH.with(|slot| {
@@ -21742,6 +21970,7 @@ pub fn build_window(
                                 bg_removal_cache: &bg_removal_cache,
                                 frame_interp_cache: &frame_interp_cache,
                                 render_replace_cache: &render_replace_cache_for_mcp,
+                                background_render_state: &background_render_state_for_mcp,
                                 voice_enhance_cache: &voice_enhance_cache,
                                 clip_embedding_cache: &clip_embedding_cache,
                                 auto_tag_cache: &auto_tag_cache,

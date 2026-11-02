@@ -1774,6 +1774,34 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "set_background_render_mode",
+            "description": "Set the background-rendering policy for complex effect stacks (automatic, preview-only Render-and-Replace). 'off': only clips with Render and Replace checked are baked. 'when_dropping' (default): while playing, clips under the playhead whose effect stack keeps dropping frames are baked to a ProRes sidecar in the background and the Program Monitor switches to the sidecar once it is ready. 'always': every root clip with a complex stack (LUTs, frei0r, blur/denoise/sharpen, stabilization, HSL qualifier, chroma key, static masks, colour keyframes, LADSPA, multi-track compounds, multicams) is baked as soon as it exists. Auto bakes never touch the project file and export still renders the effects live.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "mode": { "type": "string", "enum": ["off", "when_dropping", "always"], "description": "Background rendering policy." }
+                },
+                "required": ["mode"]
+            }
+        },
+        {
+            "name": "get_background_render_status",
+            "description": "Report background rendering state: the policy, every auto-baked clip with its bake status (idle/pending/ready/failed) and sidecar path, clips opted out this session, the drop-pressure scores the monitor is accumulating per clip, and the live playback counters it reads (playing, dropped_frames_total, effective_fps).",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "set_background_render_clip",
+            "description": "Force one clip into (enabled=true) or out of (enabled=false) the background-rendering auto set for this session, independent of the drop monitor. Opting out cancels an in-flight bake, switches the preview back to live effects, and prevents the monitor from re-promoting the clip until the app restarts or the mode is set to off and back. Does not change the clip's manual Render and Replace flag.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "clip_id": { "type": "string", "description": "Clip id (any nesting level)." },
+                    "enabled": { "type": "boolean", "description": "true to auto-bake, false to opt out." }
+                },
+                "required": ["clip_id", "enabled"]
+            }
+        },
+        {
             "name": "set_program_monitor_hud",
             "description": "Show or hide the Program Monitor HUD overlay (timecode, frame number, fps, resolution, and cumulative dropped-frame count). Setting persists across sessions.",
             "inputSchema": {
@@ -4064,6 +4092,16 @@ fn dispatch_tool_payload(
         }
 
         "set_background_prerender" => McpCommand::SetBackgroundPrerender {
+            enabled: arg_bool!(args, "enabled"),
+            reply: tx,
+        },
+        "set_background_render_mode" => McpCommand::SetBackgroundRenderMode {
+            mode: arg_str!(args, "mode", "when_dropping"),
+            reply: tx,
+        },
+        "get_background_render_status" => McpCommand::GetBackgroundRenderStatus { reply: tx },
+        "set_background_render_clip" => McpCommand::SetBackgroundRenderClip {
+            clip_id: arg_str!(args, "clip_id", ""),
             enabled: arg_bool!(args, "enabled"),
             reply: tx,
         },

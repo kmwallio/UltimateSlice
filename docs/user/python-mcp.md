@@ -105,6 +105,9 @@ Useful playback-tuning toggles:
 - `python3 tools/mcp_call.py set_experimental_preview_optimizations '{"enabled":true}'`
 - `python3 tools/mcp_call.py set_background_prerender '{"enabled":true}'`
 - `python3 tools/mcp_call.py set_prerender_quality '{"preset":"fast","crf":18}'`
+- `python3 tools/mcp_call.py set_background_render_mode '{"mode":"always"}'`
+- `python3 tools/mcp_call.py get_background_render_status '{}'`
+- `python3 tools/mcp_call.py set_background_render_clip '{"clip_id":"<id>","enabled":false}'`
 - `python3 tools/mcp_call.py set_proxy_sidecar_persistence '{"enabled":true}'`
 - `python3 tools/mcp_call.py set_prerender_project_persistence '{"enabled":true}'`
 - `python3 tools/mcp_call.py get_performance_snapshot '{}'`
@@ -112,7 +115,7 @@ Useful playback-tuning toggles:
 - `python3 tools/mcp_call.py collect_project_files '{"directory_path":"/absolute/path/CollectedMedia","mode":"entire_library"}'`
 - `python3 tools/mcp_call.py collect_project_files '{"directory_path":"/absolute/path/CollectedMedia","mode":"entire_library","use_collected_locations_on_next_save":true}'`
 
-`set_background_prerender` enables disk prerender of complex upcoming overlap sections. `set_prerender_quality` changes the x264 preset/CRF used for those prerender segments (default `veryfast` + `20`); lower CRF improves fidelity but increases cache size and render time. `set_prerender_project_persistence` controls whether saved projects keep those prerender segments in a project-scoped sibling `UltimateSlice.cache/prerender-vN/<project-hash>/` cache or stay on the temporary cache root.
+`set_background_render_mode` picks the automatic Render-and-Replace policy for complex effect stacks (`off`, `when_dropping`, `always`); `get_background_render_status` reports the auto-baked clips, their bake status and the drop-pressure scores; `set_background_render_clip` forces a clip into or out of the auto set. `set_background_prerender` enables disk prerender of complex upcoming overlap sections. `set_prerender_quality` changes the x264 preset/CRF used for those prerender segments (default `veryfast` + `20`); lower CRF improves fidelity but increases cache size and render time. `set_prerender_project_persistence` controls whether saved projects keep those prerender segments in a project-scoped sibling `UltimateSlice.cache/prerender-vN/<project-hash>/` cache or stay on the temporary cache root.
 
 `set_proxy_sidecar_persistence` controls whether proxy files are mirrored into `UltimateSlice.cache/` beside the original media for reuse after reopen.
 

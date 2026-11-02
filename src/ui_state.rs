@@ -965,6 +965,44 @@ impl AutoProxyThreshold {
     }
 }
 
+/// Automatic background rendering (auto Render-and-Replace) policy.
+/// Session-level and preview-only: the auto-baked sidecar replaces the live
+/// effect chain in the Program Monitor, export keeps rendering the effects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundRenderMode {
+    Off,
+    /// Bake a clip's effect stack once playback through it keeps dropping
+    /// frames (default).
+    WhenDropping,
+    /// Bake every clip with a complex effect stack as soon as it appears.
+    Always,
+}
+
+impl Default for BackgroundRenderMode {
+    fn default() -> Self {
+        Self::WhenDropping
+    }
+}
+
+impl BackgroundRenderMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::WhenDropping => "when_dropping",
+            Self::Always => "always",
+        }
+    }
+
+    pub fn from_str(value: &str) -> Self {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "when_dropping" | "auto" | "on" | "drops" | "when-dropping" => Self::WhenDropping,
+            "always" | "all" => Self::Always,
+            _ => Self::Off,
+        }
+    }
+}
+
 /// Codec used to encode proxy files. Defaults to H.264 for compatibility
 /// with everything; HEVC produces smaller files at the same visual
 /// quality and on Intel iGPUs the dedicated HEVC encoder is often faster
@@ -1825,6 +1863,10 @@ pub struct PreferencesState {
     /// Uses more CPU and memory during playback.
     #[serde(default)]
     pub background_prerender: bool,
+    /// Automatic Render-and-Replace for effect stacks the live preview
+    /// cannot keep up with (preview only; export is unaffected).
+    #[serde(default)]
+    pub background_render_mode: BackgroundRenderMode,
     /// Automatically build transcript search data for eligible library items
     /// in the background when speech-to-text support is available.
     #[serde(default)]
@@ -1943,6 +1985,7 @@ impl Default for PreferencesState {
             experimental_preview_optimizations: false,
             realtime_preview: true,
             background_prerender: false,
+            background_render_mode: BackgroundRenderMode::default(),
             background_ai_indexing: false,
             background_auto_tagging: false,
             prerender_preset: PrerenderEncodingPreset::default(),
@@ -2813,6 +2856,35 @@ mod tests {
         prefs.set_proxy_enabled(true);
         assert_eq!(prefs.proxy_mode, ProxyMode::P640);
         assert_eq!(prefs.remembered_proxy_mode(), ProxyMode::P640);
+    }
+
+    #[test]
+    fn background_render_mode_defaults_to_when_dropping_and_round_trips() {
+        let parsed: PreferencesState = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            parsed.background_render_mode,
+            BackgroundRenderMode::WhenDropping
+        );
+        let prefs = PreferencesState {
+            background_render_mode: BackgroundRenderMode::Always,
+            ..PreferencesState::default()
+        };
+        let encoded = serde_json::to_string(&prefs).unwrap();
+        assert!(encoded.contains(r#""background_render_mode":"always""#));
+        let decoded: PreferencesState = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.background_render_mode, BackgroundRenderMode::Always);
+        assert_eq!(
+            BackgroundRenderMode::from_str("off"),
+            BackgroundRenderMode::Off
+        );
+        assert_eq!(
+            BackgroundRenderMode::from_str("auto"),
+            BackgroundRenderMode::WhenDropping
+        );
+        assert_eq!(
+            BackgroundRenderMode::from_str("ALWAYS"),
+            BackgroundRenderMode::Always
+        );
     }
 
     #[test]

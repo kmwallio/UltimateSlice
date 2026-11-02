@@ -1,5 +1,6 @@
 use crate::ui::id_dropdown::IdDropDown;
 use crate::ui_state::{
+    BackgroundRenderMode,
     clamp_prerender_crf, AutoScrollMode, CrossfadeCurve, GskRenderer, HwEncoderMode,
     AutoProxyThreshold, PlaybackPriority, PreferencesState, PrerenderEncodingPreset,
     PreviewQuality, ProxyCodec, ProxyMode, ThemeMode, MAX_PRERENDER_CRF, MIN_PRERENDER_CRF,
@@ -552,6 +553,27 @@ pub fn show_preferences_dialog(
     background_prerender_hint.set_max_width_chars(60);
     proxies_box.append(&background_prerender_check);
     proxies_box.append(&background_prerender_hint);
+
+    let background_render_mode_label = Label::new(Some("Background rendering (effect stacks)"));
+    background_render_mode_label.set_halign(gtk::Align::Start);
+    let background_render_mode_combo = build_pref_dropdown(
+        &[
+            ("off", "Off (only clips with Render and Replace checked)"),
+            ("when_dropping", "When playback drops frames (default)"),
+            ("always", "Always, for every complex effect stack"),
+        ],
+        current.background_render_mode.as_str(),
+    );
+    let background_render_mode_hint = Label::new(Some(
+        "Bakes a clip's effect stack (LUTs, frei0r, blur / denoise, stabilization, chroma key, masks…) to a ProRes sidecar in the background and plays that in the Program Monitor instead of running the effects live. Preview only: export still renders the effects. The Inspector shows \"Background render\" on affected clips and lets you switch one back to live effects.",
+    ));
+    background_render_mode_hint.set_halign(gtk::Align::Start);
+    background_render_mode_hint.add_css_class("dim-label");
+    background_render_mode_hint.set_wrap(true);
+    background_render_mode_hint.set_max_width_chars(60);
+    proxies_box.append(&background_render_mode_label);
+    proxies_box.append(&background_render_mode_combo.dropdown);
+    proxies_box.append(&background_render_mode_hint);
 
     let prerender_preset_label = Label::new(Some("Prerender encoding preset"));
     prerender_preset_label.set_halign(gtk::Align::Start);
@@ -1699,6 +1721,12 @@ pub fn show_preferences_dialog(
                 experimental_preview_optimizations: experimental_check.is_active(),
                 realtime_preview: realtime_check.is_active(),
                 background_prerender: background_prerender_check.is_active(),
+                background_render_mode: BackgroundRenderMode::from_str(
+                    background_render_mode_combo
+                        .active_id()
+                        .as_deref()
+                        .unwrap_or("when_dropping"),
+                ),
                 background_ai_indexing: background_ai_indexing_check.is_active(),
                 background_auto_tagging: background_auto_tagging_check.is_active(),
                 prerender_preset: current.prerender_preset.clone(),

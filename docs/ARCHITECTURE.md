@@ -872,6 +872,83 @@ don't burn the same hours:
 
 ---
 
+### Background rendering (automatic Render-and-Replace)
+
+Module: `src/media/background_render.rs` (pure logic, unit-tested) plus
+wiring in `src/ui/window.rs`. Policy: `PreferencesState::background_render_mode`
+(`BackgroundRenderMode::{Off, WhenDropping, Always}`, default `WhenDropping`).
+
+Manual Render-and-Replace sets `Clip::render_replace_enabled`, which both the
+preview and the exporter honour. Background rendering is a **session-level,
+preview-only** layer on top of it and deliberately never writes to the model:
+
+- `BackgroundRenderState` (one `Rc<RefCell<_>>` created next to
+  `render_replace_cache`) holds `auto_ids` (clip ids being auto-baked),
+  `suppressed` (ids the user opted out of this session), the drop monitor
+  and a promotion counter. It is shared with the reload path, the 500 ms
+  poll loop, the inspector poll block, the cancel button and the MCP handler
+  (`McpCaches::background_render_state`).
+- **Flatten**: right before `clip_to_program_clips` runs, the reload path
+  clones the editing tracks through `apply_auto_flags` when the auto set is
+  non-empty and sets `render_replace_enabled` on the auto clips *of the
+  clone*. From there the existing machinery does everything: the
+  `ProgramClip` carries the flag, `resolve_source_path_for_clip` swaps in the
+  sidecar when `render_replace_paths` has it, and
+  `neutralize_baked_effects_for_sidecar_clips` zeros the baked fields. The
+  project model keeps its real flags, so the exporter (which reads the
+  project) keeps rendering the effects live, and the project is never dirtied.
+- **Request walk**: `walk_render_replace_request` treats
+  `clip.render_replace_enabled || auto_ids.contains(id)` as "wants a bake",
+  so re-bakes after an edit, nested compound ordering and the inside-out
+  retry all work unchanged. The walk is preceded by `reconcile`, which prunes
+  auto ids whose clip is gone / toggled manually / no longer has a baked
+  scope, clears everything in `Off`, and promotes every complex root clip in
+  `Always` (`clip_effect_stack_is_complex`).
+- **Detection** (`WhenDropping` only): the 500 ms poll loop feeds
+  `BackgroundRenderMonitor::tick` with `is_playing`, the cumulative QoS
+  `dropped_frames_count`, `effective_fps`, the project fps and the
+  *candidates* — clips under `timeline_pos_ns` on the editing tracks that
+  pass `clip_is_auto_eligible` (bakeable kind, `clip_has_bakeable_effects`,
+  not manual, not auto, not suppressed). The monitor ignores `SETTLE_TICKS`
+  after play starts and after the candidate set changes (a cut), then
+  accumulates per-clip pressure: a tick counts as pressure when the drop
+  delta is > 0 or the effective fps is below `PRESSURE_FPS_RATIO` × project
+  fps. Promotion needs ≥ `MIN_PRESSURE_TICKS` consecutive pressure ticks and
+  either ≥ `PROMOTE_DROPPED_FRAMES` accumulated drops or
+  ≥ `PROMOTE_PRESSURE_TICKS` ticks. Clean ticks halve a clip's score. A
+  promotion requests the bake immediately (`request` /
+  `request_compound_with_parent` / `request_multicam_with_parent`), logs
+  `background_render: …` and shows a toast; the sidecar reaches the preview
+  through the normal render-replace completion path (`rr_resolved` →
+  `on_project_changed` → reload with the auto flags → per-slot hot swap).
+- **Why preview-only**: ProRes 422 HQ is not lossless and the manual toggle
+  already makes that trade-off explicit. Keeping auto bakes out of export
+  means the policy can default to on without changing anyone's output.
+- Bake ffmpeg processes run at nice 10 (`background_ffmpeg_command`) so a
+  bake started mid-playback does not take CPU from the decoders.
+- **Sidecar playback contract** (shared with the manual toggle): the
+  neutralise pass (`neutralize_sidecar_clips`) records the ready sidecar on
+  the `ProgramClip` (`render_replace_sidecar`), rebases `source_in/out` to
+  `0..span` (the bake starts at the clip's `source_in`) and zeroes the
+  baked-scope fields. From then on the clip's fields no longer reproduce
+  the cache key, so `resolve_source_path_for_clip` returns the recorded
+  path first and only falls back to the key lookup for un-neutralised
+  clips. `try_live_reload` neutralises the *incoming* clips before the
+  shape/mapping comparison; `update_render_replace_paths` must not
+  neutralise the loaded clips in place while playing, or the comparison
+  becomes equal and the on-screen slot keeps decoding the original — the
+  mismatch is what drives the hot swap to the sidecar. Reconcile runs
+  *before* the flatten in `on_project_changed` so a promotion is reflected
+  in the same reload.
+- `build_bake_video_filter` trims every export-helper fragment of leading /
+  trailing commas before joining (the LUT prefix ends with one, the
+  HSL/denoise/sharpen/blur/chroma fragments start with one); an empty stage
+  makes ffmpeg reject the whole graph.
+- Inspector: the status row shows "Background render …" for auto clips and
+  the cancel button is relabelled **Use live effects**; clicking it calls
+  `BackgroundRenderState::suppress` and reloads. Ticking the manual checkbox
+  on an auto clip makes `reconcile` drop it from the auto set (manual wins).
+
 ## GTK rendering performance rules (GSK + cairo)
 
 Measured on GTK 4.22 with the Vulkan and NGL renderers (gdb/eu-stack sampling
@@ -1185,6 +1262,9 @@ Before declaring a task finished, agents must verify via MCP:
 | `set_realtime_preview` | Toggle real-time preview decoder prebuilds (`true` / `false`) |
 | `set_experimental_preview_optimizations` | Toggle occlusion optimization (audio-only decode for fully-occluded clips) |
 | `set_background_prerender` | Toggle background prerender of complex overlap windows (`true` / `false`) |
+| `set_background_render_mode` | Automatic preview-only Render-and-Replace policy (`off` / `when_dropping` / `always`) |
+| `get_background_render_status` | Auto-baked clips + bake status, opted-out clips, drop-pressure scores, live counters |
+| `set_background_render_clip` | Force one clip into / out of the background-rendering auto set |
 | `set_preview_luts` | Toggle LUT-baked project-resolution preview media generation when proxy mode is off (`true` / `false`) |
 | `add_clip` | Add source clip(s) at `track_index` + timeline position using source-placement rules (Source Monitor A/V auto-link enabled: linked A/V pair when both matching kinds exist + embedded-video-audio suppression; disabled: single-clip placement; single-kind fallback otherwise) |
 | `remove_clip` | Remove clip by id |

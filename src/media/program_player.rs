@@ -744,6 +744,13 @@ pub struct ProgramClip {
     /// effect fields so they do not double-apply on top of the
     /// already-baked frames.
     pub render_replace_enabled: bool,
+    /// Resolved render-replace sidecar for this clip, set by the
+    /// neutralise pass once the bake is ready. At that moment the
+    /// source window is rebased onto the sidecar (which starts at the
+    /// clip's original `source_in`) and the baked-scope fields are zeroed,
+    /// so the cache key can no longer be recomputed from the clip's
+    /// fields — this path is the authority from then on.
+    pub render_replace_sidecar: Option<String>,
     pub volume_keyframes: Vec<NumericKeyframe>,
     /// Pre-merged speech intervals (clip-local source-time ns), padded by
     /// `voice_isolation_pad_ns`. Computed from either subtitle word timings
@@ -2999,6 +3006,12 @@ impl ProgramPlayer {
         self.dropped_frames_total.clone()
     }
 
+    /// Cumulative QoS dropped-frame count since the last clip load. Cheap
+    /// accessor for pollers that do not need the full performance snapshot.
+    pub fn dropped_frames_count(&self) -> u64 {
+        self.dropped_frames_total.load(Ordering::Relaxed)
+    }
+
     pub fn set_proxy_enabled(&mut self, enabled: bool) {
         if self.proxy_enabled != enabled {
             self.invalidate_short_frame_cache("proxy-mode-changed");
@@ -3746,9 +3759,19 @@ impl ProgramPlayer {
             self.prewarmed_boundary_ns = None;
             self.invalidate_short_frame_cache("render-replace-paths-updated");
             // Newly-arrived sidecars may now apply to clips already
-            // loaded — re-neutralize so the next pipeline activity
-            // sees zeroed baked-scope fields on those clips.
-            self.neutralize_baked_effects_for_sidecar_clips();
+            // loaded. While *playing* the loaded clips are deliberately
+            // left as they are: the window follows a cache completion
+            // with `on_project_changed`, and `try_live_reload` compares
+            // the incoming (neutralised) clips against these — the shape
+            // and mapping differ, so the on-screen slot is hot-swapped to
+            // the sidecar without a rebuild. Neutralising here would make
+            // the two sides equal and the slot would keep decoding the
+            // original with its live effect chain. When not playing the
+            // reload that follows rebuilds the pipeline anyway, so
+            // neutralising now just keeps staged/prewarm builds correct.
+            if self.state != PlayerState::Playing {
+                self.neutralize_baked_effects_for_sidecar_clips();
+            }
         }
     }
 
@@ -3764,12 +3787,26 @@ impl ProgramPlayer {
     /// after `update_render_replace_paths` so incoming sidecars take
     /// effect without a full pipeline rebuild.
     fn neutralize_baked_effects_for_sidecar_clips(&mut self) {
-        let paths = self.render_replace_paths.clone();
+        if self.render_replace_paths.is_empty() {
+            return;
+        }
+        let paths = std::mem::take(&mut self.render_replace_paths);
+        Self::neutralize_sidecar_clips(&paths, &mut self.clips);
+        Self::neutralize_sidecar_clips(&paths, &mut self.audio_clips);
+        self.render_replace_paths = paths;
+    }
+
+    /// Neutralise every clip in `clips` whose render-replace sidecar is
+    /// ready: record the sidecar on the clip, rebase the source window
+    /// onto it (the bake starts at the clip's `source_in`), and zero the
+    /// baked-scope fields. Idempotent: a clip that already carries a
+    /// sidecar is left alone (its fields no longer reproduce the key).
+    fn neutralize_sidecar_clips(paths: &HashMap<String, String>, clips: &mut [ProgramClip]) {
         if paths.is_empty() {
             return;
         }
         let neutralize = |c: &mut ProgramClip, paths: &HashMap<String, String>| {
-            if !c.render_replace_enabled {
+            if !c.render_replace_enabled || c.render_replace_sidecar.is_some() {
                 return;
             }
             let key = crate::media::render_replace_cache::cache_key_for_program_clip_fields(
@@ -3805,13 +3842,29 @@ impl ProgramPlayer {
                 &c.temperature_keyframes,
                 &c.tint_keyframes,
             );
-            let sidecar_ready = paths
+            let sidecar_path = paths
                 .get(&key)
-                .map(|p| std::fs::metadata(p).ok().filter(|m| m.len() > 0).is_some())
-                .unwrap_or(false);
-            if !sidecar_ready {
+                .filter(|p| std::fs::metadata(p).ok().filter(|m| m.len() > 0).is_some())
+                .cloned();
+            let Some(sidecar_path) = sidecar_path else {
                 return;
-            }
+            };
+            // The sidecar was baked from `source_in` for `source_out -
+            // source_in`, so it starts at 0: rebase the window, otherwise
+            // the slot seeks `source_in` into a file that is only as long
+            // as the window and shows the wrong frames (or nothing).
+            let span = c.source_out_ns.saturating_sub(c.source_in_ns);
+            log::info!(
+                "render_replace: clip {} plays sidecar {} (window {}..{} ns rebased to 0..{})",
+                c.id,
+                sidecar_path,
+                c.source_in_ns,
+                c.source_out_ns,
+                span
+            );
+            c.render_replace_sidecar = Some(sidecar_path);
+            c.source_in_ns = 0;
+            c.source_out_ns = span;
             // Decide mask baking before clearing chroma key below — the
             // path-mask+chroma carve-out reads the chroma flag.
             let bake_masks = crate::media::render_replace_cache::leaf_masks_bakeable(
@@ -3869,11 +3922,8 @@ impl ProgramPlayer {
                 c.masks.clear();
             }
         };
-        for c in self.clips.iter_mut() {
-            neutralize(c, &paths);
-        }
-        for c in self.audio_clips.iter_mut() {
-            neutralize(c, &paths);
+        for c in clips.iter_mut() {
+            neutralize(c, paths);
         }
     }
 
@@ -4861,8 +4911,15 @@ impl ProgramPlayer {
             return false;
         }
         clips.sort_by_key(|c| c.timeline_start_ns);
-        let (new_audio, new_video): (Vec<ProgramClip>, Vec<ProgramClip>) =
+        let (mut new_audio, mut new_video): (Vec<ProgramClip>, Vec<ProgramClip>) =
             clips.into_iter().partition(|c| c.is_audio_only);
+        // Render-replace sidecars are applied to the incoming clips first
+        // so the shape/mapping comparison below is like-for-like with the
+        // loaded (already neutralised) clips: an unchanged baked clip is a
+        // no-op, a sidecar that just became ready reads as a shape +
+        // mapping change on its slot and takes the hot-swap path.
+        Self::neutralize_sidecar_clips(&self.render_replace_paths, &mut new_video);
+        Self::neutralize_sidecar_clips(&self.render_replace_paths, &mut new_audio);
         let pos = self
             .wall_clock_timeline_pos_ns()
             .unwrap_or(self.timeline_pos_ns);
@@ -9277,6 +9334,15 @@ impl ProgramPlayer {
         // When the bake is ready for this clip's current signature, play
         // it directly; the slot builder neutralizes the baked-scope
         // effect fields so they do not double-apply.
+        if let Some(sidecar) = clip.render_replace_sidecar.as_ref() {
+            if std::fs::metadata(sidecar)
+                .ok()
+                .filter(|m| m.len() > 0)
+                .is_some()
+            {
+                return (sidecar.clone(), false, String::new(), false);
+            }
+        }
         if clip.render_replace_enabled && !self.render_replace_paths.is_empty() {
             // Rebuild the signature from the live ProgramClip fields so
             // the key exactly matches what the cache layer produced. The
@@ -19201,6 +19267,7 @@ mod tests {
             voice_isolation: 0.0,
             voice_enhance: false,
             render_replace_enabled: false,
+            render_replace_sidecar: None,
             voice_enhance_strength: 0.5,
             voice_isolation_pad_ns: 80_000_000,
             voice_isolation_fade_ns: 25_000_000,

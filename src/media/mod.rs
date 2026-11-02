@@ -7,6 +7,7 @@ pub mod audio_features;
 pub mod audio_match;
 pub mod audio_sync;
 pub mod auto_tag_cache;
+pub mod background_render;
 pub mod bg_removal_cache;
 pub mod cache_key;
 pub mod cache_support;

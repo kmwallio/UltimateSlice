@@ -59,6 +59,8 @@ pub(crate) struct McpCaches<'a> {
     pub frame_interp_cache: &'a Rc<RefCell<crate::media::frame_interp_cache::FrameInterpCache>>,
     pub render_replace_cache:
         &'a Rc<RefCell<crate::media::render_replace_cache::RenderReplaceCache>>,
+    pub background_render_state:
+        &'a Rc<RefCell<crate::media::background_render::BackgroundRenderState>>,
     pub voice_enhance_cache: &'a Rc<RefCell<crate::media::voice_enhance_cache::VoiceEnhanceCache>>,
     pub clip_embedding_cache:
         &'a Rc<RefCell<crate::media::clip_embedding_cache::ClipEmbeddingCache>>,
@@ -137,6 +139,7 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
                 bg_removal_cache,
                 frame_interp_cache,
                 render_replace_cache,
+                background_render_state,
                 voice_enhance_cache,
                 clip_embedding_cache,
                 auto_tag_cache,
@@ -959,6 +962,7 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
                     "experimental_preview_optimizations": prefs.experimental_preview_optimizations,
                     "realtime_preview": prefs.realtime_preview,
                     "background_prerender": prefs.background_prerender,
+                    "background_render_mode": prefs.background_render_mode.as_str(),
                     "background_ai_indexing": prefs.background_ai_indexing,
                     "background_auto_tagging": prefs.background_auto_tagging,
                     "prerender_preset": prefs.prerender_preset.as_str(),
@@ -1410,6 +1414,116 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
                     "background_prerender": enabled
                 }))
                 .ok();
+        }
+
+        McpCommand::SetBackgroundRenderMode { mode, reply } => {
+            let parsed = crate::ui_state::BackgroundRenderMode::from_str(&mode);
+            let mut new_state = preferences_state.borrow().clone();
+            new_state.background_render_mode = parsed;
+            apply_preferences_state(new_state.clone());
+            reply
+                .send(json!({
+                    "success": true,
+                    "background_render_mode": new_state.background_render_mode.as_str()
+                }))
+                .ok();
+        }
+
+        McpCommand::GetBackgroundRenderStatus { reply } => {
+            use crate::media::render_replace_cache::RenderReplaceStatus;
+            let mode = preferences_state.borrow().background_render_mode;
+            let proj = project.borrow();
+            let brs = background_render_state.borrow();
+            let cache = render_replace_cache.borrow();
+            let status_str = |s: RenderReplaceStatus| match s {
+                RenderReplaceStatus::Idle => "idle",
+                RenderReplaceStatus::Pending => "pending",
+                RenderReplaceStatus::Ready => "ready",
+                RenderReplaceStatus::Failed => "failed",
+            };
+            let mut auto_clips: Vec<Value> = brs
+                .auto_ids
+                .iter()
+                .map(|id| match proj.clip_ref(id) {
+                    Some(clip) => json!({
+                        "clip_id": id,
+                        "label": clip.label,
+                        "kind": format!("{:?}", clip.kind),
+                        "status": status_str(cache.status(clip)),
+                        "sidecar_path": cache.get_path(clip),
+                    }),
+                    None => json!({ "clip_id": id, "status": "missing" }),
+                })
+                .collect();
+            auto_clips.sort_by(|a, b| a["clip_id"].as_str().cmp(&b["clip_id"].as_str()));
+            let mut suppressed: Vec<&String> = brs.suppressed.iter().collect();
+            suppressed.sort();
+            let pressure: serde_json::Map<String, Value> = brs
+                .monitor
+                .scores()
+                .iter()
+                .map(|(id, score)| {
+                    (
+                        id.clone(),
+                        json!({ "dropped": score.dropped, "ticks": score.ticks }),
+                    )
+                })
+                .collect();
+            let (playing, dropped_total, effective_fps) = {
+                let p = prog_player.borrow();
+                (p.is_playing(), p.dropped_frames_count(), p.effective_fps())
+            };
+            reply
+                .send(json!({
+                    "background_render_mode": mode.as_str(),
+                    "auto_clips": auto_clips,
+                    "auto_count": brs.auto_ids.len(),
+                    "suppressed_clip_ids": suppressed,
+                    "promoted_total": brs.promoted_total,
+                    "pressure": pressure,
+                    "playing": playing,
+                    "dropped_frames_total": dropped_total,
+                    "effective_fps": effective_fps
+                }))
+                .ok();
+        }
+
+        McpCommand::SetBackgroundRenderClip {
+            clip_id,
+            enabled,
+            reply,
+        } => {
+            let exists = project.borrow().clip_ref(&clip_id).is_some();
+            if !exists {
+                reply
+                    .send(json!({ "success": false, "error": "clip not found" }))
+                    .ok();
+            } else {
+                let changed = {
+                    let mut brs = background_render_state.borrow_mut();
+                    if enabled {
+                        brs.suppressed.remove(&clip_id);
+                        brs.promote(&clip_id)
+                    } else {
+                        brs.suppress(&clip_id)
+                    }
+                };
+                if !enabled {
+                    let clip_opt = project.borrow().clip_ref(&clip_id).cloned();
+                    if let Some(clip) = clip_opt {
+                        render_replace_cache.borrow_mut().cancel(&clip);
+                    }
+                }
+                reply
+                    .send(json!({
+                        "success": true,
+                        "clip_id": clip_id,
+                        "auto": enabled,
+                        "changed": changed
+                    }))
+                    .ok();
+                on_project_changed();
+            }
         }
 
         McpCommand::SetProgramMonitorHud { enabled, reply } => {
