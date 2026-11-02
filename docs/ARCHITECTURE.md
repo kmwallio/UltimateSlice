@@ -504,6 +504,41 @@ prerender path uses the same FFmpeg filter chain that the export side
 uses, so once the cached file is ready, preview and export are
 byte-identical for the audio.
 
+### Display backpressure and the drop-late policy
+
+The compositor is paced only by the display branch: `tee → queue (3 buffers,
+blocking) → gtk4paintablesink (sync=true)`. Nothing else in the graph applies
+backpressure — the scope `appsink` drops, the per-slot queues can be made
+leaky — so whenever that branch is switched to drop-late mode (leaky queue of
+one buffer + `max-lateness` on the sink) the compositor free-runs as fast as
+its inputs decode. Measured on three 5.3K layers: 20,000 output buffers/s at
+480×270 (1,300/s at 1080p), ~7 cores, 40+ QoS drops, while the HUD showed
+"19,000 fps" — the fps telemetry was right, the pipeline really was spinning.
+`should_drop_late_for_playback_mode` therefore enables drop-late **only** for
+a Smooth-mode transition overlap (the 2-clip case it was validated on); the
+former `slot_count >= 3` rule did to every multi-layer timeline exactly what
+the policy's own comment warned about for single-slot playback. With the rule
+gone the same three layers play at 31/s, 0 drops, ~1 core. Any future
+"under load" policy must keep the display queue blocking or add another
+pacing element.
+
+### Background prerender scheduling
+
+Segment requests go through a bounded `PrerenderWorkerPool`
+(`PRERENDER_WORKERS = 2` threads) instead of one thread + ffmpeg process per
+request. While the Program Monitor is playing only worker 0 takes jobs, so at
+most one render competes with playback; when paused two run. A request whose
+range is already spanned by a ready segment or an in-flight job with the same
+signature is not queued (`prerender_range_is_covered`; segment lookup is by
+range containment, so the covering segment serves it) — before this, every
+seek on a 3-layer timeline queued a fresh `[seek_pos, next_boundary]` segment
+and five overlapping ffmpeg jobs ran at once. A queued job that is superseded
+or whose project is reloaded is cancelled at dequeue time (`skipped` result;
+never marked failed); a running one finishes and its result is discarded by
+the generation / superseded checks. `GST_DEBUG_DUMP_DOT_DIR` and the
+`queued=… running=…` fields of the `background_prerender: queued` log line
+show the queue state.
+
 ### Audio/video resync ordering (boundaries, mid-play audio changes)
 
 The audio-track mixer (`audio_multi_pipeline`) is a separate pipeline that is

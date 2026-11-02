@@ -1697,8 +1697,121 @@ struct PrerenderJobResult {
     end_ns: u64,
     signature: u64,
     success: bool,
+    /// The job was dropped before it started (superseded or project
+    /// reloaded while still queued): nothing was rendered and nothing
+    /// should be recorded as failed.
+    skipped: bool,
     generation: u64,
     cache_persistent: bool,
+}
+
+/// A prerender render waiting for a worker: the key it will produce and the
+/// closure that renders it and sends its `PrerenderJobResult`.
+struct PrerenderJob {
+    key: String,
+    run: Box<dyn FnOnce() + Send>,
+}
+
+/// Bounded worker pool for background prerender renders.
+///
+/// Every segment request used to spawn its own thread and ffmpeg process, so
+/// a few seeks on a three-layer timeline left five overlapping jobs encoding
+/// at once — each one software-decoding three 5.3K streams — and playback
+/// collapsed. Jobs now wait in a queue served by `PRERENDER_WORKERS` threads;
+/// while the Program Monitor is playing only the first worker takes jobs, so
+/// at most one render competes with playback. A queued job whose key has been
+/// cancelled (superseded, or the project reloaded) is dropped at dequeue time
+/// instead of being rendered for nothing.
+#[derive(Clone)]
+struct PrerenderWorkerPool {
+    queue: Arc<(
+        Mutex<std::collections::VecDeque<PrerenderJob>>,
+        std::sync::Condvar,
+    )>,
+    cancelled: Arc<Mutex<HashSet<String>>>,
+    playing: Arc<AtomicBool>,
+    running: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+const PRERENDER_WORKERS: usize = 2;
+
+impl PrerenderWorkerPool {
+    fn new() -> Self {
+        let pool = Self {
+            queue: Arc::new((
+                Mutex::new(std::collections::VecDeque::new()),
+                std::sync::Condvar::new(),
+            )),
+            cancelled: Arc::new(Mutex::new(HashSet::new())),
+            playing: Arc::new(AtomicBool::new(false)),
+            running: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        for worker_idx in 0..PRERENDER_WORKERS {
+            let worker = pool.clone();
+            std::thread::Builder::new()
+                .name(format!("prerender-worker-{worker_idx}"))
+                .spawn(move || worker.serve(worker_idx))
+                .expect("spawn prerender worker");
+        }
+        pool
+    }
+
+    /// Worker loop. Worker 0 always serves; the others pause while playing.
+    fn serve(&self, worker_idx: usize) {
+        let (lock, cvar) = &*self.queue;
+        loop {
+            let job = {
+                let mut queue = lock.lock().unwrap();
+                loop {
+                    let may_run = worker_idx == 0 || !self.playing.load(Ordering::Relaxed);
+                    if may_run {
+                        if let Some(job) = queue.pop_front() {
+                            break job;
+                        }
+                    }
+                    let (guard, _) = cvar
+                        .wait_timeout(queue, std::time::Duration::from_millis(500))
+                        .unwrap();
+                    queue = guard;
+                }
+            };
+            self.running.fetch_add(1, Ordering::Relaxed);
+            (job.run)();
+            self.running.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    fn submit(&self, job: PrerenderJob) {
+        let (lock, cvar) = &*self.queue;
+        lock.lock().unwrap().push_back(job);
+        cvar.notify_all();
+    }
+
+    /// Drop a still-queued job (a running one finishes on its own).
+    fn cancel(&self, key: &str) {
+        self.cancelled.lock().unwrap().insert(key.to_string());
+    }
+
+    /// Whether `key` was cancelled; clears the mark.
+    fn take_cancelled(&self, key: &str) -> bool {
+        self.cancelled.lock().unwrap().remove(key)
+    }
+
+    /// Forget every queued job (project reload). Running jobs finish and
+    /// their results are discarded by the generation check.
+    fn clear_queue(&self) {
+        let (lock, _) = &*self.queue;
+        lock.lock().unwrap().clear();
+        self.cancelled.lock().unwrap().clear();
+    }
+
+    fn queued(&self) -> usize {
+        self.queue.0.lock().unwrap().len()
+    }
+
+    fn running(&self) -> usize {
+        self.running.load(Ordering::Relaxed)
+    }
 }
 
 pub struct BackgroundPrerenderProgress {
@@ -2163,6 +2276,11 @@ pub struct ProgramPlayer {
     /// Used to detect and supersede stale jobs when a new request arrives for
     /// the same region with a different signature.
     prerender_boundary_latest: HashMap<(u64, u64), String>,
+    /// Bounded workers that run the prerender ffmpeg jobs.
+    prerender_pool: PrerenderWorkerPool,
+    /// Signature and range of every in-flight job, so a request already
+    /// covered by a queued or running render is not queued again.
+    prerender_pending_ranges: HashMap<String, (u64, u64, u64)>,
     /// Result channel for background prerender jobs.
     prerender_result_rx: mpsc::Receiver<PrerenderJobResult>,
     /// Sender cloned into background prerender workers.
@@ -2955,6 +3073,8 @@ impl ProgramPlayer {
                 prerender_pending_priority: HashMap::new(),
                 prerender_failed: HashSet::new(),
                 prerender_superseded: HashSet::new(),
+                prerender_pool: PrerenderWorkerPool::new(),
+                prerender_pending_ranges: HashMap::new(),
                 prerender_boundary_latest: HashMap::new(),
                 prerender_result_rx,
                 prerender_result_tx,
@@ -3502,6 +3622,8 @@ impl ProgramPlayer {
         self.prerender_segments.clear();
         self.prerender_pending.clear();
         self.prerender_pending_priority.clear();
+        self.prerender_pending_ranges.clear();
+        self.prerender_pool.clear_queue();
         self.prerender_failed.clear();
         self.prerender_superseded.clear();
         self.prerender_boundary_latest.clear();
@@ -7136,6 +7258,9 @@ impl ProgramPlayer {
         self.consume_pending_short_frame_capture();
         let _eos = self.poll_bus();
         self.sample_effective_fps();
+        self.prerender_pool
+            .playing
+            .store(self.state == PlayerState::Playing, Ordering::Relaxed);
         self.poll_background_prerender_results();
         if self.pending_prerender_promote && self.state == PlayerState::Playing {
             self.pending_prerender_promote = false;
@@ -10190,6 +10315,15 @@ impl ProgramPlayer {
             }
             self.prerender_pending.remove(&result.key);
             self.prerender_pending_priority.remove(&result.key);
+            self.prerender_pending_ranges.remove(&result.key);
+            if result.skipped {
+                self.prerender_superseded.remove(&result.key);
+                log::debug!(
+                    "background_prerender: dropped queued key={} before it started",
+                    result.key
+                );
+                continue;
+            }
             // Discard results for superseded jobs — their output is stale.
             if self.prerender_superseded.remove(&result.key) {
                 log::debug!(
@@ -10516,6 +10650,31 @@ impl ProgramPlayer {
         {
             return;
         }
+        // A ready segment or an in-flight job with the same signature that
+        // already spans this range will serve it (segment lookup is by range
+        // containment), so don't render the same pixels again: every seek
+        // used to queue a fresh `[seek_pos, next_boundary]` segment.
+        if Self::prerender_range_is_covered(
+            self.prerender_segments
+                .values()
+                .map(|seg| (seg.signature, seg.start_ns, seg.end_ns)),
+            signature,
+            segment_start_ns,
+            segment_end_ns,
+        ) || Self::prerender_range_is_covered(
+            self.prerender_pending_ranges.values().copied(),
+            signature,
+            segment_start_ns,
+            segment_end_ns,
+        ) {
+            log::debug!(
+                "background_prerender: range {}..{} already covered (sig={:016x}); not queued",
+                segment_start_ns,
+                segment_end_ns,
+                signature
+            );
+            return;
+        }
         // Supersede any stale pending job for the same boundary region.
         // This keeps at most one in-flight job per region and frees a queue
         // slot so the fresh request passes admission.
@@ -10526,7 +10685,9 @@ impl ProgramPlayer {
         {
             if old_key != key && self.prerender_pending.remove(&old_key) {
                 self.prerender_pending_priority.remove(&old_key);
+                self.prerender_pending_ranges.remove(&old_key);
                 self.prerender_superseded.insert(old_key.clone());
+                self.prerender_pool.cancel(&old_key);
                 log::debug!(
                     "background_prerender: superseded key={} for boundary {:?}",
                     old_key,
@@ -10645,8 +10806,24 @@ impl ProgramPlayer {
         let prerender_preset = self.prerender_preset.clone();
         let prerender_crf = self.prerender_crf;
         let hw_encoder_mode = self.hw_encoder_mode;
-        std::thread::spawn(move || {
+        let pool_for_job = self.prerender_pool.clone();
+        let key_for_skip = key.clone();
+        let run = move || {
             let output_path_buf = PathBuf::from(&output_path);
+            if pool_for_job.take_cancelled(&key_for_skip) {
+                let _ = tx.send(PrerenderJobResult {
+                    key: key_for_job,
+                    path: output_path,
+                    start_ns: segment_start_ns,
+                    end_ns: segment_end_ns,
+                    signature,
+                    success: false,
+                    skipped: true,
+                    generation,
+                    cache_persistent,
+                });
+                return;
+            }
             let mut success = Self::render_prerender_segment_video_file(
                 &output_path,
                 &inputs,
@@ -10677,23 +10854,45 @@ impl ProgramPlayer {
                 end_ns: segment_end_ns,
                 signature,
                 success,
+                skipped: false,
                 generation,
                 cache_persistent,
             });
+        };
+        self.prerender_pool.submit(PrerenderJob {
+            key: key.clone(),
+            run: Box::new(run),
         });
+        self.prerender_pending_ranges
+            .insert(key.clone(), (signature, segment_start_ns, segment_end_ns));
         self.prerender_pending.insert(key);
         self.prerender_pending_priority
             .insert(key_for_log.clone(), request_priority);
         self.prerender_total_requested += 1;
         log::info!(
-            "background_prerender: queued key={} range={}..{} clips={} priority={} pending={}",
+            "background_prerender: queued key={} range={}..{} clips={} priority={} pending={} queued={} running={}",
             key_for_log,
             segment_start_ns,
             segment_end_ns,
             input_count,
             request_priority,
-            self.prerender_pending.len()
+            self.prerender_pending.len(),
+            self.prerender_pool.queued(),
+            self.prerender_pool.running()
         );
+    }
+
+    /// True when one of `ranges` (signature, start, end) has the same
+    /// signature and spans `[start_ns, end_ns]`.
+    fn prerender_range_is_covered(
+        ranges: impl Iterator<Item = (u64, u64, u64)>,
+        signature: u64,
+        start_ns: u64,
+        end_ns: u64,
+    ) -> bool {
+        ranges
+            .into_iter()
+            .any(|(sig, s, e)| sig == signature && s <= start_ns && e >= end_ns)
     }
 
     fn segment_distance_to_timeline_ns(timeline_pos_ns: u64, start_ns: u64, end_ns: u64) -> u64 {
@@ -11051,9 +11250,10 @@ impl ProgramPlayer {
     }
 
     /// Slots that currently contribute pixels. A just-ended clip is kept as
-    /// a *hidden* slot for possible re-entry; counting it toward the ≥3-slot
-    /// drop-late policy made a plain 2-clip overlap after a cut flip into
-    /// leaky-queue mode and stall the compositor.
+    /// a *hidden* slot for possible re-entry; it must not count toward any
+    /// slot-count based policy (the former ≥3-slot drop-late rule turned a
+    /// plain 2-clip overlap after a cut into leaky-queue mode and stalled the
+    /// compositor).
     fn visible_slot_count(&self) -> usize {
         self.slots.iter().filter(|slot| !slot.hidden).count()
     }
@@ -11068,14 +11268,16 @@ impl ProgramPlayer {
         if !is_playing || transform_live {
             return false;
         }
-        if slot_count >= 3 {
-            return true;
-        }
         // Only enable drop-late for active transition overlaps in Smooth
-        // mode (2 clips composited together).  Enabling it for single-slot
-        // playback removes backpressure, letting the compositor spin at
-        // thousands of fps — the leaky display queue and QoS sink then drop
-        // nearly every frame, producing ~1-2 displayed fps instead of 30.
+        // mode (2 clips composited together).  Enabling it anywhere else
+        // removes backpressure, letting the compositor spin at thousands of
+        // fps — the leaky display queue and QoS sink then drop nearly every
+        // frame, producing ~1-2 displayed fps instead of 30.  That was first
+        // seen on single-slot playback; the former `slot_count >= 3` rule did
+        // exactly the same to every 3+ layer timeline (measured: compositor
+        // output 20,000 buffers/s at 480×270, ~7 cores, 40+ QoS drops for
+        // three 5.3K layers; 31/s and no drops once the rule was removed).
+        let _ = slot_count;
         matches!(playback_priority, PlaybackPriority::Smooth) && transition_overlap_active
     }
 
@@ -19195,13 +19397,103 @@ mod tests {
     }
 
     #[test]
-    fn accurate_three_slot_playback_still_drops_late() {
+    fn prerender_range_coverage_requires_same_signature_and_full_span() {
+        let ranges = [(7u64, 1_000u64, 20_000u64), (9, 0, 50_000)];
+        let covered = |sig, s, e| {
+            ProgramPlayer::prerender_range_is_covered(ranges.iter().copied(), sig, s, e)
+        };
+        assert!(covered(7, 1_000, 20_000));
+        assert!(covered(7, 3_000, 20_000));
+        assert!(covered(7, 5_000, 10_000));
+        assert!(!covered(7, 500, 20_000), "starts before the covering range");
+        assert!(!covered(7, 1_000, 20_001), "ends after it");
+        assert!(!covered(8, 1_000, 20_000), "different signature");
+        assert!(covered(9, 1_000, 20_000));
+    }
+
+    #[test]
+    fn prerender_pool_runs_jobs_skips_cancelled_and_holds_second_worker_while_playing() {
+        use super::{PrerenderJob, PrerenderWorkerPool};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let pool = PrerenderWorkerPool::new();
+        let ran = Arc::new(AtomicUsize::new(0));
+        let job = |pool: &PrerenderWorkerPool, key: &str, ran: &Arc<AtomicUsize>, ms: u64| {
+            let ran = ran.clone();
+            let p = pool.clone();
+            let k = key.to_string();
+            PrerenderJob {
+                key: key.to_string(),
+                run: Box::new(move || {
+                    if p.take_cancelled(&k) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                    ran.fetch_add(1, Ordering::SeqCst);
+                }),
+            }
+        };
+        // Cancelled before it starts → never runs.
+        pool.cancel("b");
+        pool.submit(job(&pool, "a", &ran, 10));
+        pool.submit(job(&pool, "b", &ran, 10));
+        pool.submit(job(&pool, "c", &ran, 10));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while (pool.queued() > 0 || pool.running() > 0) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(ran.load(Ordering::SeqCst), 2, "a and c ran, b was dropped");
+
+        // While playing only worker 0 serves: a long job occupies it and the
+        // second job must wait instead of starting on worker 1.
+        pool.playing.store(true, Ordering::Relaxed);
+        let ran2 = Arc::new(AtomicUsize::new(0));
+        pool.submit(job(&pool, "long", &ran2, 800));
+        pool.submit(job(&pool, "second", &ran2, 10));
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert_eq!(
+            pool.running(),
+            1,
+            "second worker must stay idle while playing"
+        );
+        assert_eq!(pool.queued(), 1);
+        pool.playing.store(false, Ordering::Relaxed);
+        std::thread::sleep(std::time::Duration::from_millis(700));
+        assert!(pool.running() <= 2);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while (pool.queued() > 0 || pool.running() > 0) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(ran2.load(Ordering::SeqCst), 2);
+        // Clearing the queue drops jobs that never started.
+        pool.playing.store(true, Ordering::Relaxed);
+        pool.submit(job(&pool, "hold", &ran2, 500));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        pool.submit(job(&pool, "never", &ran2, 10));
+        pool.clear_queue();
+        assert_eq!(pool.queued(), 0);
+    }
+
+    #[test]
+    fn three_slot_playback_keeps_backpressure() {
+        // Three or more layers used to force drop-late, which removed the
+        // display backpressure and let the compositor free-run (20,000
+        // buffers/s measured) — the opposite of what the policy intended.
+        for priority in [
+            crate::ui_state::PlaybackPriority::Accurate,
+            crate::ui_state::PlaybackPriority::Balanced,
+            crate::ui_state::PlaybackPriority::Smooth,
+        ] {
+            assert!(!ProgramPlayer::should_drop_late_for_playback_mode(
+                true, false, &priority, 3, false,
+            ));
+        }
         assert!(ProgramPlayer::should_drop_late_for_playback_mode(
             true,
             false,
-            &crate::ui_state::PlaybackPriority::Accurate,
+            &crate::ui_state::PlaybackPriority::Smooth,
             3,
-            false,
+            true,
         ));
     }
 

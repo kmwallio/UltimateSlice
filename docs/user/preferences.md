@@ -170,6 +170,7 @@ Backups are stored in `~/.local/share/ultimateslice/backups/` (or `$XDG_DATA_HOM
 - If a prerender segment finishes while playback is already inside that overlap region, UltimateSlice can now switch into the prerender path mid-segment (via a short rebuild) instead of waiting for the next boundary.
 - While paused or stopped, UltimateSlice also schedules nearby prerender jobs around the current playhead so heavy sections can be ready before playback starts.
 - While playing, background prerender scheduling is bounded to upcoming boundaries (not every playhead tick) to reduce job churn and keep readiness stable.
+- Renders run on a small worker pool: at most one prerender job encodes while the Program Monitor is playing (two while paused), and a request whose range is already covered by a finished or in-progress segment is not rendered again, so seeking around a heavy section no longer piles up overlapping ffmpeg jobs.
 - While currently inside a prerendered overlap segment, UltimateSlice prewarms the immediate boundary after that segment so post-prerender preview playback is ready sooner.
 - Prototype path: prerender segments currently include mixed audio, and prerender playback can run as a single prerender decoder branch (video + audio) during heavy overlap sections.
 - Prerender segment duration now covers the full overlap span to the next boundary (not a fixed ~4s chunk), reducing black tails when long overlap regions are active.
