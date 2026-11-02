@@ -6,6 +6,14 @@ on:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    env:
+      # whisper-rs-sys regenerates its bindings with whatever libclang the
+      # runner image ships; on ubuntu-latest that run produced an opaque
+      # `whisper_full_params` (only `_address`), so whisper-rs failed with
+      # "no field `greedy`". The crate's bundled bindings match its own
+      # whisper.cpp checkout, so use them (the Flatpak build pins its own
+      # libclang instead).
+      WHISPER_DONT_GENERATE_BINDINGS: "1"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -15,6 +23,11 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          # Part of the cache key, so a cached whisper-rs-sys OUT_DIR
+          # generated with libclang is not reused once bindings come from
+          # the bundled file (its build script has no rerun-if-env-changed).
+          env-vars: WHISPER_DONT_GENERATE_BINDINGS
 
       - name: Install system dependencies
         run: |
