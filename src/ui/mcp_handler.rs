@@ -68,6 +68,7 @@ pub(crate) struct McpCaches<'a> {
     pub stt_cache: &'a Rc<RefCell<crate::media::stt_cache::SttCache>>,
     pub music_gen_cache: &'a Rc<RefCell<crate::media::music_gen::MusicGenCache>>,
     pub tracking_cache: &'a Rc<RefCell<crate::media::tracking::TrackingCache>>,
+    pub ai_index_backlog: &'a Rc<Cell<crate::ui::window::AiIndexBacklog>>,
 }
 
 /// UI callbacks the MCP dispatcher pushes results through.
@@ -148,6 +149,7 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
                 stt_cache,
                 music_gen_cache,
                 tracking_cache,
+                ai_index_backlog,
             },
         tracking_job_owner_by_key,
         tracking_job_key_by_clip,
@@ -2067,6 +2069,44 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
                         .ok();
                 }
             }
+        }
+
+        McpCommand::GetAiIndexStatus { reply } => {
+            let prefs = preferences_state.borrow();
+            let backlog = ai_index_backlog.get();
+            let stt = stt_cache.borrow();
+            let clip = clip_embedding_cache.borrow();
+            let tags = auto_tag_cache.borrow();
+            let (stt_p, clip_p, tag_p) = (stt.progress(), clip.progress(), tags.progress());
+            reply
+                .send(json!({
+                    "enabled": prefs.background_ai_indexing,
+                    "auto_tagging_enabled": prefs.background_auto_tagging,
+                    "paused_for_playback": backlog.paused_for_playback,
+                    "transcripts": {
+                        "available": stt.feature_enabled() && stt.is_available(),
+                        "in_flight": stt_p.in_flight,
+                        "completed": stt_p.completed,
+                        "requested": stt_p.total,
+                        "remaining": backlog.transcripts_remaining,
+                    },
+                    "visual": {
+                        "available": clip.is_available(),
+                        "in_flight": clip_p.in_flight,
+                        "completed": clip_p.completed,
+                        "requested": clip_p.total,
+                        "remaining": backlog.visual_remaining,
+                    },
+                    "auto_tags": {
+                        "available": tags.is_available(),
+                        "in_flight": tag_p.in_flight,
+                        "completed": tag_p.completed,
+                        "requested": tag_p.total,
+                        "remaining": backlog.auto_tags_remaining,
+                    },
+                    "remaining_total": backlog.remaining(),
+                }))
+                .ok();
         }
 
         McpCommand::SetBackgroundAiIndexing { enabled, reply } => {

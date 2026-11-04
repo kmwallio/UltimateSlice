@@ -292,10 +292,11 @@ The MODNet entry includes an in-app **Download Model** button. Whisper, MusicGen
 
 ## AI Index in Background (Models)
 
-- **AI index in background** automatically builds Media Library search data for eligible library items after import/open.
-- It is **disabled by default**.
-- Current scope: it can queue Whisper transcript indexing for eligible audio-backed items and CLIP-style visual embeddings for eligible video/still-image items.
-- Jobs run **one clip at a time** in the background so automatic indexing does not flood the STT queue.
+- **AI index in background** automatically builds Media Library search data for eligible library items after import/open — the data the **Moments** strip and `search_moments` rank (see [Media Library](media-library.md#find-the-moment)).
+- It is **on by default** (older settings files without the option are treated as on). Turn it off if you never want background CPU use.
+- Current scope: it queues Whisper transcript indexing for eligible audio-backed items and CLIP-style visual embeddings for eligible video/still-image items.
+- Pacing: one job per signal at a time, workers run at low CPU priority (nice 10, inherited by Whisper's threads and the ffmpeg frame extractors), and **no new job starts while the Program Monitor is playing** — a job already running simply finishes. A transcript takes a few minutes per clip on a laptop-class CPU; visual embeddings take seconds.
+- The **Jobs** tray shows the running job and an **AI indexing queue** row with what is still to do (and *Paused while playing* when playback is holding it back). MCP `get_ai_index_status` returns the same.
 - It only runs when the corresponding models are available: Whisper for transcript indexing, and a CLIP search model directory for visual embeddings.
 - The preferred CLIP search install location is `~/.local/share/ultimateslice/models/clip-search/` containing `image_encoder.onnx`, `text_encoder.onnx`, and `tokenizer.json`.
 - Existing projects can use it to backfill library search data over time without manually regenerating subtitles or reimporting clips.

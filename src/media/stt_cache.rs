@@ -318,6 +318,9 @@ pub fn stt_model_dir() -> PathBuf {
 // ── Worker thread ─────────────────────────────────────────────────────────
 
 fn stt_worker_loop(work_rx: mpsc::Receiver<SttJob>, result_tx: mpsc::SyncSender<WorkerUpdate>) {
+    // Whisper's inference threads inherit this: background transcription
+    // must never fight the Program Monitor for cores.
+    crate::media::cache_support::lower_current_thread_priority();
     // Model is loaded lazily on first job and kept resident.
     #[cfg(feature = "speech-to-text")]
     let mut ctx: Option<whisper_rs::WhisperContext> = None;

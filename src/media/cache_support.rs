@@ -27,6 +27,18 @@ pub(crate) fn partial_file_is_in_flight(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Lower the calling thread's scheduling priority (nice 10 on Linux) so a
+/// background worker — and the threads and child processes it spawns, which
+/// inherit it — never competes with playback and the UI for CPU.
+pub(crate) fn lower_current_thread_priority() {
+    #[cfg(target_os = "linux")]
+    // SAFETY: setpriority(PRIO_PROCESS, 0, …) only changes the calling
+    // thread's own nice value; it touches no Rust state.
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS as _, 0, 10);
+    }
+}
+
 pub(crate) fn file_has_content(path: &str) -> bool {
     std::fs::metadata(path)
         .map(|m| m.len() > 0)

@@ -1973,6 +1973,11 @@ fn tools_list() -> Value {
             }
         },
         {
+            "name": "get_ai_index_status",
+            "description": "State of automatic AI indexing (transcripts via Whisper, CLIP visual embeddings, auto-tags): whether it is enabled, whether new jobs are held back because the Program Monitor is playing, and per signal availability, in-flight / completed / requested counts and how many library items still need indexing.",
+            "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
             "name": "set_background_ai_indexing",
             "description": "Enable or disable automatic background AI indexing for Media Library search enrichment. When enabled, eligible library items are queued one at a time for transcript indexing (Whisper) and visual embedding generation (CLIP-style search) when the corresponding models are available.",
             "inputSchema": {
@@ -4314,6 +4319,7 @@ pub fn build_tool_command(
             id: arg_str!(args, "id", ""),
             reply: tx,
         },
+        "get_ai_index_status" => McpCommand::GetAiIndexStatus { reply: tx },
         "set_background_ai_indexing" => McpCommand::SetBackgroundAiIndexing {
             enabled: arg_bool!(args, "enabled"),
             reply: tx,

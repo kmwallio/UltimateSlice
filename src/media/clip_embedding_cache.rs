@@ -84,6 +84,8 @@ impl ClipEmbeddingCache {
         let (work_tx, work_rx) = mpsc::channel::<ClipEmbeddingJob>();
 
         std::thread::spawn(move || {
+            // ONNX threads and the ffmpeg frame extractors inherit this.
+            crate::media::cache_support::lower_current_thread_priority();
             while let Ok(job) = work_rx.recv() {
                 let embedding = run_clip_embedding_job(&job);
                 let success = embedding.is_some();

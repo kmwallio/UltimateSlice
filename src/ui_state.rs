@@ -1800,6 +1800,9 @@ impl ExportQueueState {
     }
 }
 
+fn default_true() -> bool {
+    true
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PreferencesState {
     /// GPU video decode (VA-API) for both monitors.  Defaults on; both
@@ -1867,9 +1870,11 @@ pub struct PreferencesState {
     /// cannot keep up with (preview only; export is unaffected).
     #[serde(default)]
     pub background_render_mode: BackgroundRenderMode,
-    /// Automatically build transcript search data for eligible library items
-    /// in the background when speech-to-text support is available.
-    #[serde(default)]
+    /// Automatically build transcript and visual-search data for eligible
+    /// library items in the background (on by default; jobs run at low
+    /// priority, one per signal, and never start while the Program Monitor
+    /// is playing). Missing in older state files → on.
+    #[serde(default = "default_true")]
     pub background_ai_indexing: bool,
     /// Automatically derive persistent contextual Media Library tags once
     /// visual-search embeddings are available.
@@ -1986,7 +1991,7 @@ impl Default for PreferencesState {
             realtime_preview: true,
             background_prerender: false,
             background_render_mode: BackgroundRenderMode::default(),
-            background_ai_indexing: false,
+            background_ai_indexing: true,
             background_auto_tagging: false,
             prerender_preset: PrerenderEncodingPreset::default(),
             prerender_crf: default_prerender_crf(),
@@ -2575,11 +2580,7 @@ mod tests {
             .into_iter()
             .map(|p| p.name)
             .collect();
-        for expected in [
-            "Instagram Reel 9:16",
-            "TikTok 9:16",
-            "Web Compressed 720p",
-        ] {
+        for expected in ["Instagram Reel 9:16", "TikTok 9:16", "Web Compressed 720p"] {
             assert!(
                 names.iter().any(|n| n == expected),
                 "missing built-in preset {expected:?}; have {names:?}"
@@ -2616,7 +2617,10 @@ mod tests {
             .find(|p| p.name == "Archive ProRes 4K")
             .unwrap();
         let ps = prores.spec_summary();
-        assert!(ps.contains("ProRes") && ps.contains("4K") && ps.contains("MOV"), "{ps}");
+        assert!(
+            ps.contains("ProRes") && ps.contains("4K") && ps.contains("MOV"),
+            "{ps}"
+        );
         // GIF gets the fps-flavored summary, never a CRF/audio line.
         let gif = default_export_presets()
             .into_iter()
@@ -2678,7 +2682,8 @@ mod tests {
                 .unwrap();
         assert!(!parsed.preferences.source_monitor_auto_link_av);
         assert!(!parsed.preferences.crossfade_enabled);
-        assert!(!parsed.preferences.background_ai_indexing);
+        // Indexing is on by default, including for state files that predate the field.
+        assert!(parsed.preferences.background_ai_indexing);
         assert!(!parsed.preferences.background_auto_tagging);
         assert_eq!(
             parsed.preferences.crossfade_curve,

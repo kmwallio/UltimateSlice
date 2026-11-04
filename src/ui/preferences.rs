@@ -1,8 +1,7 @@
 use crate::ui::id_dropdown::IdDropDown;
 use crate::ui_state::{
-    BackgroundRenderMode,
-    clamp_prerender_crf, AutoScrollMode, CrossfadeCurve, GskRenderer, HwEncoderMode,
-    AutoProxyThreshold, PlaybackPriority, PreferencesState, PrerenderEncodingPreset,
+    clamp_prerender_crf, AutoProxyThreshold, AutoScrollMode, BackgroundRenderMode, CrossfadeCurve,
+    GskRenderer, HwEncoderMode, PlaybackPriority, PreferencesState, PrerenderEncodingPreset,
     PreviewQuality, ProxyCodec, ProxyMode, ThemeMode, MAX_PRERENDER_CRF, MIN_PRERENDER_CRF,
 };
 use gtk4::prelude::*;
@@ -1158,7 +1157,7 @@ pub fn show_preferences_dialog(
         models_box.append(&background_ai_indexing_check);
 
         let background_ai_indexing_hint = Label::new(Some(
-            "Automatically builds Media Library AI search data after import/open. Audio-backed clips can be queued for transcript indexing when Whisper is available, and video/image clips can be queued for visual-search embeddings when the CLIP search model is installed. Runs one clip at a time in the background and stays off by default.",
+            "Builds the Media Library's search data by itself: audio-backed clips get a Whisper transcript, video and still clips get CLIP visual-search embeddings, so the Moments strip can find what is said and shown. On by default. One job per signal at a time, at low CPU priority, and nothing new starts while the Program Monitor is playing; the Jobs tray shows the queue.",
         ));
         background_ai_indexing_hint.set_halign(gtk::Align::Start);
         background_ai_indexing_hint.add_css_class("dim-label");
@@ -1587,7 +1586,7 @@ pub fn show_preferences_dialog(
         models_box.append(&background_ai_indexing_check);
 
         let background_ai_indexing_hint = Label::new(Some(
-            "Automatically builds Media Library AI search data after import/open. Audio-backed clips can be queued for transcript indexing when Whisper is available, and video/image clips can be queued for visual-search embeddings when the CLIP search model is installed. Runs one clip at a time in the background and stays off by default.",
+            "Builds the Media Library's search data by itself: audio-backed clips get a Whisper transcript, video and still clips get CLIP visual-search embeddings, so the Moments strip can find what is said and shown. On by default. One job per signal at a time, at low CPU priority, and nothing new starts while the Program Monitor is playing; the Jobs tray shows the queue.",
         ));
         background_ai_indexing_hint.set_halign(gtk::Align::Start);
         background_ai_indexing_hint.add_css_class("dim-label");

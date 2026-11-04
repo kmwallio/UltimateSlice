@@ -72,7 +72,7 @@ Bins are saved with your project and restored when you reopen it.
 - When the current query matches an auto-tag, matching clips show a short **Tags:** hint on the card and the tooltip includes the matched tag category plus confidence.
 - When the current query matches spoken content, matching clips show a short **Spoken:** hint on the card and the tooltip includes the matched transcript excerpt plus the clip's transcript-segment count.
 - When the current query matches a visual embedding, matching clips show a short **Visual:** hint on the card and the tooltip includes the closest matching frame time from that clip.
-- If **Preferences → Models → AI index in background** is enabled, eligible audio-backed items can be queued for transcript indexing and eligible video/still-image items can be queued for visual-search embedding generation after import/open. If **Preferences → Models → Auto-tag visual media** is also enabled, clips with visual embeddings are then queued for persistent contextual auto-tagging. Both preferences are disabled by default.
+- **Preferences → Models → AI index in background** (on by default) queues eligible audio-backed items for transcript indexing and eligible video/still-image items for visual-search embedding generation after import/open, one job per signal at a time, at low CPU priority, and never starting a new job while the Program Monitor is playing. If **Auto-tag visual media** is also enabled (off by default), clips with visual embeddings are then queued for persistent contextual auto-tagging.
 - The preferred visual-search model install location is `~/.local/share/ultimateslice/models/clip-search/` containing `image_encoder.onnx`, `text_encoder.onnx`, and `tokenizer.json`. Alternate directory names `clip_search/`, `clip-vit/`, and `clip_vit/` are also accepted, as are the file names of the Hugging Face ONNX export (`vision_model.onnx`, `text_model.onnx`). A known-good set is the `Xenova/clip-vit-base-patch32` repository on Hugging Face: download `onnx/vision_model.onnx`, `onnx/text_model.onnx` and `tokenizer.json` (about 600 MB) into that folder and restart; the models are picked up without any further configuration. With it installed, searches like *camping outdoors* or *a hand washing a potato on a steel table* return visual moments at the matching frames.
 - Use the **type** dropdown to focus on video, audio, images, or offline clips.
 - Use the **size** dropdown to narrow the current browser scope to SD-or-smaller, HD, Full HD, or 4K+ media.
@@ -104,9 +104,11 @@ across the whole library, best first.
   text (at the playhead when the clip is not on the timeline).
 - **Insert** edits the moment in at the playhead.
 
-Transcripts come from **Generate Subtitles** (and from *AI index in
-background* when enabled); visual moments need the CLIP search model under
-`~/.local/share/ultimateslice/models/clip-search/`. Automation gets the same
+Transcripts and visual embeddings are built automatically in the background
+(*AI index in background*, on by default; the Jobs tray shows the queue), so
+new imports become searchable on their own once Whisper and the CLIP search
+model under `~/.local/share/ultimateslice/models/clip-search/` are installed.
+**Generate Subtitles** also feeds the transcript side. Automation gets the same
 ranking from the `search_moments` MCP tool and the same three actions from
 `jump_to_moment`.
 

@@ -189,6 +189,9 @@ pub enum McpCommand {
         enabled: bool,
         reply: SyncSender<Value>,
     },
+    GetAiIndexStatus {
+        reply: SyncSender<Value>,
+    },
     SetBackgroundAiIndexing {
         enabled: bool,
         reply: SyncSender<Value>,

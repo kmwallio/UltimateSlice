@@ -282,6 +282,23 @@ enum BackgroundJobCancelAction {
     Tracking { clip_id: String },
 }
 
+/// What automatic AI indexing still has to do, refreshed every scheduler
+/// tick for the Jobs tray and the `get_ai_index_status` MCP tool.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AiIndexBacklog {
+    pub transcripts_remaining: usize,
+    pub visual_remaining: usize,
+    pub auto_tags_remaining: usize,
+    /// New jobs are held back while the Program Monitor is playing.
+    pub paused_for_playback: bool,
+}
+
+impl AiIndexBacklog {
+    pub fn remaining(&self) -> usize {
+        self.transcripts_remaining + self.visual_remaining + self.auto_tags_remaining
+    }
+}
+
 #[derive(Clone)]
 struct ActiveBackgroundJob {
     id: String,
@@ -10921,6 +10938,7 @@ pub fn build_window(
         header.pack_end(&btn_script);
     }
 
+    let ai_index_backlog: Rc<Cell<AiIndexBacklog>> = Rc::new(Cell::new(AiIndexBacklog::default()));
     let jobs_popover = gtk::Popover::new();
     jobs_popover.set_autohide(true);
     let jobs_popover_box = gtk::Box::new(Orientation::Vertical, 8);
@@ -20494,6 +20512,7 @@ pub fn build_window(
         let scene_detect_in_progress = scene_detect_in_progress.clone();
         let match_audio_in_progress = match_audio_in_progress.clone();
         let render_replace_cache = render_replace_cache.clone();
+        let ai_index_backlog = ai_index_backlog.clone();
         Rc::new(move || {
             let mut jobs = Vec::new();
 
@@ -20698,6 +20717,57 @@ pub fn build_window(
                         .unwrap_or_else(|| "Running…".to_string()),
                     fraction,
                     pulse: fraction.is_none(),
+                    cancel_action: None,
+                });
+            }
+
+            let backlog = ai_index_backlog.get();
+            if backlog.remaining() > 0 {
+                let mut parts: Vec<String> = Vec::new();
+                if backlog.transcripts_remaining > 0 {
+                    parts.push(format!(
+                        "{} transcript{}",
+                        backlog.transcripts_remaining,
+                        if backlog.transcripts_remaining == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    ));
+                }
+                if backlog.visual_remaining > 0 {
+                    parts.push(format!(
+                        "{} visual embedding{}",
+                        backlog.visual_remaining,
+                        if backlog.visual_remaining == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    ));
+                }
+                if backlog.auto_tags_remaining > 0 {
+                    parts.push(format!(
+                        "{} auto-tag{}",
+                        backlog.auto_tags_remaining,
+                        if backlog.auto_tags_remaining == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    ));
+                }
+                jobs.push(ActiveBackgroundJob {
+                    id: "ai-index-backlog".to_string(),
+                    title: "AI indexing queue".to_string(),
+                    detail: format!("{} to go", parts.join(", ")),
+                    progress_text: if backlog.paused_for_playback {
+                        "Paused while playing".to_string()
+                    } else {
+                        "Waiting".to_string()
+                    },
+                    fraction: None,
+                    pulse: false,
                     cancel_action: None,
                 });
             }
@@ -20924,6 +20994,8 @@ pub fn build_window(
         let render_job_tray = render_job_tray.clone();
         let render_replace_cache = render_replace_cache.clone();
         let background_render_state = background_render_state.clone();
+        let prog_player_for_ai = prog_player.clone();
+        let ai_index_backlog_tick = ai_index_backlog.clone();
         glib::timeout_add_local(std::time::Duration::from_millis(500), move || {
             let resolved = proxy_cache.borrow_mut().poll();
             if !resolved.is_empty() {
@@ -21481,25 +21553,36 @@ pub fn build_window(
                     on_library_changed_stt();
                 }
                 // Also clear if no jobs are pending (handles edge cases like failure).
-                if !stt_cache.borrow().progress().in_flight {
+                // Automatic indexing: one transcript job at a time, at low
+                // priority, and never started while the Program Monitor is
+                // playing (a running job finishes on its own).
+                let stt_in_flight = stt_cache.borrow().progress().in_flight;
+                if !stt_in_flight {
                     inspector_view.stt_generating.set(false);
-                    if preferences_state.borrow().background_ai_indexing
-                        && stt_cache.borrow().feature_enabled()
-                        && stt_cache.borrow().is_available()
-                    {
-                        let candidates: Vec<(String, u64, u64)> = {
-                            let lib = library_for_stt.borrow();
-                            lib.items
-                                .iter()
-                                .filter_map(|item| {
-                                    media_background_ai_index_request(item).map(
-                                        |(source_in_ns, source_out_ns)| {
-                                            (item.source_path.clone(), source_in_ns, source_out_ns)
-                                        },
-                                    )
-                                })
-                                .collect()
-                        };
+                }
+                let playback_busy = prog_player_for_ai.borrow().is_playing();
+                let mut backlog = ai_index_backlog_tick.get();
+                backlog.paused_for_playback = playback_busy;
+                backlog.transcripts_remaining = 0;
+                if preferences_state.borrow().background_ai_indexing
+                    && stt_cache.borrow().feature_enabled()
+                    && stt_cache.borrow().is_available()
+                {
+                    let candidates: Vec<(String, u64, u64)> = {
+                        let lib = library_for_stt.borrow();
+                        lib.items
+                            .iter()
+                            .filter_map(|item| {
+                                media_background_ai_index_request(item).map(
+                                    |(source_in_ns, source_out_ns)| {
+                                        (item.source_path.clone(), source_in_ns, source_out_ns)
+                                    },
+                                )
+                            })
+                            .collect()
+                    };
+                    backlog.transcripts_remaining = candidates.len();
+                    if !stt_in_flight && !playback_busy {
                         let mut cache = stt_cache.borrow_mut();
                         for (source_path, source_in_ns, source_out_ns) in candidates {
                             if cache.request(&source_path, source_in_ns, source_out_ns, "auto") {
@@ -21508,6 +21591,7 @@ pub fn build_window(
                         }
                     }
                 }
+                ai_index_backlog_tick.set(backlog);
                 // Show/hide error label from last STT result.
                 let stt_err = stt_cache.borrow().last_error.clone();
                 if let Some(err) = stt_err {
@@ -21533,23 +21617,30 @@ pub fn build_window(
                     on_library_changed_stt();
                 }
                 clip_embedding_cache.borrow_mut().refresh_model_paths();
-                if !clip_embedding_cache.borrow().progress().in_flight
-                    && preferences_state.borrow().background_ai_indexing
+                let visual_in_flight = clip_embedding_cache.borrow().progress().in_flight;
+                let playback_busy = prog_player_for_ai.borrow().is_playing();
+                let mut backlog = ai_index_backlog_tick.get();
+                let visual_candidates: Vec<(
+                    String,
+                    crate::model::media_library::MediaVisualIndexRequest,
+                )> = if preferences_state.borrow().background_ai_indexing
                     && clip_embedding_cache.borrow().is_available()
                 {
-                    let candidates: Vec<(
-                        String,
-                        crate::model::media_library::MediaVisualIndexRequest,
-                    )> = {
-                        let lib = library_for_stt.borrow();
-                        lib.items
-                            .iter()
-                            .filter_map(|item| {
-                                media_background_visual_index_request(item)
-                                    .map(|request| (item.source_path.clone(), request))
-                            })
-                            .collect()
-                    };
+                    let lib = library_for_stt.borrow();
+                    lib.items
+                        .iter()
+                        .filter_map(|item| {
+                            media_background_visual_index_request(item)
+                                .map(|request| (item.source_path.clone(), request))
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                backlog.visual_remaining = visual_candidates.len();
+                ai_index_backlog_tick.set(backlog);
+                if !visual_in_flight && !playback_busy && !visual_candidates.is_empty() {
+                    let candidates = visual_candidates;
                     let mut cache = clip_embedding_cache.borrow_mut();
                     for (source_path, request) in candidates {
                         match cache.request(&source_path, request.duration_ns, request.is_image) {
@@ -21591,24 +21682,31 @@ pub fn build_window(
                 if auto_tag_cache_changed {
                     on_library_changed_stt();
                 }
-                if !auto_tag_cache.borrow().progress().in_flight
-                    && preferences_state.borrow().background_ai_indexing
+                let auto_tag_in_flight = auto_tag_cache.borrow().progress().in_flight;
+                let playback_busy = prog_player_for_ai.borrow().is_playing();
+                let mut backlog = ai_index_backlog_tick.get();
+                let auto_tag_candidates: Vec<(
+                    String,
+                    crate::model::media_library::MediaVisualEmbedding,
+                )> = if preferences_state.borrow().background_ai_indexing
                     && preferences_state.borrow().background_auto_tagging
                     && auto_tag_cache.borrow().is_available()
                 {
-                    let candidates: Vec<(
-                        String,
-                        crate::model::media_library::MediaVisualEmbedding,
-                    )> = {
-                        let lib = library_for_stt.borrow();
-                        lib.items
-                            .iter()
-                            .filter_map(|item| {
-                                media_background_auto_tag_request(item)
-                                    .map(|embedding| (item.source_path.clone(), embedding))
-                            })
-                            .collect()
-                    };
+                    let lib = library_for_stt.borrow();
+                    lib.items
+                        .iter()
+                        .filter_map(|item| {
+                            media_background_auto_tag_request(item)
+                                .map(|embedding| (item.source_path.clone(), embedding))
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                backlog.auto_tags_remaining = auto_tag_candidates.len();
+                ai_index_backlog_tick.set(backlog);
+                if !auto_tag_in_flight && !playback_busy && !auto_tag_candidates.is_empty() {
+                    let candidates = auto_tag_candidates;
                     let mut cache = auto_tag_cache.borrow_mut();
                     for (source_path, embedding) in candidates {
                         match cache.request(&source_path, embedding) {
@@ -22070,6 +22168,7 @@ pub fn build_window(
         let keymap_for_mcp = keymap.clone();
         let actions_for_mcp = actions.clone();
         let on_moment_action_for_mcp = on_moment_action.clone();
+        let ai_index_backlog_for_mcp = ai_index_backlog.clone();
         MCP_MAIN_DISPATCH.with(|slot| {
             *slot.borrow_mut() = Some(Box::new(move |cmd| {
                 if let Some(win) = window_weak.upgrade() {
@@ -22097,6 +22196,7 @@ pub fn build_window(
                                 stt_cache: &stt_cache,
                                 music_gen_cache: &music_gen_cache,
                                 tracking_cache: &tracking_cache_for_mcp,
+                                ai_index_backlog: &ai_index_backlog_for_mcp,
                             },
                             tracking_job_owner_by_key: &tracking_job_owner_by_key_for_mcp,
                             tracking_job_key_by_clip: &tracking_job_key_by_clip_for_mcp,

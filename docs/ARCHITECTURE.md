@@ -1079,6 +1079,19 @@ always ranks first. `Project::timeline_positions_for_source_time` maps a
 source time to the top-level video clips showing it (constant speed
 honoured) — that is how a moment becomes a playhead position.
 
+Automatic indexing (`window.rs`, the 500 ms poll tick): with
+`background_ai_indexing` (default on, `default_true` so older state files
+get it too) the tick counts the library items that still need a transcript
+(`media_background_ai_index_request`), a visual embedding
+(`media_background_visual_index_request`) or auto-tags, stores them in the
+shared `AiIndexBacklog` cell (Jobs tray row "AI indexing queue",
+`get_ai_index_status`), and starts at most one job per signal — only when
+that cache is idle **and** `ProgramPlayer::is_playing()` is false. Running
+jobs are never interrupted. All three cache workers call
+`cache_support::lower_current_thread_priority()` (nice 10) when their thread
+starts; Whisper's inference threads, ONNX threads and the ffmpeg frame
+extractors inherit it.
+
 The Media Library's Moments strip (`media_browser.rs`, `refresh_moments`)
 re-runs the search on every filter-text change and library refresh, requests
 a `ThumbnailCache` frame per row and redraws rows as the cache fills (bounded
@@ -1415,6 +1428,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `trigger_action` | Invoke a shortcut action by id through the registry (as pressing its key would) |
 | `list_palette_commands` | Every command palette entry (shortcut actions, toolbar buttons, argument-free MCP tools) with category, shortcut label, detail and recent flag |
 | `run_palette_command` | Run a palette entry by title (exact, else best fuzzy match), recording it as recent; returns the matched title |
+| `get_ai_index_status` | Automatic AI indexing state: enabled, paused-for-playback, per signal availability / in-flight / completed / remaining counts |
 | `search_moments` | "Find the moment": every in-clip match for a query across the library (transcript segments, CLIP frames, keyword ranges, auto-tag frames; whole-clip name hits last) with source range, excerpt and current timeline position(s) |
 | `jump_to_moment` | Act on a moment like the Media Library's Moments strip: `goto` (seek the timeline, or open in the Source Monitor), `mark` (timeline marker), `insert` (edit in at the playhead) |
 | `set_shortcut` | Rebind an action (`action_id`, `accelerators[]` in GTK syntax; empty = unbound); reports conflicts/shadows; persists |
