@@ -84,8 +84,10 @@ impl ClipEmbeddingCache {
         let (work_tx, work_rx) = mpsc::channel::<ClipEmbeddingJob>();
 
         std::thread::spawn(move || {
-            // ONNX threads and the ffmpeg frame extractors inherit this.
-            crate::media::cache_support::lower_current_thread_priority();
+            // ONNX threads and the ffmpeg frame extractors inherit this:
+            // nice 10 plus SCHED_IDLE, so a running job yields its cores to
+            // playback instead of merely ranking below it.
+            crate::media::cache_support::make_current_thread_background();
             while let Ok(job) = work_rx.recv() {
                 let embedding = run_clip_embedding_job(&job);
                 let success = embedding.is_some();
@@ -536,7 +538,18 @@ fn encode_media_item_frames(
 
     let mut frames = Vec::new();
     for time_ns in representative_frame_times(duration_ns, is_image) {
-        let rgb = extract_rgb_frame(source_path, time_ns, is_image).ok()?;
+        // An in-flight job stops spawning decoders while the Program
+        // Monitor plays (the scheduler only gates *new* jobs) and decodes
+        // the ready proxy when one exists rather than the heavy original.
+        crate::media::cache_support::wait_while_playback_active(std::time::Duration::from_secs(
+            600,
+        ));
+        let decode_path = if is_image {
+            source_path.to_string()
+        } else {
+            crate::media::cache_support::analysis_source_for(source_path)
+        };
+        let rgb = extract_rgb_frame(&decode_path, time_ns, is_image).ok()?;
         let embedding = encode_image_frame(&mut session, &rgb).ok()?;
         frames.push(MediaVisualEmbeddingFrame { time_ns, embedding });
     }

@@ -174,7 +174,7 @@ impl AutoTagCache {
         let (work_tx, work_rx) = mpsc::channel::<AutoTagJob>();
 
         std::thread::spawn(move || {
-            crate::media::cache_support::lower_current_thread_priority();
+            crate::media::cache_support::make_current_thread_background();
             while let Ok(job) = work_rx.recv() {
                 let auto_tags = run_auto_tag_job(&job);
                 let success = auto_tags.is_some();

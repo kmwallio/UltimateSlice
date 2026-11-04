@@ -693,12 +693,22 @@ ones. The rules:
   with a live LUT). The preferences-change handler must not wipe proxy
   paths while the auto set is non-empty.
 - **Swap-in rule (applies to manual mode too).** A proxy that finishes for
-  a clip already in a slot is applied immediately: `update_proxy_paths` and
+  a clip already in a slot is applied by a rebuild: `update_proxy_paths` and
   `set_auto_proxy_sources` call `active_slots_want_proxy_swap`, which
   compares the file the slot's `uridecodebin` is *actually* decoding
   (`slot_original_or_proxy_path`, only when that is the original or a known
   proxy file) with `effective_source_path_for_clip`, and rebuilds at the
-  current position when they differ. `compute_reuse_plan` uses the same
+  current position when they differ. The rebuild is **deferred**
+  (`proxy_swap_deferred`, applied by `pause()` and by `play()` before slots
+  are reused, cleared by any `rebuild_pipeline_at`) in two cases: the slot
+  is *playing* and every slot that wants the swap is GPU-decoded
+  (`any_software_decoded_slot_wants_proxy_swap` is false — the original
+  already holds real time, and the rebuild itself froze the picture for
+  ~0.55 s on an 8K source), or the player is *stopped* (`stop()` keeps the
+  slots alive, so an immediate rebuild is wasted and a reused slot would
+  otherwise keep decoding the original on the next play). Software-decoded
+  playing slots and paused slots swap at once. `get_performance_snapshot`
+  reports `proxy_swap_deferred`. `compute_reuse_plan` uses the same
   actual-file comparison; comparing the slot's clip to itself through the
   current proxy state made the continue-decoders fast path reuse a slot that
   was still decoding the original.
@@ -1086,11 +1096,36 @@ get it too) the tick counts the library items that still need a transcript
 (`media_background_visual_index_request`) or auto-tags, stores them in the
 shared `AiIndexBacklog` cell (Jobs tray row "AI indexing queue",
 `get_ai_index_status`), and starts at most one job per signal — only when
-that cache is idle **and** `ProgramPlayer::is_playing()` is false. Running
-jobs are never interrupted. All three cache workers call
-`cache_support::lower_current_thread_priority()` (nice 10) when their thread
-starts; Whisper's inference threads, ONNX threads and the ffmpeg frame
-extractors inherit it.
+that cache is idle **and** `ProgramPlayer::is_playing()` is false. All
+three cache workers call `cache_support::make_current_thread_background()`
+(nice 10 plus `SCHED_IDLE`) when their thread starts; Whisper's inference
+threads, ONNX threads and the ffmpeg frame extractors inherit it.
+
+Running jobs yield to playback rather than being killed. The tick publishes
+`cache_support::set_playback_active(is_playing)`; the CLIP worker calls
+`wait_while_playback_active` before each frame extraction, and the Whisper
+job blocks in whisper.cpp's progress callback (invoked on the worker thread
+between 30 s windows, with no compute threads alive), so an in-flight
+transcription pauses at the next window boundary and resumes when playback
+stops. A lower scheduling class alone was not enough: on a laptop-class
+chip CPU load lowers the shared power budget of the integrated GPU that
+decodes playback.
+
+Heavy sources are analysed from their proxy. The tick also publishes
+`ProxyCache::ready_plain_proxy_paths()` (scale-only and codec-variant
+proxies, not LUT / vidstab ones) through
+`cache_support::set_analysis_proxy_paths`; `analysis_source_for(path)`
+returns the proxy when it is on disk, and both `ThumbnailCache` and the CLIP
+frame extractor decode that file instead of the original. Visual jobs for a
+source whose proxy is still transcoding (`ProxyCache::pending_source_paths`)
+are held back (`AiIndexBacklog::visual_waiting_for_proxy`, "waiting for
+proxies" in the Jobs row, `waiting_for_proxy` in `get_ai_index_status`) so
+they decode 1080p H.264 later instead of 8K HEVC now, while the transcode
+has the GPU. Thumbnails of originals use `-hwaccel vaapi` when the startup
+probe found VA-API decode usable (ffmpeg downloads the frame itself; the
+software scale/pad chain is unchanged), run at nice 10 only (they are
+user-facing), and skip missing files and empty paths without spawning
+ffmpeg.
 
 The Media Library's Moments strip (`media_browser.rs`, `refresh_moments`)
 re-runs the search on every filter-text change and library refresh, requests
@@ -1428,7 +1463,7 @@ Before declaring a task finished, agents must verify via MCP:
 | `trigger_action` | Invoke a shortcut action by id through the registry (as pressing its key would) |
 | `list_palette_commands` | Every command palette entry (shortcut actions, toolbar buttons, argument-free MCP tools) with category, shortcut label, detail and recent flag |
 | `run_palette_command` | Run a palette entry by title (exact, else best fuzzy match), recording it as recent; returns the matched title |
-| `get_ai_index_status` | Automatic AI indexing state: enabled, paused-for-playback, per signal availability / in-flight / completed / remaining counts |
+| `get_ai_index_status` | Automatic AI indexing state: enabled, paused-for-playback, per signal availability / in-flight / completed / remaining counts; `visual.waiting_for_proxy` counts jobs held until a source's proxy transcode finishes |
 | `search_moments` | "Find the moment": every in-clip match for a query across the library (transcript segments, CLIP frames, keyword ranges, auto-tag frames; whole-clip name hits last) with source range, excerpt and current timeline position(s) |
 | `jump_to_moment` | Act on a moment like the Media Library's Moments strip: `goto` (seek the timeline, or open in the Source Monitor), `mark` (timeline marker), `insert` (edit in at the playhead) |
 | `set_shortcut` | Rebind an action (`action_id`, `accelerators[]` in GTK syntax; empty = unbound); reports conflicts/shadows; persists |

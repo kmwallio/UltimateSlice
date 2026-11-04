@@ -705,6 +705,47 @@ impl ProxyCache {
             .collect()
     }
 
+    /// Source paths with a transcode queued or running. The indexing
+    /// scheduler holds CLIP jobs for these back so they decode the proxy
+    /// once it lands instead of the heavy original now.
+    pub fn pending_source_paths(&self) -> HashSet<String> {
+        self.pending
+            .iter()
+            .map(|k| match k.split_once('|') {
+                Some((src, _)) => src.to_string(),
+                None => k.clone(),
+            })
+            .collect()
+    }
+
+    /// Source paths whose last transcode failed (any variant). Analysers
+    /// waiting for a proxy of these fall back to the original.
+    pub fn failed_source_paths(&self) -> HashSet<String> {
+        self.failed
+            .iter()
+            .map(|k| match k.split_once('|') {
+                Some((src, _)) => src.to_string(),
+                None => k.clone(),
+            })
+            .collect()
+    }
+
+    /// Source path → ready proxy file for plain (scale-only) proxies: keys
+    /// without a LUT / vidstab variant suffix. HEVC-codec proxies carry a
+    /// `|c:hevc` suffix and are included as well since their picture is the
+    /// same. Published to background analysers via
+    /// [`crate::media::cache_support::set_analysis_proxy_paths`].
+    pub fn ready_plain_proxy_paths(&self) -> HashMap<String, String> {
+        self.proxies
+            .iter()
+            .filter_map(|(k, v)| match k.split_once('|') {
+                None => Some((k.clone(), v.clone())),
+                Some((src, suffix)) if suffix == "c:hevc" => Some((src.to_string(), v.clone())),
+                Some(_) => None,
+            })
+            .collect()
+    }
+
     /// Clear all in-memory cached and pending entries (disk files are preserved).
     /// Call this when the proxy scale changes so clips are re-requested at the new size.
     pub fn invalidate_all(&mut self) {
@@ -1683,7 +1724,8 @@ fn run_transcode_command(
     // chain. Requires `hw_family == Vaapi`.
     gpu_resident_filter: Option<&str>,
 ) -> bool {
-    let gpu_resident = gpu_resident_filter.is_some() && matches!(hw_family, Some(HwEncoderFamily::Vaapi));
+    let gpu_resident =
+        gpu_resident_filter.is_some() && matches!(hw_family, Some(HwEncoderFamily::Vaapi));
     let mut cmd = Command::new(ffmpeg);
     cmd.arg("-y")
         .arg("-hide_banner")
@@ -1835,13 +1877,17 @@ fn run_transcode_command(
         (None, ProxyCodec::H264) => "libx264",
         (None, ProxyCodec::Hevc) => "libx265",
     };
-    let dec_label = if gpu_resident { "vaapi-resident" } else { match hw_decode_method {
-        Some("vaapi") => {
-            "sw (vaapi decode skipped — slower than CPU for HEVC 10-bit on Intel iGPUs)"
+    let dec_label = if gpu_resident {
+        "vaapi-resident"
+    } else {
+        match hw_decode_method {
+            Some("vaapi") => {
+                "sw (vaapi decode skipped — slower than CPU for HEVC 10-bit on Intel iGPUs)"
+            }
+            Some(method) => method,
+            None => "sw",
         }
-        Some(method) => method,
-        None => "sw",
-    } };
+    };
     log::info!(
         "ProxyCache: spawning ffmpeg for {} (decode={dec_label}, encode={enc_label})",
         source_path
@@ -2410,6 +2456,44 @@ mod tests {
     }
 
     #[test]
+    fn pending_and_plain_proxy_queries_strip_variant_suffixes() {
+        let mut cache = ProxyCache::new();
+        cache.pending.insert("/m/a.mp4".to_string());
+        cache.pending.insert("/m/b.mp4|lut:/l/x.cube".to_string());
+        let pending = cache.pending_source_paths();
+        assert!(pending.contains("/m/a.mp4") && pending.contains("/m/b.mp4"));
+        assert_eq!(pending.len(), 2);
+
+        cache
+            .proxies
+            .insert("/m/c.mp4".to_string(), "/p/c.proxy.mp4".to_string());
+        cache
+            .proxies
+            .insert("/m/d.mp4|c:hevc".to_string(), "/p/d.proxy.mp4".to_string());
+        cache.proxies.insert(
+            "/m/e.mp4|lut:/l/x.cube".to_string(),
+            "/p/e-lut.proxy.mp4".to_string(),
+        );
+        cache.proxies.insert(
+            "/m/f.mp4|vs:0.50".to_string(),
+            "/p/f-vs.proxy.mp4".to_string(),
+        );
+        let plain = cache.ready_plain_proxy_paths();
+        // Scale-only and codec-variant proxies show the same picture; LUT
+        // and stabilised variants do not and are left out.
+        assert_eq!(
+            plain.get("/m/c.mp4").map(String::as_str),
+            Some("/p/c.proxy.mp4")
+        );
+        assert_eq!(
+            plain.get("/m/d.mp4").map(String::as_str),
+            Some("/p/d.proxy.mp4")
+        );
+        assert!(!plain.contains_key("/m/e.mp4") && !plain.contains_key("/m/f.mp4"));
+        assert_eq!(plain.len(), 2);
+    }
+
+    #[test]
     fn proxy_key_h264_default_matches_legacy_shape() {
         // Regression guard: existing on-disk caches were keyed without the
         // codec discriminator. proxy_key_with_vidstab (the historical
@@ -2482,11 +2566,27 @@ mod tests {
 
     #[test]
     fn gpu_resident_proxy_requires_scale_only_vaapi_encode_and_vaapi_decode() {
-        assert!(gpu_resident_proxy_eligible(true, Some(HwEncoderFamily::Vaapi), true));
-        assert!(!gpu_resident_proxy_eligible(false, Some(HwEncoderFamily::Vaapi), true));
-        assert!(!gpu_resident_proxy_eligible(true, Some(HwEncoderFamily::Nvenc), true));
+        assert!(gpu_resident_proxy_eligible(
+            true,
+            Some(HwEncoderFamily::Vaapi),
+            true
+        ));
+        assert!(!gpu_resident_proxy_eligible(
+            false,
+            Some(HwEncoderFamily::Vaapi),
+            true
+        ));
+        assert!(!gpu_resident_proxy_eligible(
+            true,
+            Some(HwEncoderFamily::Nvenc),
+            true
+        ));
         assert!(!gpu_resident_proxy_eligible(true, None, true));
-        assert!(!gpu_resident_proxy_eligible(true, Some(HwEncoderFamily::Vaapi), false));
+        assert!(!gpu_resident_proxy_eligible(
+            true,
+            Some(HwEncoderFamily::Vaapi),
+            false
+        ));
     }
 
     #[test]

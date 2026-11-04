@@ -84,6 +84,11 @@ impl ThumbnailCache {
     /// Queues extraction; spawns up to MAX_CONCURRENT background threads.
     /// Returns `true` if the thumbnail is already cached.
     pub fn request(&mut self, source_path: &str, time_ns: u64) -> bool {
+        if source_path.is_empty() {
+            // Generated clips (titles, adjustment layers, recent-project
+            // cards without media) have nothing to extract.
+            return false;
+        }
         let key = cache_key(source_path, time_ns);
         if self.surfaces.contains_key(&key) {
             return true;
@@ -155,6 +160,10 @@ impl ThumbnailCache {
                 self.in_flight += 1;
                 let tx = self.tx.clone();
                 std::thread::spawn(move || {
+                    // Thumbnails are user-facing, so only nice 10 (not the
+                    // SCHED_IDLE indexing workers get): they still finish on a
+                    // busy machine but never outrank playback and the UI.
+                    crate::media::cache_support::lower_current_thread_priority();
                     // For image files, GStreamer is required (imagefreeze).
                     // For video files, go straight to ffmpeg: it is faster
                     // and handles multi-stream files (HEVC + audio + GPS)
@@ -379,9 +388,26 @@ fn extract_rgba(source_path: String, time_ns: u64) -> Result<Vec<u8>> {
 }
 
 fn extract_rgba_ffmpeg(source_path: &str, time_ns: u64) -> Result<Vec<u8>> {
+    if !std::path::Path::new(source_path).is_file() {
+        // Missing media (offline drive, recent-project card whose file moved):
+        // don't spawn ffmpeg just to have it fail to open the input.
+        anyhow::bail!("source not found: {source_path}");
+    }
+    // Decode the ready proxy when one exists: same picture, a fraction of
+    // the cost of an 8K 10-bit HEVC frame.
+    let decode_path = crate::media::cache_support::analysis_source_for(source_path);
+    let decoding_original = decode_path == source_path;
     let ffmpeg = crate::media::export::find_ffmpeg()?;
     let mut cmd = Command::new(ffmpeg);
     cmd.arg("-hide_banner").arg("-loglevel").arg("error");
+    // Hardware decode for originals: a single 8K HEVC frame costs several
+    // CPU-seconds in software (measured 3–4 cores for ~3 s per thumbnail)
+    // and milliseconds on VA-API. Without `-hwaccel_output_format` ffmpeg
+    // downloads the frame itself and the software scale/pad chain below
+    // is unchanged; unsupported codecs silently fall back to software.
+    if decoding_original && crate::media::hwaccel::vaapi_decode_usable() {
+        cmd.arg("-hwaccel").arg("vaapi");
+    }
     if time_ns > 0 {
         let seek_sec = format!("{:.3}", time_ns as f64 / 1_000_000_000.0);
         cmd.arg("-ss").arg(seek_sec);
@@ -391,7 +417,7 @@ fn extract_rgba_ffmpeg(source_path: &str, time_ns: u64) -> Result<Vec<u8>> {
          pad={THUMB_W}:{THUMB_H}:(ow-iw)/2:(oh-ih)/2:color=black,format=rgba"
     );
     cmd.arg("-i")
-        .arg(source_path)
+        .arg(&decode_path)
         .arg("-frames:v")
         .arg("1")
         .arg("-an")

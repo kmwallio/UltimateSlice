@@ -1863,6 +1863,9 @@ pub struct ProgramPerformanceSnapshot {
     /// Live video slots decoded on the GPU (VA-API + vapostproc) vs software.
     pub gpu_decoded_slots: usize,
     pub software_decoded_slots: usize,
+    /// A ready proxy is waiting for the next pause/play to be swapped in
+    /// (held back because the slot plays the original on the GPU).
+    pub proxy_swap_deferred: bool,
     /// Whether new video branches may take the GPU path right now.
     pub hardware_decode_active: bool,
     pub preview_divisor: u32,
@@ -2124,6 +2127,10 @@ pub struct ProgramPlayer {
     /// Proxy cache keys already reported as fallback-to-original in this session.
     /// Prevents warning spam while proxies are still being generated.
     proxy_fallback_warned_keys: HashSet<String>,
+    /// A proxy became ready for a slot that is playing the original on the
+    /// GPU. The swap is held until the next pause / play / rebuild so the
+    /// ~0.5 s pipeline rebuild never interrupts smooth playback.
+    proxy_swap_deferred: bool,
     /// Animated-SVG render paths keyed by render key.
     animated_svg_paths: HashMap<String, String>,
     /// Bg-removed file paths: source_path → bg_removed file path.
@@ -3020,6 +3027,7 @@ impl ProgramPlayer {
                 proxy_paths: HashMap::new(),
                 auto_proxy_sources: HashSet::new(),
                 proxy_fallback_warned_keys: HashSet::new(),
+                proxy_swap_deferred: false,
                 animated_svg_paths: HashMap::new(),
                 bg_removal_paths: HashMap::new(),
                 voice_enhance_paths: HashMap::new(),
@@ -3391,7 +3399,11 @@ impl ProgramPlayer {
     /// fixed size.
     fn fit_hw_output_caps(pad: &gst::Pad, hw: &HwChainPads) -> gst::Caps {
         let (mut w, mut h) = (hw.box_w & !1, hw.box_h & !1);
-        if let Some(s) = pad.current_caps().as_ref().and_then(|c| c.structure(0).map(|s| s.to_owned())) {
+        if let Some(s) = pad
+            .current_caps()
+            .as_ref()
+            .and_then(|c| c.structure(0).map(|s| s.to_owned()))
+        {
             if let (Ok(sw), Ok(sh)) = (s.get::<i32>("width"), s.get::<i32>("height")) {
                 let par = s
                     .get::<gst::Fraction>("pixel-aspect-ratio")
@@ -3805,16 +3817,61 @@ impl ProgramPlayer {
             // would otherwise only be used at the next boundary/edit
             // rebuild. Swap it in now so a heavy source stops decoding at
             // full resolution as soon as its proxy exists.
-            if !self.clips.is_empty()
-                && matches!(self.state, PlayerState::Playing | PlayerState::Paused)
-                && self.active_slots_want_proxy_swap()
-            {
-                log::info!(
-                    "ProgramPlayer: proxy ready for an active slot, rebuilding at {}ns",
-                    self.timeline_pos_ns
-                );
-                self.rebuild_pipeline_at(self.timeline_pos_ns);
+            //
+            // Unless the slot is already decoding the original on the GPU
+            // while playing: that path holds real-time on 8K sources, and the
+            // rebuild itself freezes the picture for ~0.5 s (measured 552 ms
+            // on a 7680×5760 HEVC source), so the swap waits for the next
+            // pause / play / rebuild. Software-decoded slots swap at once —
+            // there the proxy is what makes playback smooth.
+            //
+            // A proxy landing while *stopped* is also deferred: `stop()` keeps
+            // the slots alive for a fast restart, so without the flag the
+            // next `play()` would reuse them and keep decoding the original.
+            if !self.clips.is_empty() && self.active_slots_want_proxy_swap() {
+                let gpu_playing = self.state == PlayerState::Playing
+                    && !self.any_software_decoded_slot_wants_proxy_swap();
+                if gpu_playing || self.state == PlayerState::Stopped {
+                    log::info!(
+                        "ProgramPlayer: proxy ready for a {} slot, deferring swap until pause/play",
+                        if gpu_playing {
+                            "GPU-decoded playing"
+                        } else {
+                            "stopped"
+                        }
+                    );
+                    self.proxy_swap_deferred = true;
+                } else {
+                    log::info!(
+                        "ProgramPlayer: proxy ready for an active slot, rebuilding at {}ns",
+                        self.timeline_pos_ns
+                    );
+                    self.rebuild_pipeline_at(self.timeline_pos_ns);
+                }
             }
+        }
+    }
+
+    /// True when a proxy swap was deferred during playback and has not been
+    /// applied yet (surfaced in the performance snapshot).
+    pub fn proxy_swap_deferred(&self) -> bool {
+        self.proxy_swap_deferred
+    }
+
+    /// Apply a proxy swap deferred during playback: rebuild at the current
+    /// position if some slot still decodes an original whose proxy is ready.
+    /// Called from `pause()` and from `play()` before slots are reused.
+    fn apply_deferred_proxy_swap(&mut self) {
+        if !self.proxy_swap_deferred {
+            return;
+        }
+        self.proxy_swap_deferred = false;
+        if !self.clips.is_empty() && self.active_slots_want_proxy_swap() {
+            log::info!(
+                "ProgramPlayer: applying deferred proxy swap, rebuilding at {}ns",
+                self.timeline_pos_ns
+            );
+            self.rebuild_pipeline_at(self.timeline_pos_ns);
         }
     }
 
@@ -3840,7 +3897,21 @@ impl ProgramPlayer {
     /// wanted and ready (or decoding a proxy that is no longer wanted), so
     /// the slot must be rebuilt rather than reused.
     fn active_slots_want_proxy_swap(&self) -> bool {
+        self.slots
+            .iter()
+            .any(|slot| self.slot_wants_proxy_swap(slot))
+    }
+
+    /// Like [`Self::active_slots_want_proxy_swap`] but only counting slots
+    /// decoding in software — the ones a proxy actually speeds up.
+    fn any_software_decoded_slot_wants_proxy_swap(&self) -> bool {
         self.slots.iter().any(|slot| {
+            !slot.gpu_linked.load(Ordering::Relaxed) && self.slot_wants_proxy_swap(slot)
+        })
+    }
+
+    fn slot_wants_proxy_swap(&self, slot: &VideoSlot) -> bool {
+        {
             let Some(clip) = self.clips.get(slot.clip_idx) else {
                 return false;
             };
@@ -3848,7 +3919,7 @@ impl ProgramPlayer {
                 Some(actual) => actual != self.effective_source_path_for_clip(clip),
                 None => false,
             }
-        })
+        }
     }
 
     pub fn update_animated_svg_paths(&mut self, paths: HashMap<String, String>) {
@@ -4903,9 +4974,11 @@ impl ProgramPlayer {
         ]
         .iter()
         .any(|v| (*v as f64).abs() > f64::EPSILON);
-        let blur_sigma = (clip.denoise as f64 * 4.0 - clip.sharpness as f64 * 6.0).clamp(-20.0, 20.0);
+        let blur_sigma =
+            (clip.denoise as f64 * 4.0 - clip.sharpness as f64 * 6.0).clamp(-20.0, 20.0);
         let need_blur = blur_sigma.abs() > f64::EPSILON;
-        let need_squareblur = (clip.blur as f64).abs() > f64::EPSILON || !clip.blur_keyframes.is_empty();
+        let need_squareblur =
+            (clip.blur as f64).abs() > f64::EPSILON || !clip.blur_keyframes.is_empty();
         let need_title = !clip.title_text.is_empty();
 
         let mut c = clip.clone();
@@ -5006,7 +5079,15 @@ impl ProgramPlayer {
 
         let mut h = std::collections::hash_map::DefaultHasher::new();
         format!("{:?}", c).hash(&mut h);
-        (need_balance, need_coloradj, need_3point, need_blur, need_squareblur, need_title).hash(&mut h);
+        (
+            need_balance,
+            need_coloradj,
+            need_3point,
+            need_blur,
+            need_squareblur,
+            need_title,
+        )
+            .hash(&mut h);
         h.finish()
     }
 
@@ -5102,8 +5183,7 @@ impl ProgramPlayer {
                 return false;
             };
             let new = &new_video[ni];
-            let shape_changed =
-                Self::clip_shape_signature(old) != Self::clip_shape_signature(new);
+            let shape_changed = Self::clip_shape_signature(old) != Self::clip_shape_signature(new);
             let mapping_changed =
                 Self::clip_mapping_signature(old) != Self::clip_mapping_signature(new);
             let is_pending_new = self
@@ -5184,12 +5264,12 @@ impl ProgramPlayer {
         let new_audio_ids: Vec<&str> = new_audio.iter().map(|c| c.id.as_str()).collect();
         let active_old: Vec<usize> = self.audio_clips_active_at(pos);
         let audio_changed = old_audio_ids != new_audio_ids
-            || active_old.iter().any(|&i| {
-                match (self.audio_clips.get(i), new_audio.get(i)) {
+            || active_old
+                .iter()
+                .any(|&i| match (self.audio_clips.get(i), new_audio.get(i)) {
                     (Some(a), Some(b)) => format!("{a:?}") != format!("{b:?}"),
                     _ => true,
-                }
-            });
+                });
 
         // Commit.
         self.invalidate_short_frame_cache("live-reload");
@@ -5205,8 +5285,18 @@ impl ProgramPlayer {
         self.audio_track_peak_db = max_track_index
             .map(|idx| vec![[-60.0, -60.0]; idx + 1])
             .unwrap_or_default();
-        let vdur = self.clips.iter().map(|c| c.timeline_end_ns()).max().unwrap_or(0);
-        let adur = self.audio_clips.iter().map(|c| c.timeline_end_ns()).max().unwrap_or(0);
+        let vdur = self
+            .clips
+            .iter()
+            .map(|c| c.timeline_end_ns())
+            .max()
+            .unwrap_or(0);
+        let adur = self
+            .audio_clips
+            .iter()
+            .map(|c| c.timeline_end_ns())
+            .max()
+            .unwrap_or(0);
         self.timeline_dur_ns = vdur.max(adur);
         self.last_seeked_frame_pos = None;
         self.prewarmed_boundary_ns = None;
@@ -5311,8 +5401,11 @@ impl ProgramPlayer {
             if pts == u64::MAX {
                 continue;
             }
-            let expected =
-                Self::effective_slot_source_pos_ns(slot, clip, wall + slot.transition_enter_offset_ns);
+            let expected = Self::effective_slot_source_pos_ns(
+                slot,
+                clip,
+                wall + slot.transition_enter_offset_ns,
+            );
             parts.push(format!(
                 "{}:{:+.0}ms",
                 &clip.id[..8.min(clip.id.len())],
@@ -5320,7 +5413,11 @@ impl ProgramPlayer {
             ));
         }
         if !parts.is_empty() {
-            log::debug!("slot_align: wall={:.2}s {}", wall as f64 / 1e9, parts.join(" "));
+            log::debug!(
+                "slot_align: wall={:.2}s {}",
+                wall as f64 / 1e9,
+                parts.join(" ")
+            );
         }
     }
 
@@ -5383,7 +5480,10 @@ impl ProgramPlayer {
         if slot.parked_video.is_none() {
             log::warn!(
                 "slot_swap: could not park the video branch for clip {}",
-                self.clips.get(clip_idx).map(|c| c.id.as_str()).unwrap_or("?")
+                self.clips
+                    .get(clip_idx)
+                    .map(|c| c.id.as_str())
+                    .unwrap_or("?")
             );
             self.teardown_single_slot(slot);
             return None;
@@ -5490,9 +5590,10 @@ impl ProgramPlayer {
             {
                 continue;
             }
-            let already = self.pending_slot_swaps.iter().any(|p| {
-                p.boundary_ns == Some(boundary_ns) && p.clip_id == clip.id
-            });
+            let already = self
+                .pending_slot_swaps
+                .iter()
+                .any(|p| p.boundary_ns == Some(boundary_ns) && p.clip_id == clip.id);
             if already {
                 staged.push(idx);
                 continue;
@@ -5572,7 +5673,9 @@ impl ProgramPlayer {
             move |pad, _info| {
                 log::debug!(
                     "slot_swap: buffer parked at {}:{}",
-                    pad.parent().map(|p| p.name().to_string()).unwrap_or_default(),
+                    pad.parent()
+                        .map(|p| p.name().to_string())
+                        .unwrap_or_default(),
                     pad.name()
                 );
                 flag.store(true, Ordering::Release);
@@ -5622,15 +5725,10 @@ impl ProgramPlayer {
         let Some(park) = slot.parked_video.take() else {
             return false;
         };
-        let comp_pad = Self::attach_parked_branch(
-            &self.compositor,
-            park,
-            seek_running_ns,
-            |pad| {
-                pad.set_property("zorder", zorder);
-                pad.set_property("alpha", 0.0_f64);
-            },
-        );
+        let comp_pad = Self::attach_parked_branch(&self.compositor, park, seek_running_ns, |pad| {
+            pad.set_property("zorder", zorder);
+            pad.set_property("alpha", 0.0_f64);
+        });
         let Some(comp_pad) = comp_pad else {
             return false;
         };
@@ -5640,12 +5738,10 @@ impl ProgramPlayer {
         // before the first video frame; if not, the mixer briefly
         // waits for it — after the picture is already right).
         if let Some(park) = slot.parked_audio.take() {
-            slot.audio_mixer_pad = Self::attach_parked_branch(
-                &self.audiomixer,
-                park,
-                seek_running_ns,
-                |pad| pad.set_property("volume", 0.0_f64),
-            );
+            slot.audio_mixer_pad =
+                Self::attach_parked_branch(&self.audiomixer, park, seek_running_ns, |pad| {
+                    pad.set_property("volume", 0.0_f64)
+                });
         }
         self.pending_slot_swaps[pi].attached = true;
         true
@@ -5963,7 +6059,9 @@ impl ProgramPlayer {
             // source PTS last seen at the compositor should agree (±1 frame)
             // and sit at the wall-clock position's source time.
             {
-                let wall = self.wall_clock_timeline_pos_ns().unwrap_or(self.timeline_pos_ns);
+                let wall = self
+                    .wall_clock_timeline_pos_ns()
+                    .unwrap_or(self.timeline_pos_ns);
                 let new = &self.slots[new_idx];
                 let old = &self.slots[old_idx];
                 let clip = &self.clips[new.clip_idx];
@@ -5972,7 +6070,13 @@ impl ProgramPlayer {
                     clip,
                     wall + new.transition_enter_offset_ns,
                 );
-                let ms = |v: u64| if v == u64::MAX { f64::NAN } else { v as f64 / 1e6 };
+                let ms = |v: u64| {
+                    if v == u64::MAX {
+                        f64::NAN
+                    } else {
+                        v as f64 / 1e6
+                    }
+                };
                 let old_pts = old.last_comp_pts.load(Ordering::Relaxed);
                 let new_pts = new.last_comp_pts.load(Ordering::Relaxed);
                 log::info!(
@@ -6475,6 +6579,9 @@ impl ProgramPlayer {
         }
         self.pending_short_frame_capture = None;
         let pos = self.timeline_pos_ns;
+        // A proxy that landed mid-play for a GPU-decoded slot is swapped in
+        // here, where a rebuild is expected, rather than during playback.
+        self.apply_deferred_proxy_swap();
         if self.slots.is_empty() {
             // When starting playback from a cold/stopped state, rebuild via the
             // playback path (not paused scrubbing path) to avoid paused-seek stalls.
@@ -6662,6 +6769,7 @@ impl ProgramPlayer {
         self.jkl_rate = 0.0;
         self.update_drop_late_policy();
         self.update_slot_queue_policy();
+        self.apply_deferred_proxy_swap();
     }
 
     pub fn toggle_play_pause(&mut self) {
@@ -10129,6 +10237,7 @@ impl ProgramPlayer {
             dropped_frames_total: self.dropped_frames_total.load(Ordering::Relaxed),
             gpu_decoded_slots,
             software_decoded_slots,
+            proxy_swap_deferred: self.proxy_swap_deferred,
             hardware_decode_active: self.hw_video_postproc_active(),
             preview_divisor: self.preview_divisor.max(1),
             processing_width: proc_w,
@@ -12287,7 +12396,8 @@ impl ProgramPlayer {
             && pad.find_property("width").is_some()
             && pad.find_property("height").is_some()
         {
-            let has_pos = pad.find_property("xpos").is_some() && pad.find_property("ypos").is_some();
+            let has_pos =
+                pad.find_property("xpos").is_some() && pad.find_property("ypos").is_some();
             let (xpos, ypos) = if !has_pos {
                 (0, 0)
             } else if direct_translation {
@@ -12883,8 +12993,7 @@ impl ProgramPlayer {
                 // attached with the boundary's running time — just reveal.
                 if let Some(si) = staged_for(self, *clip_idx) {
                     let decoder = self.slots[si].decoder.clone();
-                    self.pending_slot_swaps
-                        .retain(|p| p.new_decoder != decoder);
+                    self.pending_slot_swaps.retain(|p| p.new_decoder != decoder);
                     let enter_offset = self.transition_enter_offset_for_clip(*clip_idx);
                     let slot = &mut self.slots[si];
                     slot.hidden = false;
@@ -13046,7 +13155,12 @@ impl ProgramPlayer {
     fn teardown_single_slot(&mut self, mut slot: VideoSlot) {
         // A parked (hot-swap) branch: lift the blocks so the flushes below
         // can wake the streaming threads.
-        for park in slot.parked_video.take().into_iter().chain(slot.parked_audio.take()) {
+        for park in slot
+            .parked_video
+            .take()
+            .into_iter()
+            .chain(slot.parked_audio.take())
+        {
             park.pad.remove_probe(park.probe);
         }
         // Remove any captured blend overlay for this slot.
@@ -15961,7 +16075,7 @@ impl ProgramPlayer {
                 hidden: false,
                 hw_postproc: None,
                 hw_postproc_caps: None,
-                    gpu_linked: Arc::new(AtomicBool::new(false)),
+                gpu_linked: Arc::new(AtomicBool::new(false)),
                 animated_svg_rendered: false,
                 is_prerender_slot: false,
                 prerender_segment_start_ns: None,
@@ -16051,7 +16165,7 @@ impl ProgramPlayer {
                 hidden: false,
                 hw_postproc: None,
                 hw_postproc_caps: None,
-                    gpu_linked: Arc::new(AtomicBool::new(false)),
+                gpu_linked: Arc::new(AtomicBool::new(false)),
                 animated_svg_rendered: false,
                 is_prerender_slot: false,
                 prerender_segment_start_ns: None,
@@ -16468,7 +16582,8 @@ impl ProgramPlayer {
                             // is the decoder's streaming thread).  The GPU chain,
                             // when present, was pre-staged and state-synced on
                             // the main thread at slot build.
-                            match Self::link_video_pad_for_slot(pad, sink, hw_pads_for_cb.as_ref()) {
+                            match Self::link_video_pad_for_slot(pad, sink, hw_pads_for_cb.as_ref())
+                            {
                                 Ok(via_gpu) => {
                                     video_linked_for_cb.store(true, Ordering::Relaxed);
                                     gpu_linked_for_cb.store(via_gpu, Ordering::Relaxed);
@@ -17592,6 +17707,9 @@ impl ProgramPlayer {
     /// Core method: tear down all slots and rebuild for clips active at `timeline_pos`.
     fn rebuild_pipeline_at(&mut self, timeline_pos: u64) {
         self.timeline_pos_ns = timeline_pos;
+        // Any rebuild re-resolves every slot's source, so a pending swap is
+        // satisfied by it.
+        self.proxy_swap_deferred = false;
         self.sync_adjustment_timeline_pos();
         self.rebuild_adjustment_overlays();
         let rebuild_started = Instant::now();
@@ -21288,16 +21406,34 @@ mod tests {
     #[test]
     fn hw_fit_into_box_preserves_display_aspect_with_even_dims() {
         // 5.3K GoPro 4:3-ish frame into a 480×270 box: height-bound.
-        assert_eq!(ProgramPlayer::fit_into_box(5312, 4648, 1.0, 480, 270), (308, 270));
+        assert_eq!(
+            ProgramPlayer::fit_into_box(5312, 4648, 1.0, 480, 270),
+            (308, 270)
+        );
         // 16:9 into 16:9: fills the box.
-        assert_eq!(ProgramPlayer::fit_into_box(3840, 2160, 1.0, 1920, 1080), (1920, 1080));
+        assert_eq!(
+            ProgramPlayer::fit_into_box(3840, 2160, 1.0, 1920, 1080),
+            (1920, 1080)
+        );
         // Ultra-wide into 16:9: width-bound, even height.
-        assert_eq!(ProgramPlayer::fit_into_box(2560, 1080, 1.0, 1920, 1080), (1920, 810));
+        assert_eq!(
+            ProgramPlayer::fit_into_box(2560, 1080, 1.0, 1920, 1080),
+            (1920, 810)
+        );
         // Anamorphic PAR widens the display aspect.
-        assert_eq!(ProgramPlayer::fit_into_box(1440, 1080, 4.0 / 3.0, 1920, 1080), (1920, 1080));
+        assert_eq!(
+            ProgramPlayer::fit_into_box(1440, 1080, 4.0 / 3.0, 1920, 1080),
+            (1920, 1080)
+        );
         // Odd results are rounded down to even and never below 2.
-        assert_eq!(ProgramPlayer::fit_into_box(1001, 1000, 1.0, 101, 100), (100, 100));
-        assert_eq!(ProgramPlayer::fit_into_box(1, 100000, 1.0, 480, 270), (2, 270));
+        assert_eq!(
+            ProgramPlayer::fit_into_box(1001, 1000, 1.0, 101, 100),
+            (100, 100)
+        );
+        assert_eq!(
+            ProgramPlayer::fit_into_box(1, 100000, 1.0, 480, 270),
+            (2, 270)
+        );
         // Unknown size falls back to the (even) box.
         assert_eq!(ProgramPlayer::fit_into_box(0, 0, 1.0, 481, 271), (480, 270));
     }

@@ -318,9 +318,10 @@ pub fn stt_model_dir() -> PathBuf {
 // ── Worker thread ─────────────────────────────────────────────────────────
 
 fn stt_worker_loop(work_rx: mpsc::Receiver<SttJob>, result_tx: mpsc::SyncSender<WorkerUpdate>) {
-    // Whisper's inference threads inherit this: background transcription
-    // must never fight the Program Monitor for cores.
-    crate::media::cache_support::lower_current_thread_priority();
+    // Whisper's inference threads inherit this: nice 10 plus SCHED_IDLE, so
+    // a transcription already running yields its cores the moment the
+    // Program Monitor plays and picks them back up when it stops.
+    crate::media::cache_support::make_current_thread_background();
     // Model is loaded lazily on first job and kept resident.
     #[cfg(feature = "speech-to-text")]
     let mut ctx: Option<whisper_rs::WhisperContext> = None;
@@ -400,6 +401,18 @@ fn run_stt_job(
     params.set_max_len(0); // 0 = no length limit (whisper uses its own segmenting).
                            // Ensure segments break at word boundaries, not mid-word.
     params.set_split_on_word(true);
+    // whisper.cpp invokes the progress callback on this thread between its
+    // 30 s windows, with no compute threads alive. Blocking there while the
+    // Program Monitor plays pauses an in-flight transcription at the next
+    // window boundary (a few seconds in) with no loss of context, and it
+    // resumes by itself when playback stops. (A lower scheduling class
+    // alone is not enough on a laptop-class chip: CPU load lowers the
+    // shared power budget of the integrated GPU that decodes playback.)
+    params.set_progress_callback_safe(|_progress: i32| {
+        crate::media::cache_support::wait_while_playback_active(std::time::Duration::from_secs(
+            600,
+        ));
+    });
 
     // Run inference.
     let mut state = match whisper_ctx.create_state() {

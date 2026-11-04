@@ -289,6 +289,9 @@ pub(crate) struct AiIndexBacklog {
     pub transcripts_remaining: usize,
     pub visual_remaining: usize,
     pub auto_tags_remaining: usize,
+    /// Visual jobs (counted in `visual_remaining`) held back because the
+    /// source's proxy is still transcoding: they will decode the proxy.
+    pub visual_waiting_for_proxy: usize,
     /// New jobs are held back while the Program Monitor is playing.
     pub paused_for_playback: bool,
 }
@@ -5430,7 +5433,8 @@ pub(crate) fn auto_proxy_sources_from_library(
                 && !i.is_audio_only
                 && !i.is_image
                 && !i.is_animated_svg
-                && i.video_height.map_or(false, |h| threshold.applies_to_height(h))
+                && i.video_height
+                    .map_or(false, |h| threshold.applies_to_height(h))
         })
         .map(|i| i.source_path.clone())
         .collect()
@@ -6673,13 +6677,12 @@ pub fn build_window(
     let initial_show_timeline_preview = preferences_state.borrow().show_timeline_preview;
     let initial_timeline_autoscroll = preferences_state.borrow().timeline_autoscroll;
     let initial_show_track_audio_levels = preferences_state.borrow().show_track_audio_levels;
-    let (player_obj, paintable) =
-        {
-            // Global VA-API decoder ranks follow the preference (one policy
-            // for both monitors); must run before any pipeline autoplugs.
-            crate::media::hw_decode_policy::apply_va_decoder_rank_policy(initial_hw_accel);
-            Player::new(initial_hw_accel).expect("Failed to create GStreamer player")
-        };
+    let (player_obj, paintable) = {
+        // Global VA-API decoder ranks follow the preference (one policy
+        // for both monitors); must run before any pipeline autoplugs.
+        crate::media::hw_decode_policy::apply_va_decoder_rank_policy(initial_hw_accel);
+        Player::new(initial_hw_accel).expect("Failed to create GStreamer player")
+    };
     player_obj.set_source_playback_priority(initial_source_playback_priority);
     let player = Rc::new(RefCell::new(player_obj));
     let source_original_uri_for_proxy_fallback: std::sync::Arc<std::sync::Mutex<Option<String>>> =
@@ -15715,7 +15718,12 @@ pub fn build_window(
                 let (n, sum, max) = tick_stats.get();
                 let (n, sum, max) = (n + 1, sum + ms, max.max(ms));
                 if n >= 30 {
-                    log::debug!("program tick: {} ticks avg {:.2} ms max {:.2} ms", n, sum / n as f64, max);
+                    log::debug!(
+                        "program tick: {} ticks avg {:.2} ms max {:.2} ms",
+                        n,
+                        sum / n as f64,
+                        max
+                    );
                     tick_stats.set((0, 0.0, 0.0));
                 } else {
                     tick_stats.set((n, sum, max));
@@ -17926,13 +17934,12 @@ pub fn build_window(
     root_vpaned.set_start_child(Some(&top_paned));
 
     // ── Timeline ──────────────────────────────────────────────────────────
-    let (timeline_panel, timeline_ruler, timeline_area) =
-        build_timeline_panel(
-            timeline_state.clone(),
-            on_project_changed.clone(),
-            keymap.clone(),
-            actions.clone(),
-        );
+    let (timeline_panel, timeline_ruler, timeline_area) = build_timeline_panel(
+        timeline_state.clone(),
+        on_project_changed.clone(),
+        keymap.clone(),
+        actions.clone(),
+    );
 
     // Extract the track-management bar from timeline_panel so we can place
     // the keyframe dopesheet between the timeline and the bar.
@@ -18298,7 +18305,8 @@ pub fn build_window(
             let project_reload = project.clone();
             let proxy_cache_reload = proxy_cache.clone();
             let library_reload = library.clone();
-            let effective_auto_proxy_sources_reload = effective_auto_proxy_sources_for_reload.clone();
+            let effective_auto_proxy_sources_reload =
+                effective_auto_proxy_sources_for_reload.clone();
             let bg_removal_cache_reload = bg_removal_cache.clone();
             let voice_enhance_cache_reload = voice_enhance_cache.clone();
             let render_replace_cache_reload = render_replace_cache_for_reload.clone();
@@ -18372,7 +18380,8 @@ pub fn build_window(
                                     prefs.proxy_codec,
                                 )
                             };
-                            *effective_auto_proxy_sources_reload.borrow_mut() = auto_sources.clone();
+                            *effective_auto_proxy_sources_reload.borrow_mut() =
+                                auto_sources.clone();
                             prog_player_reload
                                 .borrow_mut()
                                 .set_auto_proxy_sources(auto_sources.clone());
@@ -20757,10 +20766,18 @@ pub fn build_window(
                         }
                     ));
                 }
+                let waiting = if backlog.visual_waiting_for_proxy > 0 {
+                    format!(
+                        " ({} waiting for proxies)",
+                        backlog.visual_waiting_for_proxy
+                    )
+                } else {
+                    String::new()
+                };
                 jobs.push(ActiveBackgroundJob {
                     id: "ai-index-backlog".to_string(),
                     title: "AI indexing queue".to_string(),
-                    detail: format!("{} to go", parts.join(", ")),
+                    detail: format!("{} to go{}", parts.join(", "), waiting),
                     progress_text: if backlog.paused_for_playback {
                         "Paused while playing".to_string()
                     } else {
@@ -21024,6 +21041,13 @@ pub fn build_window(
             // only consults the set when a clip's source matches,
             // and the widget queue_draw fires independently — so this
             // just keeps the set in sync without per-edit plumbing.
+            // Background analysers (thumbnails, CLIP frames) decode a ready
+            // proxy instead of the original, and in-flight indexing jobs
+            // hold off while playback runs; both read these process-wide.
+            crate::media::cache_support::set_analysis_proxy_paths(
+                proxy_cache.borrow().ready_plain_proxy_paths(),
+            );
+            crate::media::cache_support::set_playback_active(prog_player.borrow().is_playing());
             {
                 let mut ready = proxy_cache.borrow().ready_source_paths();
                 let enabled = effective_proxy_enabled.get();
@@ -21440,13 +21464,14 @@ pub fn build_window(
                 let mut transcript_cache_changed = false;
                 if !stt_results.is_empty() {
                     for result in stt_results {
-                        if crate::model::media_library::upsert_media_transcript(
+                        let library_indexed = crate::model::media_library::upsert_media_transcript(
                             &mut library_for_stt.borrow_mut(),
                             &result.source_path,
                             result.source_in_ns,
                             result.source_out_ns,
                             result.segments.clone(),
-                        ) {
+                        );
+                        if library_indexed {
                             transcript_cache_changed = true;
                         }
                         // Find the matching clip (recursively, including inside compounds).
@@ -21488,13 +21513,26 @@ pub fn build_window(
                             result.source_out_ns,
                         );
                         if found.is_none() {
-                            log::warn!(
-                                "STT result: could not find clip for source={} in={} out={} ({} segments lost)",
-                                result.source_path,
-                                result.source_in_ns,
-                                result.source_out_ns,
-                                result.segments.len(),
-                            );
+                            if library_indexed {
+                                // Automatic library indexing transcribes the
+                                // whole file; a timeline clip with that exact
+                                // range usually does not exist, and nothing
+                                // is lost — the transcript lives on the item.
+                                log::debug!(
+                                    "STT result: library item indexed for source={} in={} out={}; no timeline clip with that range",
+                                    result.source_path,
+                                    result.source_in_ns,
+                                    result.source_out_ns,
+                                );
+                            } else {
+                                log::warn!(
+                                    "STT result: could not find clip for source={} in={} out={} ({} segments lost)",
+                                    result.source_path,
+                                    result.source_in_ns,
+                                    result.source_out_ns,
+                                    result.segments.len(),
+                                );
+                            }
                         }
                         drop(proj);
 
@@ -21638,9 +21676,32 @@ pub fn build_window(
                     Vec::new()
                 };
                 backlog.visual_remaining = visual_candidates.len();
+                // A source that plays from a proxy waits for it: the job
+                // then decodes 1080p H.264 frames instead of the heavy
+                // original while the transcode is using the GPU. "Expected"
+                // rather than "pending" because a fresh import's proxy is
+                // enqueued by the media browser a tick or two after the
+                // scheduler first sees the item; a failed transcode releases
+                // the job to the original.
+                let proxy_expected_for = |source_path: &str| -> bool {
+                    let cache = proxy_cache.borrow();
+                    let wanted = effective_proxy_enabled.get()
+                        || effective_auto_proxy_sources_poll
+                            .borrow()
+                            .contains(source_path);
+                    let ready = cache.ready_plain_proxy_paths().contains_key(source_path);
+                    let failed = cache.failed_source_paths().contains(source_path);
+                    (wanted && !ready && !failed)
+                        || (cache.pending_source_paths().contains(source_path) && !ready)
+                };
+                let candidates: Vec<_> = visual_candidates
+                    .into_iter()
+                    .filter(|(source_path, _)| !proxy_expected_for(source_path))
+                    .collect();
+                backlog.visual_waiting_for_proxy =
+                    backlog.visual_remaining.saturating_sub(candidates.len());
                 ai_index_backlog_tick.set(backlog);
-                if !visual_in_flight && !playback_busy && !visual_candidates.is_empty() {
-                    let candidates = visual_candidates;
+                if !visual_in_flight && !playback_busy && !candidates.is_empty() {
                     let mut cache = clip_embedding_cache.borrow_mut();
                     for (source_path, request) in candidates {
                         match cache.request(&source_path, request.duration_ns, request.is_image) {
@@ -22071,8 +22132,9 @@ pub fn build_window(
     // ── MCP server (stdio + optional socket) ────────────────────────────
     // Command palette registry (created here so the MCP dispatch context can
     // reach it; filled after the shortcut registry below).
-    let palette_registry: Rc<RefCell<crate::ui::command_palette::CommandRegistry>> =
-        Rc::new(RefCell::new(crate::ui::command_palette::CommandRegistry::new()));
+    let palette_registry: Rc<RefCell<crate::ui::command_palette::CommandRegistry>> = Rc::new(
+        RefCell::new(crate::ui::command_palette::CommandRegistry::new()),
+    );
     {
         let mcp_receiver = mcp_receiver
             .borrow_mut()
@@ -22335,43 +22397,52 @@ pub fn build_window(
         {
             let prog_player = prog_player.clone();
             let cell = jkl_rate_cell.clone();
-            acts.bind(ActionId::ShuttleStop, Rc::new(move || {
-                cell.set(0.0);
-                prog_player.borrow_mut().set_jkl_rate(0.0);
-                true
-            }));
+            acts.bind(
+                ActionId::ShuttleStop,
+                Rc::new(move || {
+                    cell.set(0.0);
+                    prog_player.borrow_mut().set_jkl_rate(0.0);
+                    true
+                }),
+            );
         }
         {
             let prog_player = prog_player.clone();
             let cell = jkl_rate_cell.clone();
-            acts.bind(ActionId::ShuttleForward, Rc::new(move || {
-                // Cycle: stopped/reverse → 1×, then double up to 8×.
-                let new_rate = match cell.get() as i64 {
-                    r if r <= 0 => 1.0,
-                    1 => 2.0,
-                    2 => 4.0,
-                    _ => 8.0,
-                };
-                cell.set(new_rate);
-                prog_player.borrow_mut().set_jkl_rate(new_rate);
-                true
-            }));
+            acts.bind(
+                ActionId::ShuttleForward,
+                Rc::new(move || {
+                    // Cycle: stopped/reverse → 1×, then double up to 8×.
+                    let new_rate = match cell.get() as i64 {
+                        r if r <= 0 => 1.0,
+                        1 => 2.0,
+                        2 => 4.0,
+                        _ => 8.0,
+                    };
+                    cell.set(new_rate);
+                    prog_player.borrow_mut().set_jkl_rate(new_rate);
+                    true
+                }),
+            );
         }
         {
             let prog_player = prog_player.clone();
             let cell = jkl_rate_cell.clone();
-            acts.bind(ActionId::ShuttleReverse, Rc::new(move || {
-                // Cycle: stopped/forward → −1×, then double up to −8×.
-                let new_rate = match cell.get() as i64 {
-                    r if r >= 0 => -1.0,
-                    -1 => -2.0,
-                    -2 => -4.0,
-                    _ => -8.0,
-                };
-                cell.set(new_rate);
-                prog_player.borrow_mut().set_jkl_rate(new_rate);
-                true
-            }));
+            acts.bind(
+                ActionId::ShuttleReverse,
+                Rc::new(move || {
+                    // Cycle: stopped/forward → −1×, then double up to −8×.
+                    let new_rate = match cell.get() as i64 {
+                        r if r >= 0 => -1.0,
+                        -1 => -2.0,
+                        -2 => -4.0,
+                        _ => -8.0,
+                    };
+                    cell.set(new_rate);
+                    prog_player.borrow_mut().set_jkl_rate(new_rate);
+                    true
+                }),
+            );
         }
         // Add marker at the current playhead (works regardless of focus).
         {
@@ -22379,94 +22450,118 @@ pub fn build_window(
             let prog_player = prog_player.clone();
             let timeline_state = timeline_state.clone();
             let on_project_changed = on_project_changed.clone();
-            acts.bind(ActionId::AddMarker, Rc::new(move || {
-                let pos = prog_player.borrow().timeline_pos_ns;
-                let marker = crate::model::project::Marker::new(pos, "Marker");
-                {
-                    let mut st = timeline_state.borrow_mut();
-                    let mut proj = project.borrow_mut();
-                    st.history.execute(
-                        Box::new(crate::undo::AddMarkerCommand { marker }),
-                        &mut proj,
-                    );
-                }
-                on_project_changed();
-                true
-            }));
+            acts.bind(
+                ActionId::AddMarker,
+                Rc::new(move || {
+                    let pos = prog_player.borrow().timeline_pos_ns;
+                    let marker = crate::model::project::Marker::new(pos, "Marker");
+                    {
+                        let mut st = timeline_state.borrow_mut();
+                        let mut proj = project.borrow_mut();
+                        st.history.execute(
+                            Box::new(crate::undo::AddMarkerCommand { marker }),
+                            &mut proj,
+                        );
+                    }
+                    on_project_changed();
+                    true
+                }),
+            );
         }
         // Toggle timeline mini-map.
         {
             let minimap_area = minimap_area.clone();
             let minimap_toggle = minimap_toggle.clone();
             let preferences_state = preferences_state.clone();
-            acts.bind(ActionId::ToggleMinimap, Rc::new(move || {
-                let show = !minimap_area.is_visible();
-                minimap_area.set_visible(show);
-                minimap_toggle.set_label(if show {
-                    "Hide Mini-Map"
-                } else {
-                    "Show Mini-Map"
-                });
-                preferences_state.borrow_mut().show_timeline_minimap = show;
-                if show {
-                    minimap_area.queue_draw();
-                }
-                true
-            }));
+            acts.bind(
+                ActionId::ToggleMinimap,
+                Rc::new(move || {
+                    let show = !minimap_area.is_visible();
+                    minimap_area.set_visible(show);
+                    minimap_toggle.set_label(if show {
+                        "Hide Mini-Map"
+                    } else {
+                        "Show Mini-Map"
+                    });
+                    preferences_state.borrow_mut().show_timeline_minimap = show;
+                    if show {
+                        minimap_area.queue_draw();
+                    }
+                    true
+                }),
+            );
         }
         // Toggle Program Monitor HUD overlay.
         {
             let monitor_state = monitor_state.clone();
             let hud_setter = prog_hud_setter.clone();
-            acts.bind(ActionId::ToggleHud, Rc::new(move || {
-                let show = !monitor_state.borrow().show_hud;
-                hud_setter(show);
-                {
-                    let mut state = monitor_state.borrow_mut();
-                    if state.show_hud != show {
-                        state.show_hud = show;
-                        crate::ui_state::save_program_monitor_state(&state);
+            acts.bind(
+                ActionId::ToggleHud,
+                Rc::new(move || {
+                    let show = !monitor_state.borrow().show_hud;
+                    hud_setter(show);
+                    {
+                        let mut state = monitor_state.borrow_mut();
+                        if state.show_hud != show {
+                            state.show_hud = show;
+                            crate::ui_state::save_program_monitor_state(&state);
+                        }
                     }
-                }
-                true
-            }));
+                    true
+                }),
+            );
         }
         // Insert / Overwrite at playhead.
         {
             let on_insert = on_insert.clone();
-            acts.bind(ActionId::InsertAtPlayhead, Rc::new(move || {
-                on_insert();
-                true
-            }));
+            acts.bind(
+                ActionId::InsertAtPlayhead,
+                Rc::new(move || {
+                    on_insert();
+                    true
+                }),
+            );
             let on_overwrite = on_overwrite.clone();
-            acts.bind(ActionId::OverwriteAtPlayhead, Rc::new(move || {
-                on_overwrite();
-                true
-            }));
+            acts.bind(
+                ActionId::OverwriteAtPlayhead,
+                Rc::new(move || {
+                    on_overwrite();
+                    true
+                }),
+            );
         }
         {
             let on_go_to_timecode = on_go_to_timecode.clone();
-            acts.bind(ActionId::GoToTimecode, Rc::new(move || {
-                on_go_to_timecode();
-                true
-            }));
+            acts.bind(
+                ActionId::GoToTimecode,
+                Rc::new(move || {
+                    on_go_to_timecode();
+                    true
+                }),
+            );
         }
         {
             let open_preferences = open_preferences.clone();
-            acts.bind(ActionId::OpenPreferences, Rc::new(move || {
-                open_preferences();
-                true
-            }));
+            acts.bind(
+                ActionId::OpenPreferences,
+                Rc::new(move || {
+                    open_preferences();
+                    true
+                }),
+            );
         }
         // Toggle proxy playback.
         {
             let toggle_proxy_quick = toggle_proxy_quick.clone();
             let preferences_state = preferences_state.clone();
-            acts.bind(ActionId::ToggleProxyPlayback, Rc::new(move || {
-                let enabled = !preferences_state.borrow().proxy_mode.is_enabled();
-                toggle_proxy_quick(enabled);
-                true
-            }));
+            acts.bind(
+                ActionId::ToggleProxyPlayback,
+                Rc::new(move || {
+                    let enabled = !preferences_state.borrow().proxy_mode.is_enabled();
+                    toggle_proxy_quick(enabled);
+                    true
+                }),
+            );
         }
         // Generate subtitles for the selected clip.
         {
@@ -22474,27 +22569,30 @@ pub fn build_window(
             let project = project.clone();
             let timeline_state = timeline_state.clone();
             let inspector_view = inspector_view.clone();
-            acts.bind(ActionId::GenerateSubtitles, Rc::new(move || {
-                if !stt_cache.borrow().is_available() {
-                    return false;
-                }
-                let selected = timeline_state.borrow().selected_clip_id.clone();
-                if let Some(ref clip_id) = selected {
-                    let proj = project.borrow();
-                    if let Some(clip) = proj.clip_ref(clip_id) {
-                        if clip.subtitle_segments.is_empty() {
-                            stt_cache.borrow_mut().request(
-                                &clip.source_path,
-                                clip.source_in,
-                                clip.source_out,
-                                "auto",
-                            );
-                            inspector_view.stt_generating.set(true);
+            acts.bind(
+                ActionId::GenerateSubtitles,
+                Rc::new(move || {
+                    if !stt_cache.borrow().is_available() {
+                        return false;
+                    }
+                    let selected = timeline_state.borrow().selected_clip_id.clone();
+                    if let Some(ref clip_id) = selected {
+                        let proj = project.borrow();
+                        if let Some(clip) = proj.clip_ref(clip_id) {
+                            if clip.subtitle_segments.is_empty() {
+                                stt_cache.borrow_mut().request(
+                                    &clip.source_path,
+                                    clip.source_in,
+                                    clip.source_out,
+                                    "auto",
+                                );
+                                inspector_view.stt_generating.set(true);
+                            }
                         }
                     }
-                }
-                true
-            }));
+                    true
+                }),
+            );
         }
         // Command palette (re-registers the shortcut actions each time so
         // the key labels reflect the current keymap).
@@ -22504,62 +22602,74 @@ pub fn build_window(
             let window_for_key = window.clone();
             let actions_for_palette = actions.clone();
             let keymap_for_palette = keymap.clone();
-            acts.bind(ActionId::CommandPalette, Rc::new(move || {
-                register_action_commands(&registry, &actions_for_palette, &keymap_for_palette);
-                show_palette(window_for_key.upcast_ref::<gtk::Window>(), registry.clone());
-                true
-            }));
+            acts.bind(
+                ActionId::CommandPalette,
+                Rc::new(move || {
+                    register_action_commands(&registry, &actions_for_palette, &keymap_for_palette);
+                    show_palette(window_for_key.upcast_ref::<gtk::Window>(), registry.clone());
+                    true
+                }),
+            );
         }
         // Keyframe navigation on the selected clip.
-        for (id, forward) in [(ActionId::PrevKeyframe, false), (ActionId::NextKeyframe, true)] {
+        for (id, forward) in [
+            (ActionId::PrevKeyframe, false),
+            (ActionId::NextKeyframe, true),
+        ] {
             let project = project.clone();
             let timeline_state = timeline_state.clone();
             let inspector_view = inspector_view.clone();
             let prog_player = prog_player.clone();
             let timeline_panel_cell = timeline_panel_cell.clone();
-            acts.bind(id, Rc::new(move || {
-                let (clip_id, playhead) = {
-                    let st = timeline_state.borrow();
-                    (st.selected_clip_id.clone(), st.editing_playhead_ns())
-                };
-                let Some(clip_id) = clip_id else {
-                    return false;
-                };
-                let proj = project.borrow();
-                let target = proj.clip_ref(&clip_id).and_then(|clip| {
-                    let local = clip.local_timeline_position_ns(playhead);
-                    let local_target = if forward {
-                        clip.next_keyframe_local_ns(local)
-                    } else {
-                        clip.prev_keyframe_local_ns(local)
+            acts.bind(
+                id,
+                Rc::new(move || {
+                    let (clip_id, playhead) = {
+                        let st = timeline_state.borrow();
+                        (st.selected_clip_id.clone(), st.editing_playhead_ns())
                     };
-                    local_target.map(|lt| clip.timeline_start.saturating_add(lt))
-                });
-                drop(proj);
-                if let Some(ns) = target {
-                    let visual_ns = {
-                        let mut st = timeline_state.borrow_mut();
-                        st.set_playhead_visual(ns)
+                    let Some(clip_id) = clip_id else {
+                        return false;
                     };
-                    prog_player.borrow_mut().seek(visual_ns);
                     let proj = project.borrow();
-                    inspector_view.update_keyframe_indicator(&proj, visual_ns);
-                    if let Some(ref w) = *timeline_panel_cell.borrow() {
-                        w.queue_draw();
+                    let target = proj.clip_ref(&clip_id).and_then(|clip| {
+                        let local = clip.local_timeline_position_ns(playhead);
+                        let local_target = if forward {
+                            clip.next_keyframe_local_ns(local)
+                        } else {
+                            clip.prev_keyframe_local_ns(local)
+                        };
+                        local_target.map(|lt| clip.timeline_start.saturating_add(lt))
+                    });
+                    drop(proj);
+                    if let Some(ns) = target {
+                        let visual_ns = {
+                            let mut st = timeline_state.borrow_mut();
+                            st.set_playhead_visual(ns)
+                        };
+                        prog_player.borrow_mut().seek(visual_ns);
+                        let proj = project.borrow();
+                        inspector_view.update_keyframe_indicator(&proj, visual_ns);
+                        if let Some(ref w) = *timeline_panel_cell.borrow() {
+                            w.queue_draw();
+                        }
                     }
-                }
-                true
-            }));
+                    true
+                }),
+            );
         }
         // Toggle Inspector animation mode (Record Keyframes).
         {
             let inspector_view = inspector_view.clone();
-            acts.bind(ActionId::ToggleAnimationMode, Rc::new(move || {
-                let new_state = !inspector_view.animation_mode.get();
-                inspector_view.animation_mode.set(new_state);
-                inspector_view.animation_mode_btn.set_active(new_state);
-                true
-            }));
+            acts.bind(
+                ActionId::ToggleAnimationMode,
+                Rc::new(move || {
+                    let new_state = !inspector_view.animation_mode.get();
+                    inspector_view.animation_mode.set(new_state);
+                    inspector_view.animation_mode_btn.set_active(new_state);
+                    true
+                }),
+            );
         }
         // New / Open / Save drive the toolbar buttons (same flows, same
         // unsaved-changes confirmation).
@@ -22568,10 +22678,13 @@ pub fn build_window(
             (ActionId::OpenProject, toolbar_handles.btn_open.clone()),
             (ActionId::SaveProject, toolbar_handles.btn_save.clone()),
         ] {
-            acts.bind(id, Rc::new(move || {
-                btn.emit_clicked();
-                true
-            }));
+            acts.bind(
+                id,
+                Rc::new(move || {
+                    btn.emit_clicked();
+                    true
+                }),
+            );
         }
         drop(acts);
 
@@ -22779,7 +22892,12 @@ fn register_action_commands(
                 h();
             }
         });
-        reg.push(info.title, info.context.label(), shortcut.as_deref(), handler);
+        reg.push(
+            info.title,
+            info.context.label(),
+            shortcut.as_deref(),
+            handler,
+        );
     }
 }
 

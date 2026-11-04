@@ -440,6 +440,7 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
                     "compositor_frames_total": snapshot.compositor_frames_total,
                     "dropped_frames_total": snapshot.dropped_frames_total,
                     "gpu_decoded_slots": snapshot.gpu_decoded_slots,
+                    "proxy_swap_deferred": snapshot.proxy_swap_deferred,
                     "software_decoded_slots": snapshot.software_decoded_slots,
                     "hardware_decode_active": snapshot.hardware_decode_active,
                     "preview_divisor": snapshot.preview_divisor,
@@ -1344,7 +1345,11 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
             }
         }
 
-        McpCommand::SetShortcut { action_id, accelerators, reply } => {
+        McpCommand::SetShortcut {
+            action_id,
+            accelerators,
+            reply,
+        } => {
             use crate::keybindings::Chord;
             let Some(id) = crate::keybindings::ActionId::from_key(&action_id) else {
                 reply
@@ -2096,6 +2101,7 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
                         "completed": clip_p.completed,
                         "requested": clip_p.total,
                         "remaining": backlog.visual_remaining,
+                        "waiting_for_proxy": backlog.visual_waiting_for_proxy,
                     },
                     "auto_tags": {
                         "available": tags.is_available(),
@@ -7043,7 +7049,8 @@ pub(crate) fn handle_mcp_command(cmd: crate::mcp::McpCommand, ctx: McpCtx<'_>) {
                 .find(|w| {
                     w.is_visible()
                         && w.is_modal()
-                        && w.transient_for().as_ref().map(|t| t.as_ptr()) == Some(window.upcast_ref::<gtk::Window>().as_ptr())
+                        && w.transient_for().as_ref().map(|t| t.as_ptr())
+                            == Some(window.upcast_ref::<gtk::Window>().as_ptr())
                 })
                 .unwrap_or_else(|| window.clone().upcast());
             let w = target.width().max(1);
